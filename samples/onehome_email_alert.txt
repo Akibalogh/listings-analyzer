@@ -1,0 +1,27 @@
+# Sample OneHome/Matrix MLS Email Alert
+# Source: Ken Wile via OneKey MLS NY (northeastmatrixmail.com)
+# Date: 2026-02-27
+# Contains: 7 listings
+
+# Parsed listings from HTML:
+
+1. $1,295,000 | 11 Jennifer Lane, Rye Brook, NY 10573 | 4 bd | 3 ba | 2,437 sqft | MLS #964038 | New Listing
+2. $1,400,000 | 234 Judson Avenue, Dobbs Ferry, NY 10522 | 3 bd | 3 ba | 2,385 sqft | MLS #963378 | Price Increased
+3. $1,295,000 | 342 Willis Avenue, Hawthorne, NY 10532 | 4 bd | 3 ba | 3,164 sqft | MLS #961200 | New Listing
+4. $1,250,000 | 473 Winding Road N, Ardsley, NY 10502 | 3 bd | 2 ba | 2,544 sqft | MLS #951633
+5. $1,899,000 | 34 Lakeshore Drive, Eastchester, NY 10709 | 3 bd | 4 ba | 3,343 sqft | MLS #928190 | New Listing
+6. $1,390,000 | 6 Sunset Lane, Hartsdale, NY 10530 | 6 bd | 5 ba | 4,200 sqft | MLS #925476
+7. $1,950,000 | 10 Sherman Avenue, Dobbs Ferry, NY 10522 | 4 bd | 4 ba | 2,862 sqft | MLS #923146
+
+# HTML structure notes:
+# - Source: OneHome/Matrix MLS (OneKey MLS NY)
+# - Each listing is wrapped in: <!--@Record:{ID}@--> <DIV class="multiLineDisplay">
+# - CSS classes for extraction:
+#   .highlight-price    → "$1,295,000"
+#   .highlight-title    → "Residential"
+#   .highlight-description → "11 Jennifer Lane" (street)
+#   .highlight-address  → "Rye Brook, New York 10573" (city, state, zip)
+#   .highlight-specs    → "4 bd • 3 ba • 2,437 sqft" and "MLS #964038"
+#   .highlight-status   → img alt="New Listing" or "Price Increased"
+# - Each listing links to portal.onehome.com with a JWT token (expires)
+# - Record IDs match OneKey MLS internal IDs (e.g., 423643326)
