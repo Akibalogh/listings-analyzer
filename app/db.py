@@ -246,11 +246,12 @@ def save_listing(listing: ParsedListing, score: ScoringResult, email_id: int) ->
 
 
 def get_all_listings() -> list[dict]:
-    """Get all listings with their scores."""
+    """Get all listings with their scores and full scoring detail."""
     with get_connection() as conn:
         cur = conn.cursor()
         cur.execute("""
-            SELECT l.*, s.score, s.verdict, s.concerns_json, s.confidence
+            SELECT l.*, s.score, s.verdict, s.hard_results_json,
+                   s.soft_points_json, s.concerns_json, s.confidence
             FROM listings l
             LEFT JOIN scores s ON s.listing_id = l.id
             ORDER BY l.created_at DESC
