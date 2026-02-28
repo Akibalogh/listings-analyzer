@@ -22,7 +22,7 @@ import json
 import sys
 from pathlib import Path
 
-from google_auth_oauthlib.flow import InstalledAppFlow
+from google_auth_oauthlib.flow import Flow, InstalledAppFlow
 
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
@@ -30,6 +30,8 @@ SCOPES = [
 ]
 
 CREDENTIALS_FILE = Path(__file__).parent.parent / "credentials.json"
+
+REDIRECT_URI = "http://localhost:8080/"
 
 
 def main():
@@ -41,12 +43,38 @@ def main():
         print("  2. Create project 'Listings Analyzer'")
         print("  3. Enable Gmail API")
         print("  4. OAuth consent screen → External, test mode, add your email")
-        print("  5. Credentials → Create OAuth 2.0 Client ID (Desktop app)")
+        print("  5. Credentials → Create OAuth 2.0 Client ID (Desktop app or Web app)")
         print("  6. Download and save as credentials.json in the project root")
         sys.exit(1)
 
-    flow = InstalledAppFlow.from_client_secrets_file(str(CREDENTIALS_FILE), SCOPES)
-    creds = flow.run_local_server(port=0)
+    # Detect credential type (installed vs web)
+    with open(CREDENTIALS_FILE) as f:
+        creds_data = json.load(f)
+
+    if "installed" in creds_data:
+        flow = InstalledAppFlow.from_client_secrets_file(str(CREDENTIALS_FILE), SCOPES)
+        creds = flow.run_local_server(port=0)
+    elif "web" in creds_data:
+        # Web credentials need a redirect URI added to Google Cloud Console
+        print("Detected 'Web application' credentials.")
+        print(f"Make sure {REDIRECT_URI} is listed as an")
+        print("Authorized redirect URI in your Google Cloud Console.")
+        print()
+        flow = Flow.from_client_secrets_file(
+            str(CREDENTIALS_FILE),
+            scopes=SCOPES,
+            redirect_uri=REDIRECT_URI,
+        )
+        auth_url, _ = flow.authorization_url(
+            access_type="offline", prompt="consent"
+        )
+        print(f"Open this URL in your browser:\n\n  {auth_url}\n")
+        code = input("Paste the authorization code here: ").strip()
+        flow.fetch_token(code=code)
+        creds = flow.credentials
+    else:
+        print("Error: credentials.json must contain 'installed' or 'web' key")
+        sys.exit(1)
 
     print()
     print("=" * 60)
