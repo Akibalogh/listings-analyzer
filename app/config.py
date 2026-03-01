@@ -22,6 +22,15 @@ class Settings(BaseSettings):
     allowed_emails: str = "you@example.com,friend@example.com,alt@example.com"
     session_secret: str = ""
 
+    # Scheduled polling (hours between auto-polls; 0 = disabled)
+    poll_interval_hours: int = 1
+
+    # Management API key (for sync-criteria endpoint)
+    manage_key: str = ""
+
+    # AI evaluation model
+    ai_eval_model: str = "claude-haiku-4-5-20251001"
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
     @property

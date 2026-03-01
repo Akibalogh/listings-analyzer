@@ -28,6 +28,8 @@ For each listing, return a JSON object with these fields (use null if not found)
 - bathrooms: number of bathrooms (integer)
 - property_type: e.g. "Residential", "Condo", "Townhouse"
 - listing_status: e.g. "New Listing", "Price Increased", "Active"
+- listing_url: URL to the full listing page (if present)
+- description: full property description text including features, basement info, lot details, amenities (if present)
 
 Return a JSON array of listing objects. If no listings found, return [].
 Do NOT include any text outside the JSON array."""
@@ -80,6 +82,8 @@ class LLMFallbackParser(EmailParser):
                     bathrooms=int(item["bathrooms"]) if item.get("bathrooms") else None,
                     property_type=item.get("property_type"),
                     listing_status=item.get("listing_status"),
+                    listing_url=item.get("listing_url"),
+                    description=item.get("description"),
                     source_format="llm",
                 )
                 listings.append(listing)

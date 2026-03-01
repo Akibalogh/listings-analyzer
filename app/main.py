@@ -1,6 +1,10 @@
 """FastAPI app for the Listings Analyzer."""
 
+import json
 import logging
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -16,16 +20,39 @@ from app.auth import (
 )
 from app.config import settings
 from app.poller import poll_once
+from app.scorer import ai_score_listing
 
 logger = logging.getLogger(__name__)
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 
 
+def _scheduled_poll_loop(interval_hours: int):
+    """Background thread: poll Gmail on a fixed interval."""
+    interval_secs = interval_hours * 3600
+    logger.info(f"Scheduled poller started (every {interval_hours}h)")
+    while True:
+        time.sleep(interval_secs)
+        try:
+            results = poll_once()
+            logger.info(f"Scheduled poll complete: {len(results)} listing(s)")
+        except Exception:
+            logger.exception("Scheduled poll failed")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init_db()
     logger.info("Database initialized")
+
+    # Start background poller if configured
+    interval = settings.poll_interval_hours
+    if interval > 0:
+        t = threading.Thread(target=_scheduled_poll_loop, args=(interval,), daemon=True)
+        t.start()
+    else:
+        logger.info("Scheduled polling disabled (POLL_INTERVAL_HOURS=0)")
+
     yield
 
 
@@ -140,19 +167,549 @@ def trigger_poll(request: Request):
     }
 
 
-@app.get("/listings")
-def list_listings(request: Request):
-    """Get all scored listings."""
+@app.post("/reprocess")
+def reprocess_emails(request: Request):
+    """Re-fetch and re-parse all processed emails to extract listing URLs + descriptions.
+
+    Used when the parser has been updated (e.g., URL extraction added) and
+    existing listings need their URLs/descriptions backfilled.
+    """
+    from app.gmail import fetch_email_by_id
+    from app.parsers import parser_chain
+    from app.parsers.onehome import scrape_listing_description
+
     _require_auth(request)
+
+    gmail_ids = db.get_all_processed_gmail_ids()
+    updated = 0
+    scraped = 0
+    images_found = 0
+
+    for gmail_id in gmail_ids:
+        email_data = fetch_email_by_id(gmail_id)
+        if not email_data:
+            continue
+
+        # Re-parse with current parser (which now extracts URLs)
+        listings = parser_chain.parse(
+            html=email_data.get("html"),
+            text=email_data.get("text"),
+            subject=email_data.get("subject", ""),
+        )
+
+        for listing in listings:
+            if not listing.mls_id or not listing.listing_url:
+                continue
+
+            # Scrape description + images from listing page
+            description = None
+            image_urls = []
+            if listing.listing_url:
+                description, image_urls = scrape_listing_description(
+                    listing.listing_url,
+                    address=listing.address,
+                    town=listing.town,
+                    state=listing.state,
+                    zip_code=listing.zip_code,
+                    mls_id=listing.mls_id,
+                )
+                if description:
+                    scraped += 1
+
+            db.update_listing_url_by_mls(listing.mls_id, listing.listing_url, description)
+
+            # Attach scraped images if found
+            if image_urls:
+                listing_row = db.get_listing_by_mls(listing.mls_id)
+                if listing_row:
+                    db.add_listing_images(listing_row["id"], image_urls)
+                    images_found += len(image_urls)
+
+            updated += 1
+
+    # Re-score all if criteria exist
+    rescore_started = False
+    if updated > 0:
+        criteria = db.get_active_criteria()
+        if criteria:
+            _start_rescore(criteria["version"], criteria["instructions"])
+            rescore_started = True
+
+    logger.info(f"Reprocess complete: {updated} URLs updated, {scraped} descriptions scraped, {images_found} images")
+    return {
+        "emails_checked": len(gmail_ids),
+        "urls_updated": updated,
+        "descriptions_scraped": scraped,
+        "images_found": images_found,
+        "rescore_started": rescore_started,
+    }
+
+
+@app.get("/listings")
+def list_listings():
+    """Get all scored listings. Public — no auth required."""
     listings = db.get_all_listings()
     return {"count": len(listings), "listings": listings}
 
 
 @app.get("/listings/{mls_id}")
-def get_listing(request: Request, mls_id: str):
-    """Get a single listing by MLS ID."""
-    _require_auth(request)
+def get_listing(mls_id: str):
+    """Get a single listing by MLS ID. Public — no auth required."""
     listing = db.get_listing_by_mls(mls_id)
     if not listing:
         raise HTTPException(status_code=404, detail=f"Listing MLS #{mls_id} not found")
     return listing
+
+
+# --- Evaluation Criteria ---
+
+
+@app.get("/criteria")
+def get_criteria():
+    """Get the active evaluation criteria. Public — no auth required."""
+    criteria = db.get_active_criteria()
+    if not criteria:
+        return {"instructions": "", "version": 0}
+    return {
+        "instructions": criteria["instructions"],
+        "version": criteria["version"],
+        "created_by": criteria.get("created_by"),
+        "created_at": criteria.get("created_at"),
+    }
+
+
+@app.get("/criteria/history")
+def get_criteria_history():
+    """Get all saved criteria versions, newest first. Public — no auth required."""
+    history = db.get_criteria_history()
+    return [
+        {
+            "version": h["version"],
+            "created_by": h.get("created_by"),
+            "created_at": h.get("created_at"),
+            "preview": (h["instructions"] or "")[:80],
+            "instructions": h["instructions"],
+        }
+        for h in history
+    ]
+
+
+@app.put("/criteria")
+async def update_criteria(request: Request):
+    """Save new evaluation criteria and trigger background re-score."""
+    email = _require_auth(request)
+    body = await request.json()
+    instructions = body.get("instructions", "").strip()
+    if not instructions:
+        raise HTTPException(status_code=400, detail="Instructions cannot be empty")
+
+    new_version = db.save_criteria(instructions, created_by=email)
+    logger.info(f"Saved criteria v{new_version} by {email}")
+
+    # Start background re-score
+    _start_rescore(new_version, instructions)
+
+    return {"version": new_version, "rescore_started": True}
+
+
+# --- Image Management ---
+
+
+@app.post("/listings/{listing_id}/images")
+async def add_images(request: Request, listing_id: int):
+    """Attach image URLs to a listing."""
+    _require_auth(request)
+    body = await request.json()
+    image_urls = body.get("image_urls", [])
+
+    if not isinstance(image_urls, list):
+        raise HTTPException(status_code=400, detail="image_urls must be a list")
+
+    # Validate URLs (basic check)
+    for url in image_urls:
+        if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+            raise HTTPException(status_code=400, detail=f"Invalid URL: {url}")
+
+    listing = db.get_listing_by_id(listing_id)
+    if not listing:
+        raise HTTPException(status_code=404, detail=f"Listing #{listing_id} not found")
+
+    db.add_listing_images(listing_id, image_urls)
+    return {"listing_id": listing_id, "image_count": len(image_urls)}
+
+
+# --- Toured status ---
+
+
+@app.post("/listings/{listing_id}/toured")
+async def mark_toured(request: Request, listing_id: int):
+    """Mark or un-mark a listing as toured. Requires auth."""
+    _require_auth(request)
+    listing = db.get_listing_by_id(listing_id)
+    if not listing:
+        raise HTTPException(status_code=404, detail=f"Listing #{listing_id} not found")
+
+    body = await request.json()
+    toured = bool(body.get("toured", True))
+    db.mark_listing_toured(listing_id, toured)
+    return {"listing_id": listing_id, "toured": toured}
+
+
+# --- Listing URL + description scraping ---
+
+
+@app.post("/listings/{listing_id}/scrape")
+async def scrape_listing(request: Request, listing_id: int):
+    """Set a listing URL, scrape the description, and re-score."""
+    from app.parsers.onehome import scrape_listing_description
+
+    _require_auth(request)
+    body = await request.json()
+    url = (body.get("listing_url") or "").strip()
+    if not url or not url.startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="Invalid listing URL")
+
+    listing = db.get_listing_by_id(listing_id)
+    if not listing:
+        raise HTTPException(status_code=404, detail=f"Listing #{listing_id} not found")
+
+    # Scrape description + images from the listing page
+    logger.info(f"Scraping listing page for #{listing_id}: {url}")
+    description, image_urls = scrape_listing_description(
+        url,
+        address=listing.get("address"),
+        town=listing.get("town"),
+        state=listing.get("state"),
+        zip_code=listing.get("zip_code"),
+        mls_id=listing.get("mls_id"),
+    )
+
+    # Update the listing in DB
+    db.update_listing_description(listing_id, url, description)
+
+    # Attach scraped images if found
+    if image_urls:
+        db.add_listing_images(listing_id, image_urls)
+
+    # Auto re-score with new description
+    criteria = db.get_active_criteria()
+    result_info = {
+        "listing_id": listing_id,
+        "listing_url": url,
+        "description_found": description is not None,
+        "images_found": len(image_urls),
+    }
+
+    if criteria:
+        # Re-fetch listing with updated description
+        updated_listing = db.get_listing_by_id(listing_id)
+        score = _rescore_one_listing(updated_listing, criteria)
+        result_info["score"] = score.score
+        result_info["verdict"] = score.verdict
+
+    return result_info
+
+
+# --- Re-scoring ---
+
+
+@app.post("/listings/{listing_id}/rescore")
+def rescore_single(request: Request, listing_id: int):
+    """Re-score a single listing with current criteria."""
+    _require_auth(request)
+    listing = db.get_listing_by_id(listing_id)
+    if not listing:
+        raise HTTPException(status_code=404, detail=f"Listing #{listing_id} not found")
+
+    criteria = db.get_active_criteria()
+    if not criteria:
+        raise HTTPException(status_code=400, detail="No evaluation criteria configured")
+
+    result = _rescore_one_listing(listing, criteria)
+    return {
+        "listing_id": listing_id,
+        "score": result.score,
+        "verdict": result.verdict,
+        "evaluation_method": result.evaluation_method,
+    }
+
+
+@app.get("/rescore/status")
+def rescore_status():
+    """Get the status of the background re-score operation. Public — no auth required."""
+    return db.rescore_state
+
+
+# --- Background re-scoring ---
+
+
+def _rescore_one_listing(listing_row: dict, criteria: dict) -> "ScoringResult":
+    """Re-score a single listing dict using AI evaluation."""
+    from app.models import ScoringResult
+
+    listing_data = {
+        "address": listing_row.get("address"),
+        "town": listing_row.get("town"),
+        "state": listing_row.get("state"),
+        "zip_code": listing_row.get("zip_code"),
+        "mls_id": listing_row.get("mls_id"),
+        "price": listing_row.get("price"),
+        "sqft": listing_row.get("sqft"),
+        "bedrooms": listing_row.get("bedrooms"),
+        "bathrooms": listing_row.get("bathrooms"),
+        "property_type": listing_row.get("property_type"),
+        "listing_status": listing_row.get("listing_status"),
+        "description": listing_row.get("description"),
+    }
+
+    # Get image URLs if available
+    image_urls = None
+    raw_images = listing_row.get("image_urls_json")
+    if raw_images:
+        try:
+            image_urls = json.loads(raw_images)
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    score, reasoning = ai_score_listing(
+        listing_data=listing_data,
+        instructions=criteria["instructions"],
+        image_urls=image_urls,
+    )
+    score.criteria_version = criteria["version"]
+
+    db.update_score(
+        listing_id=listing_row["id"],
+        score=score,
+        method=score.evaluation_method,
+        criteria_version=criteria["version"],
+        reasoning=reasoning,
+        property_summary=score.property_summary,
+    )
+    return score
+
+
+_RESCORE_WORKERS = 1  # serialize bulk rescore to stay within 10k tokens/minute (image-heavy listings)
+
+
+def _rescore_all(criteria_version: int, instructions: str):
+    """Background thread: re-score all listings concurrently."""
+    try:
+        listing_ids = db.get_all_listing_ids()
+        db.rescore_state["total"] = len(listing_ids)
+        db.rescore_state["completed"] = 0
+
+        criteria = {"instructions": instructions, "version": criteria_version}
+
+        def _score_one(lid: int):
+            listing = db.get_listing_by_id(lid)
+            if listing:
+                _rescore_one_listing(listing, criteria)
+
+        with ThreadPoolExecutor(max_workers=_RESCORE_WORKERS) as executor:
+            futures = {executor.submit(_score_one, lid): lid for lid in listing_ids}
+            for future in as_completed(futures):
+                lid = futures[future]
+                try:
+                    future.result()
+                except Exception as e:
+                    logger.error(f"Failed to re-score listing #{lid}: {e}")
+                db.rescore_state["completed"] += 1
+
+        logger.info(
+            f"Re-score complete: {db.rescore_state['completed']}/{db.rescore_state['total']} "
+            f"listings with criteria v{criteria_version}"
+        )
+    except Exception:
+        logger.exception("Background re-score failed")
+    finally:
+        db.rescore_state["in_progress"] = False
+
+
+def _start_rescore(criteria_version: int, instructions: str):
+    """Launch background re-score thread if not already running."""
+    if db.rescore_state["in_progress"]:
+        logger.warning("Re-score already in progress, skipping")
+        return
+
+    db.rescore_state["in_progress"] = True
+    db.rescore_state["criteria_version"] = criteria_version
+    t = threading.Thread(
+        target=_rescore_all,
+        args=(criteria_version, instructions),
+        daemon=True,
+    )
+    t.start()
+
+
+# --- Management Endpoints ---
+
+
+@app.post("/manage/sync-criteria")
+def sync_criteria(request: Request):
+    """Trigger a background re-score with the current active criteria.
+
+    Protected by MANAGE_KEY env var (not user auth).
+    Useful for triggering a full rescore after deploying code changes.
+    Criteria are set via the dashboard AI Criteria panel — not hardcoded.
+    """
+    key = request.headers.get("x-manage-key", "")
+    if not settings.manage_key or key != settings.manage_key:
+        raise HTTPException(status_code=403, detail="Invalid or missing management key")
+
+    criteria = db.get_active_criteria()
+    if not criteria:
+        raise HTTPException(status_code=404, detail="No active criteria found — set criteria via AI Criteria in dashboard first")
+
+    _start_rescore(criteria["version"], criteria["instructions"])
+    logger.info(f"Triggered rescore with active criteria v{criteria['version']}")
+
+    return {
+        "synced": True,
+        "version": criteria["version"],
+        "rescore_started": True,
+        "instructions_preview": criteria["instructions"][:200] + "...",
+    }
+
+
+@app.post("/manage/reprocess")
+def manage_reprocess(request: Request):
+    """Re-fetch emails, extract URLs, scrape descriptions, and rescore.
+
+    Protected by MANAGE_KEY env var.
+    """
+    from app.gmail import fetch_email_by_id
+    from app.parsers import parser_chain
+    from app.parsers.onehome import scrape_listing_description
+
+    key = request.headers.get("x-manage-key", "")
+    if not settings.manage_key or key != settings.manage_key:
+        raise HTTPException(status_code=403, detail="Invalid or missing management key")
+
+    gmail_ids = db.get_all_processed_gmail_ids()
+    updated = 0
+    scraped = 0
+    images_found = 0
+
+    for gid in gmail_ids:
+        raw = fetch_email_by_id(gid)
+        if not raw:
+            continue
+        listings = parser_chain.parse(raw.get("html", ""), raw.get("text", ""))
+        for listing in listings:
+            if not listing.mls_id or not listing.listing_url:
+                continue
+            description = None
+            image_urls = []
+            if listing.listing_url:
+                description, image_urls = scrape_listing_description(
+                    listing.listing_url,
+                    address=listing.address,
+                    town=listing.town,
+                    state=listing.state,
+                    zip_code=listing.zip_code,
+                    mls_id=listing.mls_id,
+                )
+                if description:
+                    scraped += 1
+            db.update_listing_url_by_mls(listing.mls_id, listing.listing_url, description)
+
+            # Attach scraped images
+            if image_urls:
+                listing_row = db.get_listing_by_mls(listing.mls_id)
+                if listing_row:
+                    db.add_listing_images(listing_row["id"], image_urls)
+                    images_found += len(image_urls)
+
+            updated += 1
+
+    rescore_started = False
+    if updated > 0:
+        criteria = db.get_active_criteria()
+        if criteria:
+            _start_rescore(criteria["version"], criteria["instructions"])
+            rescore_started = True
+
+    return {
+        "emails_checked": len(gmail_ids),
+        "urls_updated": updated,
+        "descriptions_scraped": scraped,
+        "images_found": images_found,
+        "rescore_started": rescore_started,
+    }
+
+
+@app.post("/manage/scrape-descriptions")
+def manage_scrape_descriptions(request: Request):
+    """Scrape descriptions + images for listings that have URLs but no description.
+
+    Iterates existing listings in the DB directly — does NOT re-parse emails.
+    Protected by MANAGE_KEY env var.
+    """
+    from app.parsers.onehome import scrape_listing_description
+
+    key = request.headers.get("x-manage-key", "")
+    if not settings.manage_key or key != settings.manage_key:
+        raise HTTPException(status_code=403, detail="Invalid or missing management key")
+
+    listing_ids = db.get_all_listing_ids()
+    scraped = 0
+    images_found = 0
+    skipped = 0
+    errors = []
+
+    for lid in listing_ids:
+        listing = db.get_listing_by_id(lid)
+        if not listing:
+            continue
+
+        url = listing.get("listing_url")
+        existing_desc = listing.get("description")
+
+        # Skip if no URL or already has description
+        if not url:
+            skipped += 1
+            continue
+        if existing_desc:
+            skipped += 1
+            continue
+
+        logger.info(f"Scraping description for listing #{lid}: {url}")
+        try:
+            description, image_urls = scrape_listing_description(
+                url,
+                address=listing.get("address"),
+                town=listing.get("town"),
+                state=listing.get("state"),
+                zip_code=listing.get("zip_code"),
+                mls_id=listing.get("mls_id"),
+            )
+
+            if description:
+                db.update_listing_description(lid, url, description)
+                scraped += 1
+                logger.info(f"Scraped {len(description)} chars for listing #{lid}")
+
+            if image_urls:
+                db.add_listing_images(lid, image_urls)
+                images_found += len(image_urls)
+        except Exception as e:
+            logger.error(f"Failed to scrape listing #{lid} ({url}): {e}")
+            errors.append(f"#{lid}: {e}")
+
+    # Trigger rescore if we scraped anything
+    rescore_started = False
+    if scraped > 0:
+        criteria = db.get_active_criteria()
+        if criteria:
+            _start_rescore(criteria["version"], criteria["instructions"])
+            rescore_started = True
+
+    return {
+        "listings_checked": len(listing_ids),
+        "descriptions_scraped": scraped,
+        "images_found": images_found,
+        "skipped": skipped,
+        "errors": errors,
+        "rescore_started": rescore_started,
+    }

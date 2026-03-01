@@ -15,6 +15,8 @@ class ParsedListing(BaseModel):
     bathrooms: int | None = None
     property_type: str | None = None
     listing_status: str | None = None
+    listing_url: str | None = None
+    description: str | None = None  # Full listing description (scraped)
     source_format: str = "unknown"
 
 
@@ -32,3 +34,7 @@ class ScoringResult(BaseModel):
     soft_points: dict[str, int] = {}
     concerns: list[str] = []
     confidence: str = "low"  # "high", "medium", "low"
+    reasoning: str | None = None  # AI reasoning text
+    property_summary: str | None = None  # AI-generated structured factor analysis
+    evaluation_method: str = "deterministic"  # "deterministic" or "ai"
+    criteria_version: int | None = None

@@ -55,6 +55,17 @@ CREATE TABLE IF NOT EXISTS scores (
     soft_points_json TEXT,
     concerns_json TEXT,
     confidence TEXT,
+    evaluation_method TEXT DEFAULT 'deterministic',
+    criteria_version INTEGER,
+    ai_reasoning TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS evaluation_criteria (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    instructions TEXT NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1,
+    created_by TEXT,
     created_at TEXT DEFAULT (datetime('now'))
 );
 """
@@ -100,6 +111,17 @@ CREATE TABLE IF NOT EXISTS scores (
     soft_points_json TEXT,
     concerns_json TEXT,
     confidence TEXT,
+    evaluation_method TEXT DEFAULT 'deterministic',
+    criteria_version INTEGER,
+    ai_reasoning TEXT,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS evaluation_criteria (
+    id SERIAL PRIMARY KEY,
+    instructions TEXT NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1,
+    created_by TEXT,
     created_at TIMESTAMP DEFAULT NOW()
 );
 """
@@ -133,6 +155,10 @@ def get_connection():
             conn.close()
 
 
+# In-memory re-score state (single-instance app)
+rescore_state = {"in_progress": False, "total": 0, "completed": 0, "criteria_version": 0}
+
+
 def init_db():
     """Create tables if they don't exist."""
     schema = SCHEMA_PG if settings.is_postgres else SCHEMA
@@ -142,6 +168,10 @@ def init_db():
             statement = statement.strip()
             if statement:
                 cur.execute(statement)
+
+    # Add columns to existing tables (idempotent)
+    _migrate_add_columns()
+
     logger.info("Database initialized")
 
 
@@ -185,6 +215,27 @@ def is_email_processed(gmail_id: str) -> bool:
         return cur.fetchone() is not None
 
 
+def get_all_processed_gmail_ids() -> list[str]:
+    """Get all processed email Gmail IDs for reprocessing."""
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT gmail_id FROM processed_emails ORDER BY id")
+        return [row[0] for row in cur.fetchall()]
+
+
+def update_listing_url_by_mls(mls_id: str, listing_url: str, description: str | None):
+    """Update listing URL and description for a listing found by MLS ID."""
+    if not mls_id:
+        return
+    ph = _placeholder()
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            f"UPDATE listings SET listing_url = {ph}, description = {ph} WHERE mls_id = {ph} AND (listing_url IS NULL OR listing_url = '')",
+            (listing_url, description, mls_id),
+        )
+
+
 def is_listing_duplicate(mls_id: str) -> bool:
     """Check if a listing with this MLS ID already exists."""
     if not mls_id:
@@ -205,8 +256,9 @@ def save_listing(listing: ParsedListing, score: ScoringResult, email_id: int) ->
         cur.execute(
             f"""INSERT INTO listings
             (source_email_id, address, town, state, zip_code, mls_id, price, sqft,
-             bedrooms, bathrooms, property_type, listing_status, source_format)
-            VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})""",
+             bedrooms, bathrooms, property_type, listing_status, source_format,
+             listing_url, description)
+            VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})""",
             (
                 email_id,
                 listing.address,
@@ -221,6 +273,8 @@ def save_listing(listing: ParsedListing, score: ScoringResult, email_id: int) ->
                 listing.property_type,
                 listing.listing_status,
                 listing.source_format,
+                listing.listing_url,
+                listing.description,
             ),
         )
 
@@ -251,7 +305,9 @@ def get_all_listings() -> list[dict]:
         cur = conn.cursor()
         cur.execute("""
             SELECT l.*, s.score, s.verdict, s.hard_results_json,
-                   s.soft_points_json, s.concerns_json, s.confidence
+                   s.soft_points_json, s.concerns_json, s.confidence,
+                   s.evaluation_method, s.criteria_version, s.ai_reasoning,
+                   s.property_summary
             FROM listings l
             LEFT JOIN scores s ON s.listing_id = l.id
             ORDER BY l.created_at DESC
@@ -271,7 +327,8 @@ def get_listing_by_mls(mls_id: str) -> dict | None:
     with get_connection() as conn:
         cur = conn.cursor()
         cur.execute(
-            f"""SELECT l.*, s.score, s.verdict, s.hard_results_json, s.concerns_json, s.confidence
+            f"""SELECT l.*, s.score, s.verdict, s.hard_results_json, s.concerns_json, s.confidence,
+                       s.evaluation_method, s.criteria_version, s.ai_reasoning, s.property_summary
             FROM listings l
             LEFT JOIN scores s ON s.listing_id = l.id
             WHERE l.mls_id = {ph}""",
@@ -286,3 +343,204 @@ def get_listing_by_mls(mls_id: str) -> dict | None:
             return dict(zip(columns, row))
         else:
             return dict(row)
+
+
+# --- Schema migrations (idempotent) ---
+
+
+def _migrate_add_columns():
+    """Add new columns to existing tables. Safe to run multiple times.
+
+    Uses per-statement connections for Postgres compatibility — a failed
+    ALTER TABLE (column already exists) aborts the transaction in Postgres,
+    so each attempt needs its own connection.
+    """
+    alterations = [
+        ("listings", "listing_url", "TEXT"),
+        ("listings", "image_urls_json", "TEXT"),
+        ("listings", "description", "TEXT"),
+        ("listings", "toured", "BOOLEAN DEFAULT FALSE"),
+        ("scores", "evaluation_method", "TEXT DEFAULT 'deterministic'"),
+        ("scores", "criteria_version", "INTEGER"),
+        ("scores", "ai_reasoning", "TEXT"),
+        ("scores", "property_summary", "TEXT"),
+    ]
+    for table, column, col_type in alterations:
+        try:
+            with get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+        except Exception:
+            pass  # Column already exists
+
+
+# --- Evaluation criteria CRUD ---
+
+
+def get_active_criteria() -> dict | None:
+    """Get the current evaluation criteria (highest version)."""
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM evaluation_criteria ORDER BY version DESC LIMIT 1")
+        row = cur.fetchone()
+        if not row:
+            return None
+        if settings.is_postgres:
+            columns = [desc[0] for desc in cur.description]
+            return dict(zip(columns, row))
+        return dict(row)
+
+
+def get_criteria_history() -> list[dict]:
+    """Get all evaluation criteria versions, newest first."""
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, version, instructions, created_by, created_at FROM evaluation_criteria ORDER BY version DESC"
+        )
+        rows = cur.fetchall()
+        if settings.is_postgres:
+            columns = [desc[0] for desc in cur.description]
+            return [dict(zip(columns, row)) for row in rows]
+        return [dict(row) for row in rows]
+
+
+def save_criteria(instructions: str, created_by: str) -> int:
+    """Save new evaluation criteria. Returns the new version number."""
+    ph = _placeholder()
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT COALESCE(MAX(version), 0) FROM evaluation_criteria")
+        max_version = cur.fetchone()[0]
+        new_version = max_version + 1
+        cur.execute(
+            f"INSERT INTO evaluation_criteria (instructions, version, created_by) VALUES ({ph}, {ph}, {ph})",
+            (instructions, new_version, created_by),
+        )
+        return new_version
+
+
+# --- Score upsert ---
+
+
+def update_score(
+    listing_id: int,
+    score: ScoringResult,
+    method: str,
+    criteria_version: int | None,
+    reasoning: str | None,
+    property_summary: str | None = None,
+):
+    """Upsert a score for a listing."""
+    ph = _placeholder()
+    hard_json = json.dumps([hr.model_dump() for hr in score.hard_results])
+    soft_json = json.dumps(score.soft_points)
+    concerns_json = json.dumps(score.concerns)
+
+    with get_connection() as conn:
+        cur = conn.cursor()
+        if settings.is_postgres:
+            cur.execute(
+                """INSERT INTO scores
+                (listing_id, score, verdict, hard_results_json, soft_points_json,
+                 concerns_json, confidence, evaluation_method, criteria_version,
+                 ai_reasoning, property_summary)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (listing_id) DO UPDATE SET
+                    score = EXCLUDED.score, verdict = EXCLUDED.verdict,
+                    hard_results_json = EXCLUDED.hard_results_json,
+                    soft_points_json = EXCLUDED.soft_points_json,
+                    concerns_json = EXCLUDED.concerns_json,
+                    confidence = EXCLUDED.confidence,
+                    evaluation_method = EXCLUDED.evaluation_method,
+                    criteria_version = EXCLUDED.criteria_version,
+                    ai_reasoning = EXCLUDED.ai_reasoning,
+                    property_summary = EXCLUDED.property_summary""",
+                (listing_id, score.score, score.verdict, hard_json, soft_json,
+                 concerns_json, score.confidence, method, criteria_version,
+                 reasoning, property_summary),
+            )
+        else:
+            cur.execute(
+                """INSERT INTO scores
+                (listing_id, score, verdict, hard_results_json, soft_points_json,
+                 concerns_json, confidence, evaluation_method, criteria_version,
+                 ai_reasoning, property_summary)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (listing_id) DO UPDATE SET
+                    score = excluded.score, verdict = excluded.verdict,
+                    hard_results_json = excluded.hard_results_json,
+                    soft_points_json = excluded.soft_points_json,
+                    concerns_json = excluded.concerns_json,
+                    confidence = excluded.confidence,
+                    evaluation_method = excluded.evaluation_method,
+                    criteria_version = excluded.criteria_version,
+                    ai_reasoning = excluded.ai_reasoning,
+                    property_summary = excluded.property_summary""",
+                (listing_id, score.score, score.verdict, hard_json, soft_json,
+                 concerns_json, score.confidence, method, criteria_version,
+                 reasoning, property_summary),
+            )
+
+
+# --- Image management ---
+
+
+def add_listing_images(listing_id: int, image_urls: list[str]):
+    """Set image URLs for a listing."""
+    ph = _placeholder()
+    urls_json = json.dumps(image_urls)
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            f"UPDATE listings SET image_urls_json = {ph} WHERE id = {ph}",
+            (urls_json, listing_id),
+        )
+
+
+def update_listing_description(listing_id: int, listing_url: str, description: str | None):
+    """Update the listing URL and scraped description."""
+    ph = _placeholder()
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            f"UPDATE listings SET listing_url = {ph}, description = {ph} WHERE id = {ph}",
+            (listing_url, description, listing_id),
+        )
+
+
+def mark_listing_toured(listing_id: int, toured: bool):
+    """Mark (or un-mark) a listing as toured."""
+    ph = _placeholder()
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            f"UPDATE listings SET toured = {ph} WHERE id = {ph}",
+            (toured, listing_id),
+        )
+
+
+# --- Listing queries for re-scoring ---
+
+
+def get_all_listing_ids() -> list[int]:
+    """Get all listing IDs for re-scoring."""
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM listings ORDER BY id")
+        return [row[0] for row in cur.fetchall()]
+
+
+def get_listing_by_id(listing_id: int) -> dict | None:
+    """Get a single listing by internal ID (for re-scoring)."""
+    ph = _placeholder()
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(f"SELECT * FROM listings WHERE id = {ph}", (listing_id,))
+        row = cur.fetchone()
+        if not row:
+            return None
+        if settings.is_postgres:
+            columns = [desc[0] for desc in cur.description]
+            return dict(zip(columns, row))
+        return dict(row)
