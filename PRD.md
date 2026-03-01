@@ -196,13 +196,14 @@ Listing data (address, description, etc.) could contain malicious instructions.
 Mobile-first single-page app served at `/` (`app/templates/dashboard.html`).
 
 ### Auth Model
-- **Public (no login required):** view listings, scores, filter/sort, expand card details
-- **Auth-required (Google sign-in):** Check Email, AI Criteria, Reprocess, Mark as Toured, Scrape & Score
+- **Public (no login required):** view listings, scores, filter/sort, expand card details, view AI criteria (read-only)
+- **Auth-required (Google sign-in):** Check Email, edit AI Criteria, Reprocess, Mark as Toured, Scrape & Score
 - Unauthenticated users see a "Sign in" button in the header; action buttons are hidden
+- AI Criteria panel: always accessible (read-only for anonymous, editable for authed); "Save & Re-score All" and Maintenance section hidden when not logged in
 
 ### Header
 - App title
-- "✨ AI Criteria" button → settings overlay *(auth-only)*
+- "✨ AI Criteria" button → settings overlay *(always visible — read-only when not logged in)*
 - "Check Email" button → triggers `POST /poll` *(auth-only)*
 - "Sign out" button *(auth-only)* / "Sign in" button *(unauthenticated)*
 
@@ -225,7 +226,7 @@ Mobile-first single-page app served at `/` (`app/templates/dashboard.html`).
 - Filter counts shown on chips
 
 ### Settings Panel (overlay)
-- Textarea with current AI evaluation instructions *(auth-only)*
+- Textarea with current AI evaluation instructions *(always visible; read-only for anonymous, editable for authed)*
 - Version indicator (version number + created_by)
 - "Save & Re-score All" button
 - Re-score progress bar (polls `GET /rescore/status` every 2s)

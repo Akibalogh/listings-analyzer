@@ -197,7 +197,6 @@
   .auth-only { display: none !important; }
   .authed .auth-only { display: flex !important; }
   /* Fix for inline auth-only buttons */
-  .authed .auth-only.settings-btn,
   .authed .auth-only.poll-btn,
   .authed .auth-only.logout-btn { display: flex !important; }
 
@@ -961,7 +960,7 @@
       </div>
       <div class="header-actions">
         <span class="user-email auth-only" id="userEmail"></span>
-        <button class="settings-btn auth-only" onclick="openSettings()" title="AI Scoring Criteria">&#10024; AI Criteria</button>
+        <button class="settings-btn" onclick="openSettings()" title="AI Scoring Criteria">&#10024; AI Criteria</button>
         <button class="poll-btn auth-only" id="pollBtn" onclick="pollNow()">
           Check Email
         </button>
@@ -999,15 +998,16 @@
     <h2>Evaluation Criteria</h2>
     <div class="settings-version" id="criteriaVersion"></div>
     <textarea id="criteriaText" placeholder="Enter your evaluation instructions here..."></textarea>
+    <div class="settings-readonly-note" id="readonlyNote" style="display:none;font-size:12px;color:var(--text-muted);margin-top:4px;font-style:italic">Sign in to edit criteria</div>
     <div class="rescore-bar" id="rescoreBar">
       <div class="bar-track"><div class="bar-fill" id="rescoreFill" style="width:0%"></div></div>
       <div class="bar-label" id="rescoreLabel">Re-scoring...</div>
     </div>
     <div class="settings-actions">
-      <button class="settings-cancel-btn" onclick="closeSettings()">Cancel</button>
+      <button class="settings-cancel-btn" id="settingsCloseBtn" onclick="closeSettings()">Close</button>
       <button class="settings-save-btn" id="saveCriteriaBtn" onclick="saveCriteria()">Save &amp; Re-score All</button>
     </div>
-    <div style="margin-top:18px;padding-top:18px;border-top:1px solid var(--border)">
+    <div id="maintenanceSection" style="margin-top:18px;padding-top:18px;border-top:1px solid var(--border)">
       <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.6px;color:var(--text-faint);margin-bottom:8px">Maintenance</div>
       <button class="settings-cancel-btn" id="reprocessBtn" onclick="reprocessEmails()" style="font-size:13px">Reprocess Emails (extract URLs &amp; descriptions)</button>
       <div id="reprocessStatus" style="font-size:12px;color:var(--text-muted);margin-top:6px"></div>
@@ -1574,11 +1574,20 @@ async function rescoreListing(listingId) {
 
 async function openSettings() {
   document.getElementById('settingsOverlay').classList.add('open');
+  var textarea = document.getElementById('criteriaText');
+  var isAuthed = !!currentUser;
+  /* Toggle read-only state for anonymous users */
+  textarea.readOnly = !isAuthed;
+  textarea.style.opacity = isAuthed ? '1' : '0.8';
+  textarea.style.cursor = isAuthed ? '' : 'default';
+  document.getElementById('readonlyNote').style.display = isAuthed ? 'none' : '';
+  document.getElementById('saveCriteriaBtn').style.display = isAuthed ? '' : 'none';
+  document.getElementById('maintenanceSection').style.display = isAuthed ? '' : 'none';
   try {
     var res = await fetch('/criteria');
     if (res.ok) {
       var data = await res.json();
-      document.getElementById('criteriaText').value = data.instructions || '';
+      textarea.value = data.instructions || '';
       document.getElementById('criteriaVersion').textContent =
         data.version ? 'Version ' + data.version + (data.created_by ? ' \u2022 ' + data.created_by : '') : '';
     }
@@ -1632,7 +1641,11 @@ async function loadCriteriaHistory() {
 
 function loadVersion(instructions, version) {
   document.getElementById('criteriaText').value = instructions;
-  showToast('Loaded v' + version + ' \u2014 click \u201CSave & Re-score All\u201D to apply');
+  if (currentUser) {
+    showToast('Loaded v' + version + ' \u2014 click \u201CSave & Re-score All\u201D to apply');
+  } else {
+    showToast('Viewing v' + version);
+  }
 }
 
 async function saveCriteria() {
