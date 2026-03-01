@@ -572,6 +572,115 @@ def sync_criteria(request: Request):
     }
 
 
+@app.post("/manage/poll")
+def manage_poll(request: Request):
+    """Trigger a Gmail poll cycle. Protected by MANAGE_KEY env var.
+
+    Same as POST /poll but uses management key instead of Google session auth.
+    """
+    key = request.headers.get("x-manage-key", "")
+    if not settings.manage_key or key != settings.manage_key:
+        raise HTTPException(status_code=403, detail="Invalid or missing management key")
+
+    results = poll_once()
+    return {
+        "listings_processed": len(results),
+        "results": results,
+    }
+
+
+@app.post("/manage/cleanup")
+def manage_cleanup(request: Request, body: dict = {}):
+    """Delete listings by ID list. Protected by MANAGE_KEY env var.
+
+    Body: {"listing_ids": [8, 9, 10, ...]}
+    """
+    key = request.headers.get("x-manage-key", "")
+    if not settings.manage_key or key != settings.manage_key:
+        raise HTTPException(status_code=403, detail="Invalid or missing management key")
+
+    listing_ids = body.get("listing_ids", [])
+    if not listing_ids:
+        raise HTTPException(status_code=400, detail="Provide listing_ids in JSON body")
+
+    deleted = 0
+    with db.get_connection() as conn:
+        cur = conn.cursor()
+        ph = db._placeholder()
+        for lid in listing_ids:
+            cur.execute(f"DELETE FROM scores WHERE listing_id = {ph}", (lid,))
+            cur.execute(f"DELETE FROM listings WHERE id = {ph}", (lid,))
+            deleted += cur.rowcount
+        conn.commit()
+
+    return {"deleted": deleted, "listing_ids": listing_ids}
+
+
+@app.post("/manage/reset-emails")
+def manage_reset_emails(request: Request):
+    """Reset processed emails so they get re-ingested on next poll.
+
+    Clears processed_emails records that have no remaining listings,
+    and removes the Gmail 'Processed' label so the emails reappear.
+
+    Protected by MANAGE_KEY env var.
+    """
+    from app.gmail import _build_service, _get_or_create_label, PROCESSED_LABEL
+
+    key = request.headers.get("x-manage-key", "")
+    if not settings.manage_key or key != settings.manage_key:
+        raise HTTPException(status_code=403, detail="Invalid or missing management key")
+
+    # Find processed_emails with no remaining listings
+    with db.get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT pe.id, pe.gmail_id
+            FROM processed_emails pe
+            LEFT JOIN listings l ON l.source_email_id = pe.id
+            WHERE l.id IS NULL
+        """)
+        if settings.is_postgres:
+            orphans = [(row[0], row[1]) for row in cur.fetchall()]
+        else:
+            orphans = [(row["id"], row["gmail_id"]) for row in cur.fetchall()]
+
+    if not orphans:
+        return {"reset": 0, "message": "No orphaned processed emails found"}
+
+    # Remove Gmail label from orphaned emails
+    gmail_reset = 0
+    try:
+        service = _build_service()
+        label_id = _get_or_create_label(service)
+        for _, gmail_id in orphans:
+            try:
+                service.users().messages().modify(
+                    userId="me",
+                    id=gmail_id,
+                    body={"removeLabelIds": [label_id]},
+                ).execute()
+                gmail_reset += 1
+            except Exception as e:
+                logger.warning(f"Failed to remove label from {gmail_id}: {e}")
+    except Exception as e:
+        logger.error(f"Failed to connect to Gmail: {e}")
+
+    # Delete orphaned processed_emails records from DB
+    ph = db._placeholder()
+    with db.get_connection() as conn:
+        cur = conn.cursor()
+        for pe_id, _ in orphans:
+            cur.execute(f"DELETE FROM processed_emails WHERE id = {ph}", (pe_id,))
+        conn.commit()
+
+    return {
+        "reset": len(orphans),
+        "gmail_labels_removed": gmail_reset,
+        "email_ids": [gid for _, gid in orphans],
+    }
+
+
 @app.post("/manage/reprocess")
 def manage_reprocess(request: Request):
     """Re-fetch emails, extract URLs, scrape descriptions, and rescore.

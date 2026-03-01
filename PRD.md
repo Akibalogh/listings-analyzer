@@ -58,7 +58,9 @@ You want:
 ### Input Layer
 - **Gmail API** auto-polls for new listing alert emails
 - Supports forwarded emails (detects and unwraps)
-- Configurable sender list (env var `ALERT_SENDERS`)
+- Configurable sender list (env var `ALERT_SENDERS`) — supports domain-level matching (e.g., `redfin.com` catches all senders from that domain)
+- Date-filtered senders (env var `SENDER_DATE_FILTERS`, format: `email:days,email:days`) — for personal contacts where only recent emails are relevant
+- Separate Gmail queries per sender group with deduplication
 - Processes each email once, marks with `ListingsAnalyzer/Processed` label
 
 ### Known Input Format: OneHome/Matrix MLS Email
@@ -76,7 +78,7 @@ Primary alert source is OneKey MLS NY via `mlsalerts.example.com`.
 
 **Parsing strategy (parser chain):**
 1. **OneHome HTML parser** (`app/parsers/onehome.py`) — BeautifulSoup CSS selectors (fast, deterministic)
-2. **Plain text parser** (`app/parsers/plaintext.py`) — regex for `$price`, `N bd`, `N ba`, `N,NNN sqft`, `MLS #NNNNNN`
+2. **Plain text parser** (`app/parsers/plaintext.py`) — regex for `$price`, `N bd`, `N ba`, `N,NNN sqft`, `MLS #NNNNNN`; extracts inline addresses (`31 Lalli Dr, Katonah, NY 10536`) and listing URLs (Redfin, OneKeyMLS, OneHome)
 3. **LLM fallback parser** (`app/parsers/llm.py`) — Claude Haiku for ambiguous/unknown formats
 
 ### Parsing Layer
@@ -300,6 +302,9 @@ Mobile-first single-page app served at `/` (`app/templates/dashboard.html`).
 ### Management (API key protected, `MANAGE_KEY` env var)
 - `POST /manage/sync-criteria` — trigger rescore with current active criteria from DB
 - `POST /manage/reprocess` — re-fetch emails, extract URLs, scrape descriptions, rescore
+- `POST /manage/poll` — trigger email poll without Google auth
+- `POST /manage/cleanup` — delete listings by ID list (body: `{"listing_ids": [1,2,3]}`)
+- `POST /manage/reset-emails` — clear orphaned processed_emails and remove Gmail labels for re-ingestion
 
 ## 9. Key Technical Decisions
 

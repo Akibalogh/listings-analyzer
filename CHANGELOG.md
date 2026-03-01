@@ -7,15 +7,22 @@ All notable changes to Listings Analyzer are documented here.
 ## [Unreleased]
 
 ### Added
+- **Domain-level email source matching** — `ALERT_SENDERS` supports domain-level matching (e.g., `redfin.com` catches all Redfin senders: daily alerts, tour confirmations, favorited homes, market updates)
+- **Date-filtered sender support** — `SENDER_DATE_FILTERS` env var (format: `email:days,email:days`) enables time-bounded email ingestion for senders like personal contacts; separate Gmail queries with `newer_than:Nd`
+- **Inline address extraction** — PlainTextParser now handles Redfin-style inline addresses (`31 Lalli Dr, Katonah, NY 10536`) via `INLINE_ADDR_RE` regex; falls back after standalone street/city patterns
+- **Listing URL extraction in PlainTextParser** — `LISTING_URL_RE` extracts Redfin, OneKeyMLS, and OneHome listing URLs from plain text emails; filters out non-listing URLs (tours, checkout, blog)
+- **Management endpoints** — `POST /manage/cleanup` (delete listings by ID), `POST /manage/reset-emails` (clear orphaned processed emails + remove Gmail labels for re-ingestion)
 - `GET /criteria/history` endpoint — returns all saved criteria versions, newest first (public, no auth); includes version number, created_by, created_at, 80-char preview, and full instructions
 - Version history panel in the AI Criteria settings overlay; click any past version to load it into the editor; "Current" badge on the active version
 - `get_criteria_history()` in `db.py`
 - **OneKey MLS fallback scraper** — `_try_onekeymls()` in `onehome.py`; URL constructed from `address-town-state-zip/mls_id`; works from cloud IPs where Redfin is blocked; wired into fallback chain (OneHome → OneKey MLS → Redfin DDG; Redfin → static → Jina → OneKey MLS)
 - **`/manage/scrape-descriptions` endpoint** — scrapes descriptions + images for listings with URLs but no description; iterates DB directly (no email re-parsing); protected by MANAGE_KEY; triggers rescore if descriptions found
-- 15 new tests: verdict/score consistency boundary tests (7), manage/scrape-descriptions endpoint (8)
+- 29 new tests: email source config (6), URL extraction (4), inline address (4), verdict/score consistency (7), manage/scrape-descriptions (8)
 - **Read-only AI Criteria for anonymous users** — "✨ AI Criteria" button always visible; settings panel opens in read-only mode (textarea disabled, save/maintenance hidden) for unauthenticated users; sign in to edit
 
 ### Changed
+- **Email fetching refactored** — `fetch_new_emails()` now runs multiple query groups (regular senders + date-filtered senders) with deduplication via `_fetch_query()` helper; replaces single-query approach
+- **ALERT_SENDERS default** updated from individual Redfin addresses to `redfin.com,alerts@mls.example.com` (domain-level matching)
 - **Serialized bulk re-scoring** — `_RESCORE_WORKERS` reduced from 5 to 1; image-heavy listings (18-46 images each) exceed Anthropic's 10k tokens/minute org limit when run concurrently; serial execution avoids rate limiting
 - **Verdict/score consistency enforcement** in `_validate_ai_response()` — "Reject" always forces score=0; non-Reject verdicts always re-derived from score (80+=Strong Match, 60+=Worth Touring, 40+=Low Priority, >0=Pass); prevents filter chip mismatches
 - **Selector-first description extraction** — site-specific CSS selectors (`section#overview` for OneKey MLS, `div#house-info`/`.remarksContainer` for Redfin) tried before keyword-based fallback; prevents navigation/UI boilerplate from beating real descriptions

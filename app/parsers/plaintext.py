@@ -16,11 +16,37 @@ SQFT_RE = re.compile(r"([\d,]+)\s*(?:sq\s*\.?\s*ft|sqft|SF)", re.IGNORECASE)
 MLS_RE = re.compile(r"MLS\s*#?\s*(\d+)", re.IGNORECASE)
 ZIP_RE = re.compile(r"\b(\d{5})(?:-\d{4})?\b")
 
-# Street address: starts with a number, has a street name
-STREET_RE = re.compile(r"^\s*(\d+\s+[\w\s.]+(?:Street|St|Avenue|Ave|Lane|Ln|Drive|Dr|Road|Rd|Court|Ct|Place|Pl|Way|Circle|Cir|Boulevard|Blvd|Terrace|Ter)\.?)\s*$", re.IGNORECASE | re.MULTILINE)
+# Street suffixes for address matching
+_SUFFIXES = r"(?:Street|St|Avenue|Ave|Lane|Ln|Drive|Dr|Road|Rd|Court|Ct|Place|Pl|Way|Circle|Cir|Boulevard|Blvd|Terrace|Ter)"
 
-# City, State ZIP on its own line (city must start with a letter, not a digit)
-CITY_STATE_ZIP_RE = re.compile(r"^\s*([A-Za-z][\w\s]*?),\s*([A-Za-z][\w\s]*?)\s+(\d{5}(?:-\d{4})?)\s*$", re.MULTILINE)
+# Street address on its own line: "11 Jennifer Lane"
+STREET_RE = re.compile(
+    rf"^\s*(\d+\s+[\w\s.]+{_SUFFIXES}\.?)\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+# City, State ZIP on its own line: "Rye Brook, New York 10573"
+CITY_STATE_ZIP_RE = re.compile(
+    r"^\s*([A-Za-z][\w\s]*?),\s*([A-Za-z][\w\s]*?)\s+(\d{5}(?:-\d{4})?)\s*$",
+    re.MULTILINE,
+)
+
+# Inline address: "31 Lalli Dr, Katonah, NY 10536" (Redfin email format)
+# Uses [^\n,]+ to prevent matching across lines or past commas
+INLINE_ADDR_RE = re.compile(
+    rf"(\d+[^\n,]+{_SUFFIXES}\.?)\s*,\s*([A-Za-z][^\n,]*?)\s*,\s*([A-Z]{{2}})\s+(\d{{5}}(?:-\d{{4}})?)",
+    re.IGNORECASE,
+)
+
+# Listing URLs — only actual listing/property pages, not tours/checkout/blog
+LISTING_URL_RE = re.compile(
+    r"https?://(?:www\.)?(?:"
+    r"redfin\.com/[A-Z]{2}/[^/]+/[^/]+/\S+"  # redfin.com/NY/City/Address/home/123
+    r"|onekeymls\.com/listing/\S+"
+    r"|onehome\.com/\S+"
+    r")",
+    re.IGNORECASE,
+)
 
 # Detect if text has listing-like content
 LISTING_INDICATORS = [PRICE_RE, MLS_RE, BEDS_RE]
@@ -100,7 +126,12 @@ class PlainTextParser(EmailParser):
         if mls_match:
             listing.mls_id = mls_match.group(1)
 
-        # Try to find address
+        # Try to find listing URL
+        url_match = LISTING_URL_RE.search(block)
+        if url_match:
+            listing.listing_url = url_match.group(0).rstrip(".,;:)")
+
+        # Try to find address — first try standalone line, then inline format
         street_match = STREET_RE.search(block)
         if street_match:
             listing.address = street_match.group(1).strip()
@@ -110,8 +141,18 @@ class PlainTextParser(EmailParser):
             listing.town = city_match.group(1).strip()
             listing.state = city_match.group(2).strip()
             listing.zip_code = city_match.group(3).strip()
-        elif not listing.town:
-            # Try to get just the zip
+
+        # Fallback: inline address format ("31 Lalli Dr, Katonah, NY 10536")
+        if not listing.address:
+            inline_match = INLINE_ADDR_RE.search(block)
+            if inline_match:
+                listing.address = inline_match.group(1).strip()
+                listing.town = inline_match.group(2).strip()
+                listing.state = inline_match.group(3).strip()
+                listing.zip_code = inline_match.group(4).strip()
+
+        # Last resort: just grab the zip code
+        if not listing.town and not listing.address:
             zip_match = ZIP_RE.search(block)
             if zip_match:
                 listing.zip_code = zip_match.group(1)

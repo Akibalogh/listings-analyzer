@@ -418,3 +418,40 @@ class TestManageScrapeDescriptions:
         assert data["descriptions_scraped"] == 0
         assert len(data["errors"]) == 1
         assert "#1" in data["errors"][0]
+
+
+class TestDateFilteredSenderConfig:
+    """Tests for SENDER_DATE_FILTERS config parsing."""
+
+    def test_parses_single_entry(self):
+        from app.config import Settings
+        s = Settings(sender_date_filters="bronwyn@gmail.com:21")
+        assert s.date_filtered_sender_list == [("bronwyn@gmail.com", 21)]
+
+    def test_parses_multiple_entries(self):
+        from app.config import Settings
+        s = Settings(sender_date_filters="a@b.com:21,c@d.com:7")
+        assert s.date_filtered_sender_list == [("a@b.com", 21), ("c@d.com", 7)]
+
+    def test_empty_string_returns_empty(self):
+        from app.config import Settings
+        s = Settings(sender_date_filters="")
+        assert s.date_filtered_sender_list == []
+
+    def test_whitespace_only_returns_empty(self):
+        from app.config import Settings
+        s = Settings(sender_date_filters="   ")
+        assert s.date_filtered_sender_list == []
+
+    def test_ignores_invalid_entries(self):
+        from app.config import Settings
+        s = Settings(sender_date_filters="a@b.com:21,bad_entry,c@d.com:abc")
+        # "bad_entry" has no colon → skipped; "c@d.com:abc" has non-int → skipped
+        assert s.date_filtered_sender_list == [("a@b.com", 21)]
+
+    def test_domain_in_sender_list(self):
+        """Verify domain-level entries in alert_senders work."""
+        from app.config import Settings
+        s = Settings(alert_senders="redfin.com,alerts@mls.example.com")
+        assert "redfin.com" in s.sender_list
+        assert "alerts@mls.example.com" in s.sender_list

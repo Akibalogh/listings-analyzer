@@ -57,36 +57,65 @@ def _get_or_create_label(service) -> str:
 def fetch_new_emails() -> list[dict]:
     """Fetch unprocessed listing alert emails.
 
+    Runs separate queries for regular senders (ALERT_SENDERS) and
+    date-filtered senders (SENDER_DATE_FILTERS), merging results.
+
     Returns list of dicts with keys: id, subject, sender, html, text, date
     """
     service = _build_service()
     label_id = _get_or_create_label(service)
+    seen_ids: set[str] = set()
+    all_emails: list[dict] = []
 
-    # Build search query for alert senders, excluding already-processed
-    sender_query = " OR ".join(f"from:{s}" for s in settings.sender_list)
-    query = f"({sender_query}) -label:{PROCESSED_LABEL}"
+    # Query 1: Regular senders (no date filter)
+    if settings.sender_list:
+        sender_query = " OR ".join(f"from:{s}" for s in settings.sender_list)
+        query = f"({sender_query}) -label:{PROCESSED_LABEL}"
+        all_emails.extend(_fetch_query(service, query, label_id, seen_ids))
 
+    # Query 2+: Date-filtered senders (one query per sender)
+    for sender, days in settings.date_filtered_sender_list:
+        query = f"from:{sender} newer_than:{days}d -label:{PROCESSED_LABEL}"
+        all_emails.extend(_fetch_query(service, query, label_id, seen_ids))
+
+    if not all_emails:
+        logger.info("No new listing emails found")
+
+    return all_emails
+
+
+def _fetch_query(
+    service, query: str, label_id: str, seen_ids: set[str]
+) -> list[dict]:
+    """Run a Gmail search query and return email dicts.
+
+    Skips any gmail_id already in seen_ids to deduplicate across queries.
+    """
     logger.info(f"Gmail search: {query}")
 
     results = service.users().messages().list(userId="me", q=query).execute()
     messages = results.get("messages", [])
 
     if not messages:
-        logger.info("No new listing emails found")
         return []
 
-    logger.info(f"Found {len(messages)} new email(s)")
+    logger.info(f"Found {len(messages)} email(s) for query")
 
     emails = []
     for msg_ref in messages:
+        gmail_id = msg_ref["id"]
+        if gmail_id in seen_ids:
+            continue
+        seen_ids.add(gmail_id)
+
         msg = (
             service.users()
             .messages()
-            .get(userId="me", id=msg_ref["id"], format="full")
+            .get(userId="me", id=gmail_id, format="full")
             .execute()
         )
         email_data = _extract_email_data(msg)
-        email_data["gmail_id"] = msg_ref["id"]
+        email_data["gmail_id"] = gmail_id
         email_data["label_id"] = label_id
         emails.append(email_data)
 
