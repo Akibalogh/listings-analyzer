@@ -134,19 +134,20 @@ _MAX_DESCRIPTION_LEN = 5000  # Truncate very long descriptions
 
 # Common CSS selectors / patterns for listing descriptions on MLS portals
 _DESCRIPTION_SELECTORS = [
+    # OneKey MLS (onekeymls.com) — description is in section#overview
+    'section#overview',
+    # Redfin — description lives in div#house-info or .remarksContainer
+    'div#house-info',
+    '.remarksContainer',
+    '#marketing-remarks-scroll',
+    '.remarks-container',
+    '[data-rf-test-id="listingRemarks"]',
     # OneHome / Matrix portal common patterns
     '[data-testid="listing-description"]',
-    '[class*="description"]',
-    '[class*="remarks"]',
-    '[id*="description"]',
     '[id*="remarks"]',
     '[class*="property-details"]',
     '[class*="listing-detail"]',
-    # Redfin-specific patterns
-    '#marketing-remarks-scroll',
-    '.remarks-container',
     '.keyDetailsList',
-    '[data-rf-test-id="listingRemarks"]',
     '.propertyDetailsSectionContent',
     '.amenity-group',
     # Generic real estate page patterns
@@ -165,6 +166,10 @@ _IMAGE_SELECTORS = [
     # Redfin
     'img[src*="ssl.cdn-redfin"]',
     'img[src*="redfin-static"]',
+    # OneKey MLS / CloudFront CDN
+    'img[src*="cloudfront.net"]',
+    # Coldwell Banker
+    'img[src*="s.cbhomes.com"]',
     # Generic MLS patterns
     'img[src*="listing"]',
     'img[class*="photo"]',
@@ -213,11 +218,15 @@ def scrape_listing_description(
 
     # --- OneHome URLs: Angular SPA, static + Jina always return empty shell ---
     if "onehome.com" in url_lower:
-        logger.info(f"OneHome URL detected, skipping to Redfin lookup: {url[:80]}")
+        logger.info(f"OneHome URL detected, skipping to MLS lookup: {url[:80]}")
+        # Try OneKey MLS directly (constructs URL from MLS ID — no DDG needed)
+        if mls_id and address and town:
+            result = _try_onekeymls(address, town, state, zip_code, mls_id)
+            if result and result[0]:
+                return result
         return _try_redfin_fallback(address, town, state, zip_code, mls_id)
 
-    # --- Redfin URLs: try static HTTP first (server-renders with browser UA),
-    #     fall back to Jina Reader if static fails ---
+    # --- Redfin URLs: static HTTP → Jina → OneKey MLS fallback ---
     if "redfin.com" in url_lower:
         logger.info(f"Redfin URL detected, trying static HTTP: {url[:80]}")
         result = _scrape_static(url)
@@ -227,6 +236,12 @@ def scrape_listing_description(
         result = _scrape_with_jina(url)
         if result and result[0]:
             return result
+        # Redfin blocked (common from cloud IPs) — fall back to OneKey MLS
+        if mls_id and address and town:
+            logger.info(f"Redfin blocked, trying OneKey MLS for MLS#{mls_id}")
+            result = _try_onekeymls(address, town, state, zip_code, mls_id)
+            if result and result[0]:
+                return result
         return None, []
 
     # --- Other URLs: try full chain ---
@@ -243,6 +258,46 @@ def scrape_listing_description(
     return _try_redfin_fallback(address, town, state, zip_code, mls_id)
 
 
+def _try_onekeymls(
+    address: str,
+    town: str,
+    state: str | None,
+    zip_code: str | None,
+    mls_id: str,
+) -> tuple[str | None, list[str]]:
+    """Scrape OneKey MLS (onekeymls.com) directly using MLS ID.
+
+    OneKey MLS is the source MLS for the NY metro area. Its public listing
+    pages are server-rendered with a predictable URL:
+      https://www.onekeymls.com/address/{address-slug}/{mls_id}
+
+    Where the address slug is: {street}-{town}-{state}-{zip} with spaces→hyphens.
+    Works reliably from cloud IPs unlike Redfin.
+    """
+    def _slugify(s: str) -> str:
+        return s.strip().replace(" ", "-")
+
+    parts = [_slugify(address), _slugify(town)]
+    if state:
+        parts.append(_slugify(state))
+    if zip_code:
+        parts.append(zip_code)
+    slug = "-".join(parts)
+    url = f"https://www.onekeymls.com/address/{slug}/{mls_id}"
+
+    logger.info(f"Trying OneKey MLS: {url}")
+    result = _scrape_static(url)
+    if result and result[0]:
+        return result
+
+    logger.info(f"OneKey MLS static failed, trying Jina: {url}")
+    result = _scrape_with_jina(url)
+    if result and result[0]:
+        return result
+
+    return None, []
+
+
 def _try_redfin_fallback(
     address: str | None,
     town: str | None,
@@ -250,7 +305,7 @@ def _try_redfin_fallback(
     zip_code: str | None,
     mls_id: str | None = None,
 ) -> tuple[str | None, list[str]]:
-    """Search DuckDuckGo for a Redfin URL and scrape it via Jina Reader."""
+    """Search DuckDuckGo for a Redfin URL and scrape it via static HTTP or Jina."""
     if not address or not town:
         return None, []
 
@@ -436,29 +491,40 @@ def _extract_description_from_html(
     for tag in soup.find_all(["script", "style", "nav", "footer", "header"]):
         tag.decompose()
 
-    candidates: list[tuple[str, str]] = []  # (text, source_label)
-
-    # Collect candidates from targeted CSS selectors
+    # Collect candidates from targeted CSS selectors first.
+    # Selectors are site-specific and precise — prefer them over keyword fallback
+    # so that navigation/UI text (which also contains real estate keywords) never
+    # beats the actual description block.
+    selector_candidates: list[tuple[str, str]] = []
     for selector in _DESCRIPTION_SELECTORS:
         elements = soup.select(selector)
         for el in elements:
             text = el.get_text(separator=" ", strip=True)
             if len(text) >= 50 and _has_useful_content(text):
-                candidates.append((text, f"selector: {selector}"))
+                selector_candidates.append((text, f"selector: {selector}"))
 
-    # Collect candidates from keyword fallback (broader search)
+    if selector_candidates:
+        # Use the longest selector match — don't fall through to keyword search
+        best_text, best_source = max(selector_candidates, key=lambda c: len(c[0]))
+        logger.info(
+            f"Scraped description ({len(best_text)} chars) from {url} "
+            f"via {method}, {best_source}"
+        )
+        return best_text[:_MAX_DESCRIPTION_LEN]
+
+    # Keyword fallback: scan all block-level elements for real estate content.
+    # Only reached when no targeted selector matched (unknown site structure).
+    keyword_candidates: list[tuple[str, str]] = []
     for tag in soup.find_all(["p", "div", "section", "td", "span"]):
         text = tag.get_text(separator=" ", strip=True)
         if len(text) >= 80 and _has_useful_content(text):
-            candidates.append((text, "keyword fallback"))
+            keyword_candidates.append((text, "keyword fallback"))
 
-    if not candidates:
+    if not keyword_candidates:
         logger.warning(f"No description candidates found in {len(html)} chars from {url[:80]} via {method}")
         return None
 
-    # Pick the longest qualifying block — longer text is typically the
-    # full narrative description rather than a short features list
-    best_text, best_source = max(candidates, key=lambda c: len(c[0]))
+    best_text, best_source = max(keyword_candidates, key=lambda c: len(c[0]))
     logger.info(
         f"Scraped description ({len(best_text)} chars) from {url} "
         f"via {method}, {best_source}"

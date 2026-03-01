@@ -9,6 +9,7 @@ from app.parsers.onehome import (
     _has_useful_content,
     _is_spa_url,
     _try_redfin_fallback,
+    _try_onekeymls,
     _scrape_static,
     _search_redfin_url,
     _extract_description_from_html,
@@ -478,3 +479,92 @@ class TestRedfinFallback:
         # Static tried first with Redfin URL (returns None), then Jina called
         mock_static.assert_called_once_with(redfin_url)
         mock_jina.assert_called_once_with(redfin_url)
+
+
+class TestOneKeyMLS:
+    """Tests for the OneKey MLS direct URL scraping."""
+
+    @patch("app.parsers.onehome._scrape_static")
+    def test_onekeymls_constructs_url_from_mls_id(self, mock_static):
+        """_try_onekeymls builds the correct OneKey MLS URL from address parts."""
+        mock_static.return_value = (
+            "Colonial home with finished basement and garage",
+            ["https://d36ebcehl5r1pw.cloudfront.net/images/KEY123/photo1.jpeg"],
+        )
+
+        desc, images = _try_onekeymls(
+            address="342 Willis Avenue",
+            town="Hawthorne",
+            state="NY",
+            zip_code="10532",
+            mls_id="961200",
+        )
+
+        assert desc is not None
+        assert "basement" in desc.lower()
+        assert len(images) == 1
+        expected_url = "https://www.onekeymls.com/address/342-Willis-Avenue-Hawthorne-NY-10532/961200"
+        mock_static.assert_called_once_with(expected_url)
+
+    @patch("app.parsers.onehome._scrape_with_jina", return_value=(None, []))
+    @patch("app.parsers.onehome._scrape_static", return_value=None)
+    def test_onekeymls_falls_back_to_jina(self, mock_static, mock_jina):
+        """_try_onekeymls falls back to Jina if static fails."""
+        _try_onekeymls("10 Test St", "Scarsdale", "NY", "10583", "123456")
+        mock_static.assert_called_once()
+        mock_jina.assert_called_once()
+
+    @patch("app.parsers.onehome._try_onekeymls")
+    @patch("app.parsers.onehome._scrape_with_jina", return_value=(None, []))
+    @patch("app.parsers.onehome._scrape_static", return_value=None)
+    def test_onehome_url_with_mls_id_tries_onekeymls_first(
+        self, mock_static, mock_jina, mock_onekeymls
+    ):
+        """OneHome URL with mls_id tries OneKey MLS before Redfin DDG search."""
+        mock_onekeymls.return_value = (
+            "Beautiful colonial with finished basement",
+            ["https://d36ebcehl5r1pw.cloudfront.net/images/KEY123/photo1.jpeg"],
+        )
+        url = "https://portal.onehome.com/en-US/property/aotf~123"
+
+        desc, images = scrape_listing_description(
+            url,
+            address="342 Willis Avenue",
+            town="Hawthorne",
+            state="NY",
+            zip_code="10532",
+            mls_id="961200",
+        )
+
+        assert desc is not None
+        mock_onekeymls.assert_called_once_with(
+            "342 Willis Avenue", "Hawthorne", "NY", "10532", "961200"
+        )
+
+    @patch("app.parsers.onehome._try_onekeymls")
+    @patch("app.parsers.onehome._scrape_with_jina", return_value=(None, []))
+    @patch("app.parsers.onehome._scrape_static", return_value=None)
+    def test_redfin_blocked_falls_back_to_onekeymls(
+        self, mock_static, mock_jina, mock_onekeymls
+    ):
+        """Redfin URL that returns nothing falls back to OneKey MLS when mls_id provided."""
+        mock_onekeymls.return_value = (
+            "Stunning waterfront home with pool and finished basement",
+            ["https://d36ebcehl5r1pw.cloudfront.net/images/KEY456/photo1.jpeg"],
+        )
+        url = "https://www.redfin.com/NY/Eastchester/34-Lakeshore-Dr-10709/home/20146668"
+
+        desc, images = scrape_listing_description(
+            url,
+            address="34 Lakeshore Drive",
+            town="Eastchester",
+            state="NY",
+            zip_code="10709",
+            mls_id="928190",
+        )
+
+        assert desc is not None
+        assert "waterfront" in desc.lower()
+        mock_onekeymls.assert_called_once_with(
+            "34 Lakeshore Drive", "Eastchester", "NY", "10709", "928190"
+        )

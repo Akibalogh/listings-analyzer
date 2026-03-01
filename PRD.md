@@ -91,15 +91,15 @@ Primary alert source is OneKey MLS NY via `mlsalerts.example.com`.
 ### Description + Image Scraping Layer
 - After parsing, scrape each listing's URL for full property description and photos
 - `scrape_listing_description()` in `app/parsers/onehome.py` — returns `(description, image_urls)` tuple
-- **URL-aware scraping strategy:**
-  - **OneHome URLs** (`portal.onehome.com`): Angular SPA, skip straight to DuckDuckGo → Redfin fallback
-  - **Redfin URLs**: try static HTTP with browser User-Agent first (server-renders with real UA), fall back to Jina Reader if static fails (e.g. datacenter IP blocked)
+- **URL-aware scraping strategy with multi-site fallback:**
+  - **OneHome URLs** (`portal.onehome.com`): Angular SPA — try OneKey MLS directly (if MLS ID known), then DuckDuckGo → Redfin
+  - **Redfin URLs**: static HTTP (browser UA) → Jina Reader → OneKey MLS fallback
   - **Other URLs**: static HTTP → Jina Reader → DuckDuckGo Redfin search
+- **OneKey MLS** (`onekeymls.com`) is the source MLS for the NY metro area; URL constructed directly from `address-town-state-zip/mls_id` — no DDG search needed, works reliably from cloud IPs
 - Static HTTP uses a full browser User-Agent + Accept headers to bypass basic bot detection
 - Jina Reader API (`r.jina.ai`) renders JavaScript SPAs server-side (fallback for Angular portals)
-- CSS selectors tuned for both OneHome and Redfin page structures
-- Image extraction: targeted selectors for OneHome/Redfin CDN patterns, skips icons/thumbnails
-- Keyword-based content detection ensures extracted text contains real estate terms (basement, pool, etc.)
+- **Selector-first extraction**: targeted CSS selectors (`section#overview` for OneKey, `div#house-info` / `.remarksContainer` for Redfin) are tried first; keyword-based fallback only used when no selector matches — prevents navigation/UI text from beating the real description
+- Image extraction: targeted CDN selectors (Redfin CDN, CloudFront for OneKey, Coldwell Banker), skips icons/thumbnails
 - Description + images fed to AI evaluator for deeper assessment (basement detection, amenities, condition)
 
 ### Reprocessing
