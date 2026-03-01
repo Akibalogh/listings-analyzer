@@ -336,6 +336,7 @@ Mobile-first single-page app served at `/` (`app/templates/dashboard.html`).
 - No API key configured → placeholder score saved (score=0, confidence=low, reason in concerns)
 - No criteria set → placeholder score saved (score=0, confidence=low, reason in concerns)
 - Prompt injection in listing data → XML-tagged isolation + system prompt defense
+- Multi-story / non-standard layouts (e.g., 34 Lakeshore Drive — upper/lower floors, no clear basement) → AI may Reject on "finished basement" hard requirement; these should be reviewed manually for future AI criteria refinement
 
 ## 11. Phase Plan
 

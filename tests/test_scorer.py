@@ -83,6 +83,55 @@ class TestAIValidation:
         result = _validate_ai_response(data)
         assert len(result.hard_results) == 1
 
+    def test_validate_reject_forces_score_to_zero(self):
+        """Reject verdict always forces score=0 (hard fail means 0 points)."""
+        data = {"score": 50, "verdict": "Reject"}
+        result = _validate_ai_response(data)
+        assert result.score == 0
+        assert result.verdict == "Reject"
+
+    def test_validate_score_80_becomes_strong_match(self):
+        """Score exactly 80 should derive 'Strong Match' verdict."""
+        data = {"score": 80, "verdict": "Pass"}  # wrong verdict
+        result = _validate_ai_response(data)
+        assert result.score == 80
+        assert result.verdict == "Strong Match"
+
+    def test_validate_score_79_becomes_worth_touring(self):
+        """Score 79 (just below 80) should derive 'Worth Touring'."""
+        data = {"score": 79, "verdict": "Strong Match"}  # wrong verdict
+        result = _validate_ai_response(data)
+        assert result.score == 79
+        assert result.verdict == "Worth Touring"
+
+    def test_validate_score_60_becomes_worth_touring(self):
+        """Score exactly 60 should derive 'Worth Touring'."""
+        data = {"score": 60, "verdict": "Pass"}
+        result = _validate_ai_response(data)
+        assert result.score == 60
+        assert result.verdict == "Worth Touring"
+
+    def test_validate_score_40_becomes_low_priority(self):
+        """Score exactly 40 should derive 'Low Priority'."""
+        data = {"score": 40, "verdict": "Pass"}
+        result = _validate_ai_response(data)
+        assert result.score == 40
+        assert result.verdict == "Low Priority"
+
+    def test_validate_score_39_becomes_pass(self):
+        """Score 39 (below 40) should derive 'Pass'."""
+        data = {"score": 39, "verdict": "Worth Touring"}  # wrong verdict
+        result = _validate_ai_response(data)
+        assert result.score == 39
+        assert result.verdict == "Pass"
+
+    def test_validate_score_zero_non_reject_preserved(self):
+        """Score=0 with valid non-Reject verdict is preserved (AI gave 0 without hard fail)."""
+        data = {"score": 0, "verdict": "Pass"}
+        result = _validate_ai_response(data)
+        assert result.score == 0
+        assert result.verdict == "Pass"
+
     def test_validate_empty_response(self):
         result = _validate_ai_response({})
         assert result.score == 0

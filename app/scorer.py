@@ -29,7 +29,7 @@ ALLOWED_VERDICTS = {"Strong Match", "Worth Touring", "Low Priority", "Pass", "Re
 # Max image size (5 MB) and fetch timeout (10s)
 _MAX_IMAGE_BYTES = 5 * 1024 * 1024
 _IMAGE_TIMEOUT = 10.0
-_MAX_IMAGES = 10
+_MAX_IMAGES = 5  # 5 images is sufficient for basement/amenity/condition assessment; keeps memory under 256MB on Fly.io
 
 # Supported image media types for Claude vision
 _SUPPORTED_MEDIA = {

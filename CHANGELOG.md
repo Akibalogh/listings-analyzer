@@ -10,9 +10,18 @@ All notable changes to Listings Analyzer are documented here.
 - `GET /criteria/history` endpoint — returns all saved criteria versions, newest first (public, no auth); includes version number, created_by, created_at, 80-char preview, and full instructions
 - Version history panel in the AI Criteria settings overlay; click any past version to load it into the editor; "Current" badge on the active version
 - `get_criteria_history()` in `db.py`
+- **OneKey MLS fallback scraper** — `_try_onekeymls()` in `onehome.py`; URL constructed from `address-town-state-zip/mls_id`; works from cloud IPs where Redfin is blocked; wired into fallback chain (OneHome → OneKey MLS → Redfin DDG; Redfin → static → Jina → OneKey MLS)
+- **`/manage/scrape-descriptions` endpoint** — scrapes descriptions + images for listings with URLs but no description; iterates DB directly (no email re-parsing); protected by MANAGE_KEY; triggers rescore if descriptions found
+- 15 new tests: verdict/score consistency boundary tests (7), manage/scrape-descriptions endpoint (8)
 
 ### Changed
-- **Parallel bulk re-scoring** — `_rescore_all()` now uses `ThreadPoolExecutor` (5 workers) instead of a serial loop; ~5× faster for full rescores since each listing's Anthropic API call is independent I/O; `_RESCORE_WORKERS` constant controls concurrency
+- **Serialized bulk re-scoring** — `_RESCORE_WORKERS` reduced from 5 to 1; image-heavy listings (18-46 images each) exceed Anthropic's 10k tokens/minute org limit when run concurrently; serial execution avoids rate limiting
+- **Verdict/score consistency enforcement** in `_validate_ai_response()` — "Reject" always forces score=0; non-Reject verdicts always re-derived from score (80+=Strong Match, 60+=Worth Touring, 40+=Low Priority, >0=Pass); prevents filter chip mismatches
+- **Selector-first description extraction** — site-specific CSS selectors (`section#overview` for OneKey MLS, `div#house-info`/`.remarksContainer` for Redfin) tried before keyword-based fallback; prevents navigation/UI boilerplate from beating real descriptions
+- **Browser User-Agent for static scraping** — `_scrape_static()` now uses a real Chrome UA + Accept headers to bypass basic bot detection
+- **Redfin URL handling** — static HTTP attempted first, then Jina Reader (was Jina-only)
+- Image selectors expanded: `img[src*="cloudfront.net"]` (OneKey MLS CDN), `img[src*="s.cbhomes.com"]` (Coldwell Banker)
+- **`_MAX_IMAGES` reduced from 10 to 5** — prevents OOM on Fly.io 256MB VMs when loading images as base64; 5 images is sufficient for basement/amenity/condition assessment
 
 ---
 
