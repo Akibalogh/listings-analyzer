@@ -551,22 +551,24 @@ def update_listing_description(listing_id: int, listing_url: str, description: s
 
 
 def update_listing_enrichment(listing_id: int, enrichment: dict):
-    """Update enrichment data (address key, school data, commute) for a listing."""
+    """Update enrichment data (address key, school data, commute) for a listing.
+
+    Only updates columns present in the enrichment dict (supports partial updates).
+    """
+    allowed_cols = {"address_key", "school_data_json", "commute_minutes", "commute_data_json"}
+    cols_to_update = {k: v for k, v in enrichment.items() if k in allowed_cols}
+    if not cols_to_update:
+        return
+
     ph = _placeholder()
+    set_clauses = [f"{col} = {ph}" for col in cols_to_update]
+    values = list(cols_to_update.values()) + [listing_id]
+
     with get_connection() as conn:
         cur = conn.cursor()
         cur.execute(
-            f"""UPDATE listings SET
-                address_key = {ph}, school_data_json = {ph},
-                commute_minutes = {ph}, commute_data_json = {ph}
-            WHERE id = {ph}""",
-            (
-                enrichment.get("address_key"),
-                enrichment.get("school_data_json"),
-                enrichment.get("commute_minutes"),
-                enrichment.get("commute_data_json"),
-                listing_id,
-            ),
+            f"UPDATE listings SET {', '.join(set_clauses)} WHERE id = {ph}",
+            tuple(values),
         )
 
 

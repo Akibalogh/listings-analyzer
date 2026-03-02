@@ -431,41 +431,32 @@ class TestManageEnrichEndpoint:
         res = client.post("/manage/enrich", headers={"x-manage-key": "wrong"})
         assert res.status_code == 403
 
-    @patch("app.main.db.get_all_listing_ids", return_value=[])
     @patch("app.main.settings")
-    def test_enrich_empty_db(self, mock_settings, mock_ids, client):
+    def test_enrich_starts_background_task(self, mock_settings, client):
         mock_settings.manage_key = "test-key"
+        from app.main import _enrich_state
+        _enrich_state["in_progress"] = False
         res = client.post("/manage/enrich", headers={"x-manage-key": "test-key"})
         assert res.status_code == 200
         data = res.json()
-        assert data["listings_checked"] == 0
-        assert data["enriched"] == 0
+        assert data["status"] == "started"
 
-    @patch("app.main._start_rescore")
-    @patch("app.main.db.get_active_criteria", return_value={"version": 5, "instructions": "criteria"})
-    @patch("app.main.db.update_listing_enrichment")
-    @patch("app.main.db.get_school_data_by_zip", return_value=None)
-    @patch("app.enrichment.fetch_school_data", return_value={"elementary": [{"name": "Test Elementary", "rank_percentile": 80}], "middle": [], "high": []})
-    @patch("app.enrichment.fetch_commute_time", return_value={"commute_minutes": 55, "departure_time": "2026-03-01T13:00:00Z", "route_duration_seconds": 3300})
-    @patch("app.main.db.get_listing_by_id", return_value={
-        "id": 1, "address": "10 Test St", "town": "Rye", "state": "NY",
-        "zip_code": "10580", "mls_id": "123456", "address_key": None,
-        "school_data_json": None, "commute_minutes": None,
-    })
-    @patch("app.main.db.get_all_listing_ids", return_value=[1])
     @patch("app.main.settings")
-    def test_enrich_processes_listing(
-        self, mock_settings, mock_ids, mock_get, mock_commute, mock_school,
-        mock_school_cache, mock_update, mock_criteria, mock_rescore, client,
-    ):
+    def test_enrich_rejects_concurrent(self, mock_settings, client):
         mock_settings.manage_key = "test-key"
+        from app.main import _enrich_state
+        _enrich_state["in_progress"] = True
         res = client.post("/manage/enrich", headers={"x-manage-key": "test-key"})
         assert res.status_code == 200
         data = res.json()
-        assert data["enriched"] == 1
-        assert data["rescore_started"] is True
-        mock_update.assert_called_once()
-        mock_rescore.assert_called_once()
+        assert data["status"] == "already_running"
+        _enrich_state["in_progress"] = False
+
+    def test_enrich_status_endpoint(self, client):
+        res = client.get("/manage/enrich/status")
+        assert res.status_code == 200
+        data = res.json()
+        assert "in_progress" in data
 
 
 class TestDateFilteredSenderConfig:

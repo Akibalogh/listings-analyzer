@@ -833,96 +833,152 @@ def manage_scrape_descriptions(request: Request):
     }
 
 
+_enrich_state: dict = {"in_progress": False, "result": None}
+
+
+def _enrich_all(clear_bogus: bool = False):
+    """Background thread: backfill enrichment data for all listings.
+
+    Respects SchoolDigger's 1-call-per-minute + 20-calls-per-day rate limits.
+    """
+    from app.enrichment import fetch_commute_time, fetch_school_data, normalize_address
+
+    try:
+        listing_ids = db.get_all_listing_ids()
+        enriched = 0
+        school_calls = 0
+        commute_calls = 0
+        errors = []
+
+        # Phase 1: Clear ALL bogus school data before enrichment
+        # (prevents zip cache from returning bogus data)
+        if clear_bogus:
+            cleared = 0
+            for lid in listing_ids:
+                listing = db.get_listing_by_id(lid)
+                if not listing or not listing.get("school_data_json"):
+                    continue
+                try:
+                    sd = json.loads(listing["school_data_json"])
+                    all_schools = sd.get("elementary", []) + sd.get("middle", []) + sd.get("high", [])
+                    if any(s.get("name", "").startswith("School #") for s in all_schools):
+                        db.update_listing_enrichment(lid, {"school_data_json": None})
+                        cleared += 1
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            logger.info(f"Cleared bogus school data from {cleared} listings")
+
+        # Phase 2: Enrich all listings
+        for lid in listing_ids:
+            listing = db.get_listing_by_id(lid)
+            if not listing:
+                continue
+
+            enrichment: dict = {}
+            changed = False
+
+            # Address key (for dedup)
+            if not listing.get("address_key"):
+                address_key = normalize_address(
+                    listing.get("address"), listing.get("town"), listing.get("state")
+                )
+                if address_key:
+                    enrichment["address_key"] = address_key
+                    changed = True
+
+            # School data — check DB cache first
+            if not listing.get("school_data_json"):
+                zip_code = listing.get("zip_code")
+                cached_json = db.get_school_data_by_zip(zip_code) if zip_code else None
+                if cached_json:
+                    enrichment["school_data_json"] = cached_json
+                    changed = True
+                else:
+                    school_data = fetch_school_data(zip_code, listing.get("state"))
+                    if school_data:
+                        enrichment["school_data_json"] = json.dumps(school_data)
+                        school_calls += 1
+                        changed = True
+
+            # Commute time
+            if listing.get("commute_minutes") is None:
+                commute_result = fetch_commute_time(
+                    listing.get("address"),
+                    listing.get("town"),
+                    listing.get("state"),
+                    listing.get("zip_code"),
+                )
+                if commute_result:
+                    enrichment["commute_minutes"] = commute_result["commute_minutes"]
+                    enrichment["commute_data_json"] = json.dumps(commute_result)
+                    commute_calls += 1
+                    changed = True
+
+            if changed:
+                try:
+                    db.update_listing_enrichment(lid, enrichment)
+                    enriched += 1
+                except Exception as e:
+                    logger.error(f"Failed to enrich listing #{lid}: {e}")
+                    errors.append(f"#{lid}: {e}")
+
+        # Trigger rescore if we enriched anything
+        rescore_started = False
+        if enriched > 0:
+            criteria = db.get_active_criteria()
+            if criteria:
+                _start_rescore(criteria["version"], criteria["instructions"])
+                rescore_started = True
+
+        _enrich_state["result"] = {
+            "listings_checked": len(listing_ids),
+            "enriched": enriched,
+            "school_api_calls": school_calls,
+            "commute_api_calls": commute_calls,
+            "errors": errors,
+            "rescore_started": rescore_started,
+        }
+        logger.info(
+            f"Enrichment complete: {enriched} enriched, "
+            f"{school_calls} school API calls, {commute_calls} commute API calls"
+        )
+    except Exception as e:
+        logger.error(f"Enrichment failed: {e}")
+        _enrich_state["result"] = {"error": str(e)}
+    finally:
+        _enrich_state["in_progress"] = False
+
+
 @app.post("/manage/enrich")
 def manage_enrich(request: Request):
     """Backfill enrichment data (school scores + commute times) for existing listings.
 
-    Iterates all listings and calls SchoolDigger + Google Routes APIs for
-    those missing enrichment data. Respects rate limits by caching school
-    data per zip code in the DB.
+    Runs in a background thread to accommodate SchoolDigger's 1-call/minute rate limit.
+    Query params: clear_bogus=true to clear and re-fetch obfuscated school data.
 
     Protected by MANAGE_KEY env var.
     """
-    from app.enrichment import fetch_commute_time, fetch_school_data, normalize_address
-
     key = request.headers.get("x-manage-key", "")
     if not settings.manage_key or key != settings.manage_key:
         raise HTTPException(status_code=403, detail="Invalid or missing management key")
 
-    listing_ids = db.get_all_listing_ids()
-    enriched = 0
-    school_calls = 0
-    commute_calls = 0
-    errors = []
+    if _enrich_state["in_progress"]:
+        return {"status": "already_running", "message": "Enrichment is already in progress"}
 
-    for lid in listing_ids:
-        listing = db.get_listing_by_id(lid)
-        if not listing:
-            continue
+    clear_bogus = request.query_params.get("clear_bogus", "").lower() == "true"
 
-        enrichment: dict = {}
-        changed = False
+    _enrich_state["in_progress"] = True
+    _enrich_state["result"] = None
+    t = threading.Thread(target=_enrich_all, args=(clear_bogus,), daemon=True)
+    t.start()
 
-        # Address key (for dedup)
-        if not listing.get("address_key"):
-            address_key = normalize_address(
-                listing.get("address"), listing.get("town"), listing.get("state")
-            )
-            if address_key:
-                enrichment["address_key"] = address_key
-                changed = True
+    return {"status": "started", "clear_bogus": clear_bogus}
 
-        # School data — check DB cache first
-        if not listing.get("school_data_json"):
-            zip_code = listing.get("zip_code")
-            cached_json = db.get_school_data_by_zip(zip_code) if zip_code else None
-            if cached_json:
-                enrichment["school_data_json"] = cached_json
-                changed = True
-            else:
-                school_data = fetch_school_data(zip_code, listing.get("state"))
-                if school_data:
-                    import json as _json
 
-                    enrichment["school_data_json"] = _json.dumps(school_data)
-                    school_calls += 1
-                    changed = True
-
-        # Commute time
-        if listing.get("commute_minutes") is None:
-            commute_result = fetch_commute_time(
-                listing.get("address"),
-                listing.get("town"),
-                listing.get("state"),
-                listing.get("zip_code"),
-            )
-            if commute_result:
-                enrichment["commute_minutes"] = commute_result["commute_minutes"]
-                enrichment["commute_data_json"] = json.dumps(commute_result)
-                commute_calls += 1
-                changed = True
-
-        if changed:
-            try:
-                db.update_listing_enrichment(lid, enrichment)
-                enriched += 1
-            except Exception as e:
-                logger.error(f"Failed to enrich listing #{lid}: {e}")
-                errors.append(f"#{lid}: {e}")
-
-    # Trigger rescore if we enriched anything
-    rescore_started = False
-    if enriched > 0:
-        criteria = db.get_active_criteria()
-        if criteria:
-            _start_rescore(criteria["version"], criteria["instructions"])
-            rescore_started = True
-
+@app.get("/manage/enrich/status")
+def manage_enrich_status():
+    """Check enrichment status."""
     return {
-        "listings_checked": len(listing_ids),
-        "enriched": enriched,
-        "school_api_calls": school_calls,
-        "commute_api_calls": commute_calls,
-        "errors": errors,
-        "rescore_started": rescore_started,
+        "in_progress": _enrich_state["in_progress"],
+        "result": _enrich_state["result"],
     }

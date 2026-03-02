@@ -12,8 +12,10 @@ All notable changes to Listings Analyzer are documented here.
 - **Transit commute times** — Google Routes API integration (Essentials tier, 10K free/month); calculates Metro-North + subway + walking commute to Brookfield Place NYC (next weekday 8 AM); `commute_minutes` stored in DB and displayed as badge on dashboard cards
 - **AI scorer enrichment awareness** — system prompt updated to explicitly factor school quality and commute times into evaluations; mentions specific school names/percentiles and commute duration in property_summary
 - **Dashboard enrichment display** — commute badge ("52min 🚆") and school score ("Schools 85%") on compact card meta line; expandable enrichment section with full school breakdown (elementary/middle/high with names, ranks, distances) and commute details; "Commute (shortest)" and "Schools (best)" sort options
-- **`POST /manage/enrich` endpoint** — backfills school data + commute times for existing listings; respects SchoolDigger rate limits via zip-code DB cache; triggers rescore after enrichment
-- **`app/enrichment.py` module** — address normalization, SchoolDigger API client, Google Routes API client
+- **`POST /manage/enrich` endpoint** — backfills school data + commute times for existing listings; runs in background thread to accommodate SchoolDigger's 1-call/minute rate limit; `GET /manage/enrich/status` to check progress; `?clear_bogus=true` clears obfuscated school data before re-fetching; triggers rescore after enrichment
+- **`app/enrichment.py` module** — address normalization, SchoolDigger API client (v2.0), Google Routes API client
+- **Town shown on listing cards** — compact card view now displays "Address, Town" instead of just the street address
+- **Version history pagination** — criteria version history shows 5 per page with Newer/Older navigation instead of full unbounded list
 - 36 new tests: address normalization (19), school data (5), commute time (5), state normalization (1), manage/enrich endpoint (4), DB dedup integration (2)
 - 4 new DB columns: `address_key`, `school_data_json`, `commute_minutes`, `commute_data_json`
 - 4 new env vars: `SCHOOLDIGGER_APP_ID`, `SCHOOLDIGGER_APP_KEY`, `GOOGLE_MAPS_API_KEY`, `COMMUTE_DESTINATION`
@@ -32,6 +34,10 @@ All notable changes to Listings Analyzer are documented here.
 - **Read-only AI Criteria for anonymous users** — "✨ AI Criteria" button always visible; settings panel opens in read-only mode (textarea disabled, save/maintenance hidden) for unauthenticated users; sign in to edit
 
 ### Changed
+- **SchoolDigger API v2.0** — fixed endpoint URL from `/v2/schools` to `/v2.0/schools`; updated response parsing for `rankHistory[0].rankStatewidePercentage` (was top-level `rankStatewidePercentile`); city/zip read from nested `address` object
+- **SchoolDigger rate limiting** — enforces 1-call-per-minute delay between API calls; detects obfuscated/bogus responses (daily limit exceeded) and rejects them instead of storing garbage data
+- **Background enrichment** — `/manage/enrich` now runs in a daemon thread (returns immediately); two-phase bogus clearing (clears ALL bogus data first, then re-fetches) prevents zip cache from serving stale obfuscated data
+- **Dynamic `update_listing_enrichment()`** — only updates columns present in the enrichment dict (was always setting all 4 columns, nulling out existing data on partial updates)
 - **Email fetching refactored** — `fetch_new_emails()` now runs multiple query groups (regular senders + date-filtered senders) with deduplication via `_fetch_query()` helper; replaces single-query approach
 - **ALERT_SENDERS default** updated from individual Redfin addresses to `redfin.com,alerts@mls.example.com` (domain-level matching)
 - **Serialized bulk re-scoring** — `_RESCORE_WORKERS` reduced from 5 to 1; image-heavy listings (18-46 images each) exceed Anthropic's 10k tokens/minute org limit when run concurrently; serial execution avoids rate limiting

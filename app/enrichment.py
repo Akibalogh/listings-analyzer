@@ -8,6 +8,7 @@ External API integrations:
 import json
 import logging
 import re
+import time
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -65,7 +66,11 @@ def normalize_address(
 # School data (SchoolDigger API)
 # ---------------------------------------------------------------------------
 
-_SCHOOLDIGGER_BASE = "https://api.schooldigger.com/v2/schools"
+_SCHOOLDIGGER_BASE = "https://api.schooldigger.com/v2.0/schools"
+
+# Rate limiter: SchoolDigger free tier allows 1 call/minute, 20 calls/day
+_schooldigger_last_call: float = 0.0
+_SCHOOLDIGGER_MIN_INTERVAL = 61  # seconds between calls
 
 # State name → 2-letter code (NY metro area)
 _STATE_MAP = {
@@ -106,6 +111,14 @@ def fetch_school_data(zip_code: str | None, state: str | None) -> dict | None:
         return None
 
     try:
+        # Enforce 1-call-per-minute rate limit
+        global _schooldigger_last_call
+        elapsed = time.monotonic() - _schooldigger_last_call
+        if _schooldigger_last_call > 0 and elapsed < _SCHOOLDIGGER_MIN_INTERVAL:
+            wait = _SCHOOLDIGGER_MIN_INTERVAL - elapsed
+            logger.info(f"SchoolDigger rate limit: waiting {wait:.0f}s")
+            time.sleep(wait)
+
         params = {
             "st": state_code,
             "zip": zip_code,
@@ -116,20 +129,37 @@ def fetch_school_data(zip_code: str | None, state: str | None) -> dict | None:
         }
         with httpx.Client(timeout=10.0) as client:
             response = client.get(_SCHOOLDIGGER_BASE, params=params)
+            _schooldigger_last_call = time.monotonic()
             response.raise_for_status()
             data = response.json()
+
+        # Detect rate-limited bogus responses
+        comment = data.get("_comment", "")
+        if "bogus" in comment.lower() or "limit has been reached" in comment.lower():
+            logger.warning(f"SchoolDigger rate limit exceeded for {zip_code}, skipping")
+            return None
 
         schools = data.get("schoolList", [])
         result: dict[str, list] = {"elementary": [], "middle": [], "high": []}
 
         for school in schools:
             level = school.get("schoolLevel", "").lower()
+
+            # v2.0 nests ranking in rankHistory; percentile is rankStatewidePercentage
+            rank_pct = None
+            rank_history = school.get("rankHistory") or []
+            if rank_history:
+                rank_pct = rank_history[0].get("rankStatewidePercentage")
+
+            # v2.0 nests city/zip inside address object
+            address_obj = school.get("address") or {}
+
             entry = {
                 "name": school.get("schoolName"),
-                "rank_percentile": school.get("rankStatewidePercentile"),
+                "rank_percentile": rank_pct,
                 "distance_miles": school.get("distanceMiles"),
-                "city": school.get("city"),
-                "zip": school.get("zip"),
+                "city": address_obj.get("city") or school.get("city"),
+                "zip": address_obj.get("zip") or school.get("zip"),
             }
             if "elem" in level:
                 result["elementary"].append(entry)

@@ -1387,6 +1387,7 @@ function buildCard(l) {
   var beds = l.bedrooms != null ? String(l.bedrooms) : '?';
   var baths = l.bathrooms != null ? String(l.bathrooms) : '?';
   var address = l.address || 'Unknown Address';
+  if (l.town) address += ', ' + l.town;
   var verdictClass = 'verdict ' + verdictCSSClass(l.verdict);
   var scoreColor = scoreBarColor(l.score || 0, l.verdict);
   var priceSqft = (l.price && l.sqft) ? '$' + Math.round(l.price / l.sqft).toLocaleString() : null;
@@ -1782,40 +1783,78 @@ function closeSettings() {
   document.getElementById('settingsOverlay').classList.remove('open');
 }
 
+var _historyPageSize = 5;
+var _historyData = [];
+var _historyPage = 0;
+
 async function loadCriteriaHistory() {
   var listEl = document.getElementById('versionList');
   listEl.innerHTML = '<div style="font-size:12px;color:var(--text-faint)">Loading\u2026</div>';
   try {
     var res = await fetch('/criteria/history');
     if (!res.ok) throw new Error('Failed');
-    var history = await res.json();
-    if (!history.length) {
+    _historyData = await res.json();
+    _historyPage = 0;
+    if (!_historyData.length) {
       listEl.innerHTML = '<div style="font-size:12px;color:var(--text-faint)">No saved versions yet.</div>';
       return;
     }
-    /* Determine current active version from version text */
-    var versionText = document.getElementById('criteriaVersion').textContent;
-    var activeVersion = parseInt((versionText.match(/\d+/) || [])[0]) || 0;
-    listEl.innerHTML = '';
-    history.forEach(function(h) {
-      var div = document.createElement('div');
-      div.className = 'version-item';
-      div.onclick = function() { loadVersion(h.instructions, h.version); };
-      var date = '';
-      if (h.created_at) {
-        try { date = new Date(h.created_at).toLocaleDateString('en-US', {month:'short', day:'numeric'}); } catch(e) {}
-      }
-      var by = h.created_by && h.created_by !== 'system' ? h.created_by.replace(/@.*/, '') : 'system';
-      var isCurrent = h.version === activeVersion;
-      div.innerHTML =
-        '<div class="version-item-meta">v' + h.version +
-        (date ? ' \u00B7 ' + date : '') + ' \u00B7 ' + by +
-        (isCurrent ? ' <span class="current-badge">Current</span>' : '') + '</div>' +
-        '<div class="version-item-preview">' + (h.preview || '').replace(/[<>&]/g, function(c){return {'<':'&lt;','>':'&gt;','&':'&amp;'}[c];}) + '\u2026</div>';
-      listEl.appendChild(div);
-    });
+    renderHistoryPage();
   } catch (e) {
     listEl.innerHTML = '<div style="font-size:12px;color:var(--red)">Failed to load history.</div>';
+  }
+}
+
+function renderHistoryPage() {
+  var listEl = document.getElementById('versionList');
+  var versionText = document.getElementById('criteriaVersion').textContent;
+  var activeVersion = parseInt((versionText.match(/\d+/) || [])[0]) || 0;
+  var start = _historyPage * _historyPageSize;
+  var end = Math.min(start + _historyPageSize, _historyData.length);
+  var totalPages = Math.ceil(_historyData.length / _historyPageSize);
+
+  listEl.innerHTML = '';
+  for (var i = start; i < end; i++) {
+    var h = _historyData[i];
+    var div = document.createElement('div');
+    div.className = 'version-item';
+    div.onclick = (function(inst, ver) { return function() { loadVersion(inst, ver); }; })(h.instructions, h.version);
+    var date = '';
+    if (h.created_at) {
+      try { date = new Date(h.created_at).toLocaleDateString('en-US', {month:'short', day:'numeric'}); } catch(e) {}
+    }
+    var by = h.created_by && h.created_by !== 'system' ? h.created_by.replace(/@.*/, '') : 'system';
+    var isCurrent = h.version === activeVersion;
+    div.innerHTML =
+      '<div class="version-item-meta">v' + h.version +
+      (date ? ' \u00B7 ' + date : '') + ' \u00B7 ' + by +
+      (isCurrent ? ' <span class="current-badge">Current</span>' : '') + '</div>' +
+      '<div class="version-item-preview">' + (h.preview || '').replace(/[<>&]/g, function(c){return {'<':'&lt;','>':'&gt;','&':'&amp;'}[c];}) + '\u2026</div>';
+    listEl.appendChild(div);
+  }
+
+  /* Pagination controls */
+  if (totalPages > 1) {
+    var nav = document.createElement('div');
+    nav.style.cssText = 'display:flex;justify-content:space-between;align-items:center;margin-top:10px;font-size:12px;color:var(--text-muted)';
+    var prevBtn = document.createElement('button');
+    prevBtn.textContent = '\u2190 Newer';
+    prevBtn.disabled = _historyPage === 0;
+    prevBtn.style.cssText = 'font-size:12px;padding:4px 10px;border:1px solid var(--border);border-radius:6px;background:var(--card-bg);color:var(--text-primary);cursor:pointer';
+    if (prevBtn.disabled) prevBtn.style.opacity = '0.4';
+    prevBtn.onclick = function() { _historyPage--; renderHistoryPage(); };
+    var pageInfo = document.createElement('span');
+    pageInfo.textContent = (_historyPage + 1) + ' / ' + totalPages;
+    var nextBtn = document.createElement('button');
+    nextBtn.textContent = 'Older \u2192';
+    nextBtn.disabled = _historyPage >= totalPages - 1;
+    nextBtn.style.cssText = 'font-size:12px;padding:4px 10px;border:1px solid var(--border);border-radius:6px;background:var(--card-bg);color:var(--text-primary);cursor:pointer';
+    if (nextBtn.disabled) nextBtn.style.opacity = '0.4';
+    nextBtn.onclick = function() { _historyPage++; renderHistoryPage(); };
+    nav.appendChild(prevBtn);
+    nav.appendChild(pageInfo);
+    nav.appendChild(nextBtn);
+    listEl.appendChild(nav);
   }
 }
 

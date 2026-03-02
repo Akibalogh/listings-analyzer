@@ -139,26 +139,29 @@ class TestFetchSchoolData:
                 {
                     "schoolName": "Osborn Elementary",
                     "schoolLevel": "Elementary",
-                    "rankStatewidePercentile": 85.2,
                     "distanceMiles": 0.5,
-                    "city": "Rye",
-                    "zip": "10580",
+                    "address": {"city": "Rye", "zip": "10580"},
+                    "rankHistory": [
+                        {"year": 2025, "rankStatewidePercentage": 85.2}
+                    ],
                 },
                 {
                     "schoolName": "Rye Middle School",
                     "schoolLevel": "Middle",
-                    "rankStatewidePercentile": 78.0,
                     "distanceMiles": 1.2,
-                    "city": "Rye",
-                    "zip": "10580",
+                    "address": {"city": "Rye", "zip": "10580"},
+                    "rankHistory": [
+                        {"year": 2025, "rankStatewidePercentage": 78.0}
+                    ],
                 },
                 {
                     "schoolName": "Rye High School",
                     "schoolLevel": "High",
-                    "rankStatewidePercentile": 91.5,
                     "distanceMiles": 1.5,
-                    "city": "Rye",
-                    "zip": "10580",
+                    "address": {"city": "Rye", "zip": "10580"},
+                    "rankHistory": [
+                        {"year": 2025, "rankStatewidePercentage": 91.5}
+                    ],
                 },
             ]
         }
