@@ -145,6 +145,44 @@ $1,695,000 5 Beds 3.5 Baths 3,274 sqft
         assert listings[0].town == "Bedford Corners"
         assert listings[0].zip_code == "10549"
 
+    def test_address_from_redfin_url_fallback(self):
+        """When no address is in the text, extract it from the Redfin URL."""
+        text = """
+$1,200,000 4 Beds 2.5 Baths 3,034 sqft
+https://www.redfin.com/NY/Briarcliff-Manor/101-Long-Hill-Rd-E-10510/home/20082263
+        """
+        listings = self.parser.parse(None, text)
+        assert len(listings) == 1
+        assert listings[0].address == "101 Long Hill Rd E"
+        assert listings[0].town == "Briarcliff Manor"
+        assert listings[0].state == "NY"
+        assert listings[0].zip_code == "10510"
+        assert "redfin.com" in listings[0].listing_url
+
+    def test_address_from_redfin_url_no_zip(self):
+        """Redfin URL without embedded zip still extracts address and town."""
+        text = """
+$900,000 3 Beds 2 Baths
+https://www.redfin.com/NY/Rye-Brook/11-Jennifer-Ln/home/22583423
+        """
+        listings = self.parser.parse(None, text)
+        assert len(listings) == 1
+        assert listings[0].address == "11 Jennifer Ln"
+        assert listings[0].town == "Rye Brook"
+        assert listings[0].state == "NY"
+
+    def test_redfin_url_does_not_override_parsed_address(self):
+        """If address was already parsed from text, Redfin URL should not override it."""
+        text = """
+$1,200,000 4 Beds 2.5 Baths 3,034 sqft
+31 Lalli Dr, Katonah, NY 10536
+https://www.redfin.com/NY/Katonah/31-Lalli-Dr-10536/home/12345
+        """
+        listings = self.parser.parse(None, text)
+        assert len(listings) == 1
+        assert listings[0].address == "31 Lalli Dr"
+        assert listings[0].town == "Katonah"
+
     def test_redfin_tour_email_two_listings(self):
         """Tour confirmation email with two inline-address listings."""
         text = """

@@ -48,6 +48,12 @@ LISTING_URL_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Extract address from Redfin URL: /NY/Briarcliff-Manor/101-Long-Hill-Rd-E-10510/home/123
+REDFIN_URL_ADDR_RE = re.compile(
+    r"redfin\.com/([A-Z]{2})/([^/]+)/([^/]+?)(?:-(\d{5}))?/home/",
+    re.IGNORECASE,
+)
+
 # Detect if text has listing-like content
 LISTING_INDICATORS = [PRICE_RE, MLS_RE, BEDS_RE]
 
@@ -150,6 +156,19 @@ class PlainTextParser(EmailParser):
                 listing.town = inline_match.group(2).strip()
                 listing.state = inline_match.group(3).strip()
                 listing.zip_code = inline_match.group(4).strip()
+
+        # Fallback: extract address from Redfin URL path
+        if not listing.address and listing.listing_url:
+            redfin_match = REDFIN_URL_ADDR_RE.search(listing.listing_url)
+            if redfin_match:
+                listing.state = listing.state or redfin_match.group(1).upper()
+                listing.town = listing.town or redfin_match.group(2).replace("-", " ").title()
+                # Address slug: "101-Long-Hill-Rd-E-10510" → "101 Long Hill Rd E"
+                addr_slug = redfin_match.group(3).replace("-", " ")
+                # Strip trailing zip if present in slug
+                if redfin_match.group(4):
+                    listing.zip_code = listing.zip_code or redfin_match.group(4)
+                listing.address = addr_slug.title()
 
         # Last resort: just grab the zip code
         if not listing.town and not listing.address:
