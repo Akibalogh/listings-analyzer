@@ -1415,34 +1415,6 @@ function buildCard(l) {
     addressEl.textContent = address;
   }
   info.appendChild(addressEl);
-  /* Meta: price · beds/baths · sqft + enrichment badges */
-  var metaParts = [price, beds + 'bd/' + baths + 'ba', sqft + 'sqft'];
-  if (priceSqft) metaParts.push(priceSqft + '/sqft');
-  var metaEl = el('div', {className: 'card-meta'});
-  metaEl.appendChild(txt(metaParts.join(' \u00B7 ')));
-  /* Commute badge */
-  if (l.commute_minutes != null) {
-    var commuteCls = 'enrichment-badge commute-badge' + (l.commute_minutes > 90 ? ' long' : '');
-    metaEl.appendChild(txt(' \u00B7 '));
-    metaEl.appendChild(el('span', {className: commuteCls}, l.commute_minutes + 'min \uD83D\uDE86'));
-  }
-  /* School badge (best elementary percentile) */
-  var schoolPct = getTopSchoolPercentile(l);
-  if (schoolPct != null) {
-    metaEl.appendChild(txt(' \u00B7 '));
-    metaEl.appendChild(el('span', {className: 'enrichment-badge school-badge'}, 'Schools ' + schoolPct + '%'));
-  }
-  /* Status tag inline */
-  if (l.listing_status) {
-    var statusCls = 'listing-status-tag ';
-    var s = l.listing_status.toLowerCase();
-    if (s.indexOf('new') >= 0) statusCls += 'status-new';
-    else if (s.indexOf('increased') >= 0) statusCls += 'status-price-increased';
-    else if (s.indexOf('decreased') >= 0 || s.indexOf('reduced') >= 0) statusCls += 'status-price-decreased';
-    else statusCls += 'status-default';
-    metaEl.appendChild(el('span', {className: statusCls}, l.listing_status));
-  }
-  info.appendChild(metaEl);
   summary.appendChild(info);
 
   /* Verdict badge */
