@@ -259,37 +259,47 @@ class TestFetchCommuteTime:
 
     @patch("app.enrichment.settings")
     @patch("app.enrichment.httpx.Client")
-    def test_falls_back_to_drive(self, mock_client_cls, mock_settings):
-        """When TRANSIT returns no routes, fall back to DRIVE mode."""
+    def test_falls_back_to_drive_plus_transit(self, mock_client_cls, mock_settings):
+        """When TRANSIT from address fails, compute drive-to-station + transit."""
         mock_settings.google_maps_api_key = "test_key"
         mock_settings.commute_destination = "Brookfield Place, NYC"
 
-        transit_response = MagicMock()
-        transit_response.json.return_value = {"routes": []}  # no transit
-        transit_response.raise_for_status = MagicMock()
+        no_routes = MagicMock()
+        no_routes.json.return_value = {"routes": []}
+        no_routes.raise_for_status = MagicMock()
 
-        drive_response = MagicMock()
-        drive_response.json.return_value = {
-            "routes": [{"duration": "4500s", "distanceMeters": 60000}]
+        station_transit = MagicMock()
+        station_transit.json.return_value = {
+            "routes": [{"duration": "3600s", "distanceMeters": 50000}]  # 60 min
         }
-        drive_response.raise_for_status = MagicMock()
+        station_transit.raise_for_status = MagicMock()
+
+        drive_to_station = MagicMock()
+        drive_to_station.json.return_value = {
+            "routes": [{"duration": "600s", "distanceMeters": 5000}]  # 10 min
+        }
+        drive_to_station.raise_for_status = MagicMock()
 
         mock_client = MagicMock()
         mock_client.__enter__ = MagicMock(return_value=mock_client)
         mock_client.__exit__ = MagicMock(return_value=False)
-        # First call (TRANSIT) → empty, second call (DRIVE) → routes
-        mock_client.post.side_effect = [transit_response, drive_response]
+        # Call 1: TRANSIT from address → no routes
+        # Call 2: TRANSIT from station → 60 min
+        # Call 3: DRIVE to station → 10 min
+        mock_client.post.side_effect = [no_routes, station_transit, drive_to_station]
         mock_client_cls.return_value = mock_client
 
         result = fetch_commute_time("31 Lalli Dr", "Katonah", "NY", "10536")
         assert result is not None
-        assert result["commute_minutes"] == 75
-        assert result["commute_mode"] == "drive"
+        assert result["commute_minutes"] == 70  # 10 + 60
+        assert result["commute_mode"] == "drive+transit"
+        assert result["drive_minutes"] == 10
+        assert result["transit_minutes"] == 60
 
     @patch("app.enrichment.settings")
     @patch("app.enrichment.httpx.Client")
-    def test_handles_no_routes_both_modes(self, mock_client_cls, mock_settings):
-        """Returns None when both TRANSIT and DRIVE find no routes."""
+    def test_handles_no_routes_any_mode(self, mock_client_cls, mock_settings):
+        """Returns None when no transit routes exist (direct or via station)."""
         mock_settings.google_maps_api_key = "test_key"
         mock_settings.commute_destination = "Brookfield Place, NYC"
 

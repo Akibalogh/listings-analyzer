@@ -249,6 +249,11 @@ def _routes_request(
         return None
 
 
+def _parse_duration(route: dict) -> int:
+    """Extract duration in seconds from a Routes API route dict."""
+    return int(route.get("duration", "0s").rstrip("s"))
+
+
 def fetch_commute_time(
     address: str | None,
     town: str | None,
@@ -257,10 +262,13 @@ def fetch_commute_time(
 ) -> dict | None:
     """Fetch commute time to configured destination via Google Routes API.
 
-    Tries TRANSIT first; falls back to DRIVE if no transit route is found
-    (common for suburban addresses too far from a station for walking access).
+    Strategy:
+    1. TRANSIT from address (works if walkable to a station)
+    2. Drive-to-station hybrid: DRIVE to "{town} train station" + TRANSIT
+       from station to destination (common for suburban Westchester addresses)
+    3. Returns None if neither works (no point showing pure drive to Manhattan)
 
-    Returns dict with keys: commute_minutes, commute_mode ("transit"|"drive"),
+    Returns dict with keys: commute_minutes, commute_mode ("transit"|"drive+transit"),
     departure_time, route_duration_seconds — or None on failure/missing config.
     """
     if not settings.google_maps_api_key:
@@ -278,31 +286,43 @@ def fetch_commute_time(
     origin = f"{address}, {town}, {state or ''} {zip_code or ''}".strip()
     departure_time = _next_weekday_8am()
 
-    # Try TRANSIT first
+    # Strategy 1: TRANSIT from address (walking access to station)
     route = _routes_request(origin, destination, "TRANSIT", departure_time)
-    mode = "transit"
+    if route:
+        duration_seconds = _parse_duration(route)
+        commute_minutes = round(duration_seconds / 60)
+        logger.info(f"Commute (transit): {origin} → {destination} = {commute_minutes} min")
+        return {
+            "commute_minutes": commute_minutes,
+            "commute_mode": "transit",
+            "departure_time": departure_time.isoformat(),
+            "route_duration_seconds": duration_seconds,
+        }
 
-    # Fall back to DRIVE if no transit route
-    if not route:
-        logger.info(f"No transit routes from {origin}, falling back to DRIVE")
-        route = _routes_request(origin, destination, "DRIVE")
-        mode = "drive"
+    # Strategy 2: drive to station + transit from station
+    logger.info(f"No walk-to-transit from {origin}, trying drive-to-station")
+    station = f"{town} train station, {state or 'NY'}"
+    station_transit = _routes_request(station, destination, "TRANSIT", departure_time)
+    if station_transit:
+        drive_to_station = _routes_request(origin, station, "DRIVE")
+        if drive_to_station:
+            drive_secs = _parse_duration(drive_to_station)
+            transit_secs = _parse_duration(station_transit)
+            total_seconds = drive_secs + transit_secs
+            commute_minutes = round(total_seconds / 60)
+            logger.info(
+                f"Commute (drive+transit): {origin} → {station} ({round(drive_secs/60)} min drive) "
+                f"→ {destination} ({round(transit_secs/60)} min transit) = {commute_minutes} min total"
+            )
+            return {
+                "commute_minutes": commute_minutes,
+                "commute_mode": "drive+transit",
+                "departure_time": departure_time.isoformat(),
+                "route_duration_seconds": total_seconds,
+                "drive_minutes": round(drive_secs / 60),
+                "transit_minutes": round(transit_secs / 60),
+                "station": station,
+            }
 
-    if not route:
-        logger.warning(f"No routes found (transit or drive) from {origin}")
-        return None
-
-    duration_str = route.get("duration", "0s")  # e.g., "4320s"
-    duration_seconds = int(duration_str.rstrip("s"))
-    commute_minutes = round(duration_seconds / 60)
-
-    logger.info(
-        f"Commute ({mode}): {origin} → {destination} = {commute_minutes} min"
-    )
-
-    return {
-        "commute_minutes": commute_minutes,
-        "commute_mode": mode,
-        "departure_time": departure_time.isoformat(),
-        "route_duration_seconds": duration_seconds,
-    }
+    logger.warning(f"No transit routes found for {origin} (direct or via station)")
+    return None
