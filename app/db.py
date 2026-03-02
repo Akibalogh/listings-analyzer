@@ -156,7 +156,10 @@ def get_connection():
 
 
 # In-memory re-score state (single-instance app)
-rescore_state = {"in_progress": False, "total": 0, "completed": 0, "criteria_version": 0}
+rescore_state = {
+    "in_progress": False, "total": 0, "completed": 0,
+    "skipped": 0, "criteria_version": 0, "batch_id": None,
+}
 
 
 def init_db():
@@ -401,10 +404,12 @@ def _migrate_add_columns():
         ("listings", "school_data_json", "TEXT"),
         ("listings", "commute_minutes", "INTEGER"),
         ("listings", "commute_data_json", "TEXT"),
+        ("listings", "enriched_at", "TEXT"),
         ("scores", "evaluation_method", "TEXT DEFAULT 'deterministic'"),
         ("scores", "criteria_version", "INTEGER"),
         ("scores", "ai_reasoning", "TEXT"),
         ("scores", "property_summary", "TEXT"),
+        ("scores", "scored_at", "TEXT"),
     ]
     for table, column, col_type in alterations:
         try:
@@ -472,11 +477,12 @@ def update_score(
     reasoning: str | None,
     property_summary: str | None = None,
 ):
-    """Upsert a score for a listing."""
+    """Upsert a score for a listing. Automatically sets scored_at timestamp."""
     ph = _placeholder()
     hard_json = json.dumps([hr.model_dump() for hr in score.hard_results])
     soft_json = json.dumps(score.soft_points)
     concerns_json = json.dumps(score.concerns)
+    scored_at = datetime.now(timezone.utc).isoformat()
 
     with get_connection() as conn:
         cur = conn.cursor()
@@ -485,8 +491,8 @@ def update_score(
                 """INSERT INTO scores
                 (listing_id, score, verdict, hard_results_json, soft_points_json,
                  concerns_json, confidence, evaluation_method, criteria_version,
-                 ai_reasoning, property_summary)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 ai_reasoning, property_summary, scored_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (listing_id) DO UPDATE SET
                     score = EXCLUDED.score, verdict = EXCLUDED.verdict,
                     hard_results_json = EXCLUDED.hard_results_json,
@@ -496,18 +502,19 @@ def update_score(
                     evaluation_method = EXCLUDED.evaluation_method,
                     criteria_version = EXCLUDED.criteria_version,
                     ai_reasoning = EXCLUDED.ai_reasoning,
-                    property_summary = EXCLUDED.property_summary""",
+                    property_summary = EXCLUDED.property_summary,
+                    scored_at = EXCLUDED.scored_at""",
                 (listing_id, score.score, score.verdict, hard_json, soft_json,
                  concerns_json, score.confidence, method, criteria_version,
-                 reasoning, property_summary),
+                 reasoning, property_summary, scored_at),
             )
         else:
             cur.execute(
                 """INSERT INTO scores
                 (listing_id, score, verdict, hard_results_json, soft_points_json,
                  concerns_json, confidence, evaluation_method, criteria_version,
-                 ai_reasoning, property_summary)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 ai_reasoning, property_summary, scored_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (listing_id) DO UPDATE SET
                     score = excluded.score, verdict = excluded.verdict,
                     hard_results_json = excluded.hard_results_json,
@@ -517,10 +524,11 @@ def update_score(
                     evaluation_method = excluded.evaluation_method,
                     criteria_version = excluded.criteria_version,
                     ai_reasoning = excluded.ai_reasoning,
-                    property_summary = excluded.property_summary""",
+                    property_summary = excluded.property_summary,
+                    scored_at = excluded.scored_at""",
                 (listing_id, score.score, score.verdict, hard_json, soft_json,
                  concerns_json, score.confidence, method, criteria_version,
-                 reasoning, property_summary),
+                 reasoning, property_summary, scored_at),
             )
 
 
@@ -554,11 +562,16 @@ def update_listing_enrichment(listing_id: int, enrichment: dict):
     """Update enrichment data (address key, school data, commute) for a listing.
 
     Only updates columns present in the enrichment dict (supports partial updates).
+    Automatically sets enriched_at timestamp.
     """
     allowed_cols = {"address_key", "school_data_json", "commute_minutes", "commute_data_json"}
     cols_to_update = {k: v for k, v in enrichment.items() if k in allowed_cols}
     if not cols_to_update:
         return
+
+    # Always set enriched_at when enrichment data changes
+    now = datetime.now(timezone.utc).isoformat()
+    cols_to_update["enriched_at"] = now
 
     ph = _placeholder()
     set_clauses = [f"{col} = {ph}" for col in cols_to_update]
@@ -592,6 +605,30 @@ def get_all_listing_ids() -> list[int]:
         cur = conn.cursor()
         cur.execute("SELECT id FROM listings ORDER BY id")
         return [row[0] for row in cur.fetchall()]
+
+
+def get_all_score_metadata() -> dict[int, dict]:
+    """Get score metadata for all listings (for skip-unchanged logic).
+
+    Returns {listing_id: {"criteria_version": int, "scored_at": str}} for
+    every listing that has a score. Used to determine which listings can
+    be skipped during a rescore.
+    """
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT listing_id, criteria_version, scored_at FROM scores")
+        rows = cur.fetchall()
+        result = {}
+        if settings.is_postgres:
+            for row in rows:
+                result[row[0]] = {"criteria_version": row[1], "scored_at": row[2]}
+        else:
+            for row in rows:
+                result[row["listing_id"]] = {
+                    "criteria_version": row["criteria_version"],
+                    "scored_at": row["scored_at"],
+                }
+        return result
 
 
 def get_listing_by_id(listing_id: int) -> dict | None:

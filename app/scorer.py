@@ -40,9 +40,15 @@ _SUPPORTED_MEDIA = {
 }
 
 
-def _build_system_prompt() -> str:
-    """Build the system prompt with injection defense instructions."""
-    return """You are a real estate listing evaluator. You will be given:
+def _build_system_prompt() -> list[dict]:
+    """Build the system prompt with injection defense and prompt caching.
+
+    Returns a list of TextBlockParam dicts with cache_control so the
+    system prompt is cached across calls (~90% savings on cached tokens).
+    """
+    return [{
+        "type": "text",
+        "text": """You are a real estate listing evaluator. You will be given:
 1. EVALUATION INSTRUCTIONS written by the buyer
 2. LISTING DATA wrapped in <listing_data> tags
 3. Optionally, LISTING IMAGES to examine visually
@@ -97,7 +103,9 @@ ENRICHMENT DATA:
   Under 60 minutes is good, 60-90 is acceptable, over 90 is a significant negative.
   Mention commute time in your property_summary.
 
-Do NOT include any text outside the JSON object. Do NOT use markdown code fences."""
+Do NOT include any text outside the JSON object. Do NOT use markdown code fences.""",
+        "cache_control": {"type": "ephemeral"},
+    }]
 
 
 def _build_user_message(
@@ -357,3 +365,71 @@ def ai_score_listing(
             evaluation_method="deterministic",
         )
         return result, None
+
+
+# ---------------------------------------------------------------------------
+# Batch API helpers (for bulk rescoring at 50% discount)
+# ---------------------------------------------------------------------------
+
+
+def build_batch_request(
+    custom_id: str,
+    listing_data: dict,
+    instructions: str,
+    image_urls: list[str] | None = None,
+) -> dict:
+    """Build a single batch request item for the Anthropic Message Batches API.
+
+    Returns a dict with {"custom_id": ..., "params": {...}} suitable for
+    passing to client.messages.batches.create(requests=[...]).
+    """
+    system_prompt = _build_system_prompt()
+    user_content = _build_user_message(instructions, listing_data, image_urls)
+
+    return {
+        "custom_id": custom_id,
+        "params": {
+            "model": settings.ai_eval_model,
+            "max_tokens": 2048,
+            "system": system_prompt,
+            "messages": [{"role": "user", "content": user_content}],
+        },
+    }
+
+
+def parse_batch_result(result) -> tuple[ScoringResult | None, str | None]:
+    """Parse a single batch result into a ScoringResult.
+
+    Args:
+        result: A MessageBatchIndividualResponse from the batch results iterator.
+
+    Returns:
+        Tuple of (ScoringResult, reasoning_text) or (None, None) on failure.
+    """
+    try:
+        if result.result.type != "succeeded":
+            logger.warning(
+                f"Batch item {result.custom_id} failed: "
+                f"type={result.result.type}"
+            )
+            return None, None
+
+        message = result.result.message
+        response_text = message.content[0].text.strip()
+
+        # Strip markdown fences if present
+        cleaned = response_text
+        if cleaned.startswith("```"):
+            first_newline = cleaned.index("\n")
+            cleaned = cleaned[first_newline + 1:]
+        if cleaned.endswith("```"):
+            cleaned = cleaned[:-3]
+        cleaned = cleaned.strip()
+
+        ai_data = json.loads(cleaned)
+        score_result = _validate_ai_response(ai_data)
+        return score_result, score_result.reasoning
+
+    except Exception as e:
+        logger.error(f"Failed to parse batch result {result.custom_id}: {e}")
+        return None, None

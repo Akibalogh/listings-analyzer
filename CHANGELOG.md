@@ -7,6 +7,19 @@ All notable changes to Listings Analyzer are documented here.
 ## [Unreleased]
 
 ### Added
+- **Anthropic prompt caching** — system prompt now returns `cache_control: {"type": "ephemeral"}` block; cached across all scoring calls for ~90% savings on system prompt tokens
+- **Batch API for rescoring** — `_rescore_all()` now uses Anthropic Message Batches API (50% discount on all tokens); polls batch status every 30s; falls back to sequential scoring if batch submission fails
+- **Skip-unchanged listings** — `_should_skip()` checks `criteria_version` + `enriched_at`/`scored_at` timestamps; listings with same criteria and no new enrichment are skipped during rescore (instant completion on re-rescore)
+- **Score metadata tracking** — `enriched_at` (listings) and `scored_at` (scores) columns auto-set on update; `get_all_score_metadata()` fetches all score metadata in one query for skip logic
+- `build_batch_request()` and `parse_batch_result()` helpers in `app/scorer.py`
+- `rescore_state` now includes `skipped` count and `batch_id` for monitoring
+- 12 new tests: batch request construction (3), batch result parsing (4), skip-unchanged logic (5)
+
+### Changed
+- **Card height fix** — `.card-address` and `.card-meta` now use `-webkit-line-clamp: 2` for multi-line wrapping instead of single-line truncation; cards display ~3 visible rows
+- Extracted `_build_listing_data()` and `_get_image_urls()` helpers from `_rescore_one_listing()` for reuse by both single and batch scoring paths
+- Removed `ThreadPoolExecutor` from rescoring (replaced by Batch API)
+
 - **Address-based duplicate prevention** — `normalize_address()` in `app/enrichment.py` generates normalized address keys (Avenue→Ave, Street→St, etc.); `is_listing_duplicate_by_address()` checks DB before saving; prevents "10 Sherman Avenue" (OneHome) and "10 Sherman Ave" (plaintext) from being double-ingested
 - **School data enrichment** — SchoolDigger API integration (free DEV tier, 20 calls/day); fetches nearby school rankings by zip code; caches results in DB (`school_data_json`) to minimize API calls; school percentiles displayed on dashboard cards and fed into AI scoring
 - **Transit commute times** — Google Routes API integration (Essentials tier, 10K free/month); calculates Metro-North + subway + walking commute to Brookfield Place NYC (next weekday 8 AM); `commute_minutes` stored in DB and displayed as badge on dashboard cards

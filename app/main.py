@@ -4,7 +4,6 @@ import json
 import logging
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -20,7 +19,7 @@ from app.auth import (
 )
 from app.config import settings
 from app.poller import poll_once
-from app.scorer import ai_score_listing
+from app.scorer import ai_score_listing, build_batch_request, parse_batch_result
 
 logger = logging.getLogger(__name__)
 
@@ -443,10 +442,8 @@ def rescore_status():
 # --- Background re-scoring ---
 
 
-def _rescore_one_listing(listing_row: dict, criteria: dict) -> "ScoringResult":
-    """Re-score a single listing dict using AI evaluation."""
-    from app.models import ScoringResult
-
+def _build_listing_data(listing_row: dict) -> dict:
+    """Extract listing data dict from a DB row for AI scoring."""
     listing_data = {
         "address": listing_row.get("address"),
         "town": listing_row.get("town"),
@@ -471,14 +468,24 @@ def _rescore_one_listing(listing_row: dict, criteria: dict) -> "ScoringResult":
     if listing_row.get("commute_minutes") is not None:
         listing_data["commute_minutes"] = listing_row["commute_minutes"]
 
-    # Get image URLs if available
-    image_urls = None
+    return listing_data
+
+
+def _get_image_urls(listing_row: dict) -> list[str] | None:
+    """Extract image URLs from a DB row."""
     raw_images = listing_row.get("image_urls_json")
     if raw_images:
         try:
-            image_urls = json.loads(raw_images)
+            return json.loads(raw_images)
         except (json.JSONDecodeError, TypeError):
             pass
+    return None
+
+
+def _rescore_one_listing(listing_row: dict, criteria: dict) -> "ScoringResult":
+    """Re-score a single listing dict using AI evaluation."""
+    listing_data = _build_listing_data(listing_row)
+    image_urls = _get_image_urls(listing_row)
 
     score, reasoning = ai_score_listing(
         listing_data=listing_data,
@@ -498,41 +505,160 @@ def _rescore_one_listing(listing_row: dict, criteria: dict) -> "ScoringResult":
     return score
 
 
-_RESCORE_WORKERS = 1  # serialize bulk rescore to stay within 10k tokens/minute (image-heavy listings)
+def _should_skip(listing_row: dict, score_meta: dict | None, criteria_version: int) -> bool:
+    """Determine if a listing can be skipped during rescore.
+
+    Skip when: same criteria version AND no new enrichment since last score.
+    """
+    if not score_meta or score_meta.get("criteria_version") != criteria_version:
+        return False  # different criteria → must rescore
+    scored_at = score_meta.get("scored_at")
+    enriched_at = listing_row.get("enriched_at")
+    if enriched_at and scored_at and enriched_at > scored_at:
+        return False  # enrichment after scoring → must rescore
+    return True  # same criteria, no new enrichment → skip
 
 
 def _rescore_all(criteria_version: int, instructions: str):
-    """Background thread: re-score all listings concurrently."""
+    """Background thread: re-score all listings using the Batch API (50% discount).
+
+    Falls back to sequential scoring if batch submission fails.
+    """
+    import anthropic
+
     try:
         listing_ids = db.get_all_listing_ids()
-        db.rescore_state["total"] = len(listing_ids)
-        db.rescore_state["completed"] = 0
-
+        score_metadata = db.get_all_score_metadata()
         criteria = {"instructions": instructions, "version": criteria_version}
 
-        def _score_one(lid: int):
+        # Build batch requests, skipping unchanged listings
+        batch_requests = []
+        skip_count = 0
+        for lid in listing_ids:
             listing = db.get_listing_by_id(lid)
-            if listing:
-                _rescore_one_listing(listing, criteria)
+            if not listing:
+                continue
 
-        with ThreadPoolExecutor(max_workers=_RESCORE_WORKERS) as executor:
-            futures = {executor.submit(_score_one, lid): lid for lid in listing_ids}
-            for future in as_completed(futures):
-                lid = futures[future]
-                try:
-                    future.result()
-                except Exception as e:
-                    logger.error(f"Failed to re-score listing #{lid}: {e}")
-                db.rescore_state["completed"] += 1
+            meta = score_metadata.get(lid)
+            if _should_skip(listing, meta, criteria_version):
+                skip_count += 1
+                continue
+
+            listing_data = _build_listing_data(listing)
+            image_urls = _get_image_urls(listing)
+            req = build_batch_request(
+                custom_id=f"listing_{lid}",
+                listing_data=listing_data,
+                instructions=instructions,
+                image_urls=image_urls,
+            )
+            batch_requests.append(req)
+
+        total_to_score = len(batch_requests)
+        db.rescore_state["total"] = total_to_score + skip_count
+        db.rescore_state["completed"] = skip_count
+        db.rescore_state["skipped"] = skip_count
 
         logger.info(
-            f"Re-score complete: {db.rescore_state['completed']}/{db.rescore_state['total']} "
-            f"listings with criteria v{criteria_version}"
+            f"Rescore: {total_to_score} to score, {skip_count} skipped "
+            f"(criteria v{criteria_version})"
         )
+
+        if total_to_score == 0:
+            logger.info("Nothing to rescore — all listings up to date")
+            return
+
+        # Try batch API first
+        if not settings.anthropic_api_key:
+            logger.error("ANTHROPIC_API_KEY not set, cannot rescore")
+            return
+
+        try:
+            client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+            batch = client.messages.batches.create(requests=batch_requests)
+            batch_id = batch.id
+            db.rescore_state["batch_id"] = batch_id
+            logger.info(f"Batch submitted: {batch_id} ({total_to_score} requests)")
+
+            # Poll until batch completes
+            while True:
+                time.sleep(30)
+                batch = client.messages.batches.retrieve(batch_id)
+                status = batch.processing_status
+                logger.info(f"Batch {batch_id}: {status}")
+                if status == "ended":
+                    break
+
+            # Process results
+            processed = 0
+            for result in client.messages.batches.results(batch_id):
+                custom_id = result.custom_id
+                lid = int(custom_id.split("_")[1])
+
+                score_result, reasoning = parse_batch_result(result)
+                if score_result:
+                    score_result.criteria_version = criteria_version
+                    db.update_score(
+                        listing_id=lid,
+                        score=score_result,
+                        method=score_result.evaluation_method,
+                        criteria_version=criteria_version,
+                        reasoning=reasoning,
+                        property_summary=score_result.property_summary,
+                    )
+                else:
+                    logger.warning(f"Batch result for listing #{lid} could not be parsed")
+
+                processed += 1
+                db.rescore_state["completed"] = skip_count + processed
+
+            logger.info(
+                f"Batch rescore complete: {processed}/{total_to_score} scored, "
+                f"{skip_count} skipped (criteria v{criteria_version})"
+            )
+
+        except Exception as e:
+            logger.warning(f"Batch API failed ({e}), falling back to sequential")
+            _rescore_all_sequential(criteria_version, instructions, listing_ids, score_metadata)
+
     except Exception:
         logger.exception("Background re-score failed")
     finally:
         db.rescore_state["in_progress"] = False
+
+
+def _rescore_all_sequential(
+    criteria_version: int,
+    instructions: str,
+    listing_ids: list[int],
+    score_metadata: dict[int, dict],
+):
+    """Sequential fallback for rescoring (used when batch API fails)."""
+    criteria = {"instructions": instructions, "version": criteria_version}
+    skip_count = db.rescore_state.get("skipped", 0)
+    completed = skip_count
+
+    for lid in listing_ids:
+        listing = db.get_listing_by_id(lid)
+        if not listing:
+            continue
+
+        meta = score_metadata.get(lid)
+        if _should_skip(listing, meta, criteria_version):
+            continue
+
+        try:
+            _rescore_one_listing(listing, criteria)
+        except Exception as e:
+            logger.error(f"Failed to re-score listing #{lid}: {e}")
+
+        completed += 1
+        db.rescore_state["completed"] = completed
+
+    logger.info(
+        f"Sequential rescore complete: {completed - skip_count} scored, "
+        f"{skip_count} skipped (criteria v{criteria_version})"
+    )
 
 
 def _start_rescore(criteria_version: int, instructions: str):
@@ -543,6 +669,8 @@ def _start_rescore(criteria_version: int, instructions: str):
 
     db.rescore_state["in_progress"] = True
     db.rescore_state["criteria_version"] = criteria_version
+    db.rescore_state["skipped"] = 0
+    db.rescore_state["batch_id"] = None
     t = threading.Thread(
         target=_rescore_all,
         args=(criteria_version, instructions),
