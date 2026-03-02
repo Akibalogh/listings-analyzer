@@ -198,3 +198,112 @@ $1,695,000 5 Beds 3.5 Baths 3,274 Sq. Ft.
         assert listings[0].price == 1200000
         assert listings[1].address == "7 Dickson Ln"
         assert listings[1].price == 1695000
+
+    # --- Status prefix stripping ---
+
+    def test_status_prefix_stripped_new_listing(self):
+        """Status prefix 'New Listing' stripped and captured in listing_status."""
+        text = """
+New Listing
+$1,200,000 4 Beds 2.5 Baths 3,034 sqft
+101 Long Hill Rd E, Briarcliff Manor, NY 10510
+        """
+        listings = self.parser.parse(None, text)
+        assert len(listings) == 1
+        assert listings[0].listing_status == "New Listing"
+        assert listings[0].address == "101 Long Hill Rd E"
+        assert listings[0].town == "Briarcliff Manor"
+
+    def test_status_prefix_stripped_pending(self):
+        """Status prefix 'Pending' stripped and captured."""
+        text = """
+Pending
+31 Lalli Dr, Katonah, NY 10536
+$1,200,000 4 Beds 2.5 Baths 3,034 sqft
+        """
+        listings = self.parser.parse(None, text)
+        assert len(listings) == 1
+        assert listings[0].listing_status == "Pending"
+        assert listings[0].address == "31 Lalli Dr"
+
+    def test_status_prefix_stripped_coming_soon(self):
+        """Status prefix 'Coming Soon' stripped and captured."""
+        text = """
+Coming Soon
+$1,500,000 5 Beds 3 Baths 3,500 sqft
+MLS #123456
+        """
+        listings = self.parser.parse(None, text)
+        assert len(listings) == 1
+        assert listings[0].listing_status == "Coming Soon"
+        assert listings[0].mls_id == "123456"
+
+    def test_no_status_prefix_leaves_status_none(self):
+        """Without a status prefix, listing_status should be None."""
+        text = """
+$1,200,000 4 Beds 2.5 Baths 3,034 sqft
+31 Lalli Dr, Katonah, NY 10536
+        """
+        listings = self.parser.parse(None, text)
+        assert len(listings) == 1
+        assert listings[0].listing_status is None
+
+    def test_multiple_listings_with_status_prefixes(self):
+        """Multiple listing blocks with different status prefixes."""
+        text = """
+New Listing
+$1,200,000 4 Beds 2.5 Baths 3,034 sqft
+31 Lalli Dr, Katonah, NY 10536
+
+Price Drop
+$1,400,000 5 Beds 3.5 Baths 3,274 sqft
+7 Dickson Ln, Bedford Corners, NY 10549
+        """
+        listings = self.parser.parse(None, text)
+        assert len(listings) == 2
+        assert listings[0].listing_status == "New Listing"
+        assert listings[0].address == "31 Lalli Dr"
+        assert listings[1].listing_status == "Price Drop"
+        assert listings[1].address == "7 Dickson Ln"
+
+    # --- Directional suffixes ---
+
+    def test_inline_address_directional_suffix(self):
+        """Inline address with directional: '101 Long Hill Rd E, ...'."""
+        text = """
+$1,200,000 4 Beds 2.5 Baths 3,034 sqft
+101 Long Hill Rd E, Briarcliff Manor, NY 10510
+        """
+        listings = self.parser.parse(None, text)
+        assert len(listings) == 1
+        assert listings[0].address == "101 Long Hill Rd E"
+        assert listings[0].town == "Briarcliff Manor"
+        assert listings[0].state == "NY"
+        assert listings[0].zip_code == "10510"
+
+    def test_standalone_address_directional_suffix(self):
+        """Standalone street line with directional: '101 Long Hill Rd E'."""
+        text = """
+101 Long Hill Rd E
+Briarcliff Manor, New York 10510
+$1,200,000
+4 Beds 3 Baths 3,034 sqft
+        """
+        listings = self.parser.parse(None, text)
+        assert len(listings) == 1
+        assert listings[0].address == "101 Long Hill Rd E"
+        assert listings[0].town == "Briarcliff Manor"
+
+    def test_status_prefix_with_directional_address(self):
+        """Combined: status prefix + directional suffix."""
+        text = """
+New Listing
+$1,200,000 4 Beds 2.5 Baths 3,034 sqft
+101 Long Hill Rd E, Briarcliff Manor, NY 10510
+https://www.redfin.com/NY/Briarcliff-Manor/101-Long-Hill-Rd-E-10510/home/20082263
+        """
+        listings = self.parser.parse(None, text)
+        assert len(listings) == 1
+        assert listings[0].listing_status == "New Listing"
+        assert listings[0].address == "101 Long Hill Rd E"
+        assert listings[0].town == "Briarcliff Manor"

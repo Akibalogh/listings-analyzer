@@ -84,7 +84,7 @@ Primary alert source is OneKey MLS NY via `mlsalerts.example.com`.
 
 **Parsing strategy (parser chain):**
 1. **OneHome HTML parser** (`app/parsers/onehome.py`) — BeautifulSoup CSS selectors (fast, deterministic)
-2. **Plain text parser** (`app/parsers/plaintext.py`) — regex for `$price`, `N bd`, `N ba`, `N,NNN sqft`, `MLS #NNNNNN`; extracts inline addresses (`31 Lalli Dr, Katonah, NY 10536`) and listing URLs (Redfin, OneKeyMLS, OneHome)
+2. **Plain text parser** (`app/parsers/plaintext.py`) — regex for `$price`, `N bd`, `N ba`, `N,NNN sqft`, `MLS #NNNNNN`; strips and captures status prefixes (New Listing, Pending, etc.); extracts inline addresses with directional suffixes (`101 Long Hill Rd E, Briarcliff Manor, NY 10510`) and listing URLs (Redfin, OneKeyMLS, OneHome); falls back to Redfin URL path for address extraction
 3. **LLM fallback parser** (`app/parsers/llm.py`) — Claude Haiku for ambiguous/unknown formats
 
 ### Parsing Layer
@@ -349,6 +349,9 @@ Mobile-first single-page app served at `/` (`app/templates/dashboard.html`).
 - No criteria set → placeholder score saved (score=0, confidence=low, reason in concerns)
 - Prompt injection in listing data → XML-tagged isolation + system prompt defense
 - Multi-story / non-standard layouts (e.g., 34 Lakeshore Drive — upper/lower floors, no clear basement) → AI may Reject on "finished basement" hard requirement; these should be reviewed manually for future AI criteria refinement
+- **Status prefix stripping** — Redfin alert emails prepend status labels ("New Listing", "Pending", "Coming Soon", "Price Drop", etc.) as plain text before listing data. The plaintext parser strips these and captures them in `listing_status`. Known labels: New Listing, Pending, Coming Soon, New Favorite, Price Drop, Price Decreased, Price Increased, Back on Market, Sold, Contingent, Under Contract, Active, Open House.
+- **Directional address suffixes** — Street addresses may end with a cardinal direction (N, S, E, W, NE, NW, SE, SW) after the street type suffix (e.g., "101 Long Hill Rd E"). Both `STREET_RE` and `INLINE_ADDR_RE` patterns handle optional directional suffixes.
+- **Address-less listings** — Listings without an extractable address fall back to Redfin URL parsing, then zip-code-only. Address-less listings can be cleaned up via `/manage/cleanup` and re-ingested via reset + poll.
 
 ## 11. Phase Plan
 

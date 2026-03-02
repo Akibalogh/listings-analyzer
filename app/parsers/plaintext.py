@@ -18,10 +18,23 @@ ZIP_RE = re.compile(r"\b(\d{5})(?:-\d{4})?\b")
 
 # Street suffixes for address matching
 _SUFFIXES = r"(?:Street|St|Avenue|Ave|Lane|Ln|Drive|Dr|Road|Rd|Court|Ct|Place|Pl|Way|Circle|Cir|Boulevard|Blvd|Terrace|Ter)"
+_DIRECTIONS = r"(?:\s+(?:N|S|E|W|NE|NW|SE|SW))?"
 
-# Street address on its own line: "11 Jennifer Lane"
+# Listing status labels (Redfin alert prefixes)
+_STATUS_LABELS = (
+    "New Listing", "Pending", "Coming Soon", "New Favorite",
+    "Price Drop", "Price Decreased", "Price Increased",
+    "Back on Market", "Sold", "Contingent", "Under Contract",
+    "Active", "Open House",
+)
+STATUS_PREFIX_RE = re.compile(
+    r"^\s*(" + "|".join(re.escape(s) for s in _STATUS_LABELS) + r")\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+# Street address on its own line: "11 Jennifer Lane" or "101 Long Hill Rd E"
 STREET_RE = re.compile(
-    rf"^\s*(\d+\s+[\w\s.]+{_SUFFIXES}\.?)\s*$",
+    rf"^\s*(\d+\s+[\w\s.]+{_SUFFIXES}\.?{_DIRECTIONS})\s*$",
     re.IGNORECASE | re.MULTILINE,
 )
 
@@ -31,10 +44,10 @@ CITY_STATE_ZIP_RE = re.compile(
     re.MULTILINE,
 )
 
-# Inline address: "31 Lalli Dr, Katonah, NY 10536" (Redfin email format)
+# Inline address: "31 Lalli Dr, Katonah, NY 10536" or "101 Long Hill Rd E, ..."
 # Uses [^\n,]+ to prevent matching across lines or past commas
 INLINE_ADDR_RE = re.compile(
-    rf"(\d+[^\n,]+{_SUFFIXES}\.?)\s*,\s*([A-Za-z][^\n,]*?)\s*,\s*([A-Z]{{2}})\s+(\d{{5}}(?:-\d{{4}})?)",
+    rf"(\d+[^\n,]+{_SUFFIXES}\.?{_DIRECTIONS})\s*,\s*([A-Za-z][^\n,]*?)\s*,\s*([A-Z]{{2}})\s+(\d{{5}}(?:-\d{{4}})?)",
     re.IGNORECASE,
 )
 
@@ -111,6 +124,12 @@ class PlainTextParser(EmailParser):
 
     def _parse_block(self, block: str) -> ParsedListing | None:
         listing = ParsedListing(source_format="plaintext")
+
+        # Strip status prefix (e.g., "New Listing", "Pending") before parsing
+        status_match = STATUS_PREFIX_RE.search(block)
+        if status_match:
+            listing.listing_status = status_match.group(1).strip()
+            block = STATUS_PREFIX_RE.sub("", block).strip()
 
         price_match = PRICE_RE.search(block)
         if price_match:
