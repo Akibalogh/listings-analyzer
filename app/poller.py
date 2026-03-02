@@ -9,6 +9,7 @@ import sys
 
 from app import db
 from app.config import settings
+from app.enrichment import fetch_commute_time, fetch_school_data, normalize_address
 from app.gmail import fetch_new_emails, mark_processed
 from app.models import ParsedListing, ScoringResult
 from app.parsers import parser_chain
@@ -72,8 +73,15 @@ def poll_once() -> list[dict]:
 
         # Score and save each listing
         for listing in listings:
+            # Dedup: check MLS ID first
             if db.is_listing_duplicate(listing.mls_id):
                 logger.info(f"Duplicate listing MLS #{listing.mls_id}, skipping")
+                continue
+
+            # Dedup: check normalized address
+            address_key = normalize_address(listing.address, listing.town, listing.state)
+            if address_key and db.is_listing_duplicate_by_address(address_key):
+                logger.info(f"Duplicate listing by address: {listing.address}, {listing.town}")
                 continue
 
             # Scrape full listing page for description + images
@@ -89,8 +97,15 @@ def poll_once() -> list[dict]:
                     mls_id=listing.mls_id,
                 )
 
-            score = _evaluate_listing(listing, image_urls=scraped_images or None)
-            listing_id = db.save_listing(listing, score, email_id)
+            # --- Enrichment ---
+            enrichment = _enrich_listing(listing, address_key)
+
+            score = _evaluate_listing(
+                listing,
+                image_urls=scraped_images or None,
+                enrichment=enrichment,
+            )
+            listing_id = db.save_listing(listing, score, email_id, enrichment=enrichment)
 
             # Attach scraped images if found
             if scraped_images and listing_id:
@@ -107,6 +122,7 @@ def poll_once() -> list[dict]:
                 "score": score.score,
                 "confidence": score.confidence,
                 "concerns": score.concerns,
+                "commute_minutes": enrichment.get("commute_minutes"),
             }
             results.append(result)
             _print_result(listing, score)
@@ -120,9 +136,41 @@ def poll_once() -> list[dict]:
     return results
 
 
+def _enrich_listing(listing: ParsedListing, address_key: str | None) -> dict:
+    """Fetch school data and commute time for a listing.
+
+    Returns an enrichment dict with address_key, school_data_json,
+    commute_minutes, commute_data_json. All values may be None.
+    """
+    # School data — check DB cache first, then call API
+    school_data = None
+    cached_json = db.get_school_data_by_zip(listing.zip_code) if listing.zip_code else None
+    if cached_json:
+        logger.info(f"Using cached school data for zip {listing.zip_code}")
+        school_data_json = cached_json
+    else:
+        school_data = fetch_school_data(listing.zip_code, listing.state)
+        school_data_json = json.dumps(school_data) if school_data else None
+
+    # Commute time
+    commute_result = fetch_commute_time(
+        listing.address, listing.town, listing.state, listing.zip_code
+    )
+    commute_minutes = commute_result["commute_minutes"] if commute_result else None
+    commute_data_json = json.dumps(commute_result) if commute_result else None
+
+    return {
+        "address_key": address_key,
+        "school_data_json": school_data_json,
+        "commute_minutes": commute_minutes,
+        "commute_data_json": commute_data_json,
+    }
+
+
 def _evaluate_listing(
     listing: ParsedListing,
     image_urls: list[str] | None = None,
+    enrichment: dict | None = None,
 ) -> ScoringResult:
     """Evaluate a listing using AI criteria.
 
@@ -165,6 +213,16 @@ def _evaluate_listing(
         "listing_status": listing.listing_status,
         "description": listing.description,
     }
+
+    # Add enrichment data so AI can factor in school quality + commute
+    if enrichment:
+        if enrichment.get("school_data_json"):
+            try:
+                listing_data["school_data"] = json.loads(enrichment["school_data_json"])
+            except (json.JSONDecodeError, TypeError):
+                pass
+        if enrichment.get("commute_minutes") is not None:
+            listing_data["commute_minutes"] = enrichment["commute_minutes"]
 
     score, _ = ai_score_listing(
         listing_data=listing_data,

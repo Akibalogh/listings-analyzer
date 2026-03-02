@@ -89,6 +89,14 @@ Worth Touring — 65/100
 
 A confirmed finished basement would push this into Strong Match territory. Price is the main concern — negotiate accordingly.
 
+ENRICHMENT DATA:
+- If school_data is provided in <listing_data>, factor school quality into your evaluation.
+  Higher rank_percentile = better school. Weight elementary schools most heavily.
+  Mention specific school names and percentiles in your property_summary.
+- If commute_minutes is provided in <listing_data>, factor transit commute time into your scoring.
+  Under 60 minutes is good, 60-90 is acceptable, over 90 is a significant negative.
+  Mention commute time in your property_summary.
+
 Do NOT include any text outside the JSON object. Do NOT use markdown code fences."""
 
 

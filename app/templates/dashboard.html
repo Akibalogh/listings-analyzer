@@ -681,6 +681,92 @@
     line-height: 1.5;
   }
 
+  /* Enrichment badges (commute + school) */
+  .enrichment-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    font-size: 11px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .commute-badge {
+    color: #0369a1;
+  }
+  .commute-badge.long { color: var(--red); }
+  .school-badge {
+    color: #7c3aed;
+  }
+
+  /* Enrichment detail section */
+  .enrichment-section {
+    margin-top: 14px;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+  }
+  @media (max-width: 400px) {
+    .enrichment-section { grid-template-columns: 1fr; }
+  }
+  .enrichment-card {
+    padding: 10px 12px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: #f8fafc;
+  }
+  .enrichment-card h5 {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-faint);
+    margin-bottom: 6px;
+  }
+  .commute-detail-value {
+    font-size: 22px;
+    font-weight: 800;
+    color: #0369a1;
+    letter-spacing: -0.5px;
+  }
+  .commute-detail-value.long { color: var(--red); }
+  .commute-detail-label {
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+  .school-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 3px 0;
+    font-size: 12px;
+    border-bottom: 1px solid #f1f5f9;
+  }
+  .school-row:last-child { border-bottom: none; }
+  .school-name {
+    color: var(--text-secondary);
+    flex: 1;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin-right: 8px;
+  }
+  .school-rank {
+    font-weight: 700;
+    color: var(--purple);
+    flex-shrink: 0;
+  }
+  .school-level-header {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    color: var(--text-faint);
+    margin-top: 6px;
+    margin-bottom: 2px;
+  }
+  .school-level-header:first-child { margin-top: 0; }
+
   /* Toured badge */
   .toured-badge {
     display: inline-flex;
@@ -986,6 +1072,8 @@
       <option value="sqft-desc">Sqft (high-low)</option>
       <option value="ppsqft-asc">$/sqft (low-high)</option>
       <option value="date-desc">Newest first</option>
+      <option value="commute-asc">Commute (shortest)</option>
+      <option value="schools-desc">Schools (best)</option>
     </select>
   </div>
 
@@ -1262,6 +1350,14 @@ function render() {
         var ppB = (b.price && b.sqft) ? b.price / b.sqft : 9999999;
         return ppA - ppB;
       case 'date-desc': return (b.id || 0) - (a.id || 0);
+      case 'commute-asc':
+        var cA = a.commute_minutes != null ? a.commute_minutes : 9999;
+        var cB = b.commute_minutes != null ? b.commute_minutes : 9999;
+        return cA - cB;
+      case 'schools-desc':
+        var sA = getTopSchoolPercentile(a) || 0;
+        var sB = getTopSchoolPercentile(b) || 0;
+        return sB - sA;
       default: return 0;
     }
   });
@@ -1316,11 +1412,23 @@ function buildCard(l) {
     addressEl.textContent = address;
   }
   info.appendChild(addressEl);
-  /* Meta: price · beds/baths · sqft */
+  /* Meta: price · beds/baths · sqft + enrichment badges */
   var metaParts = [price, beds + 'bd/' + baths + 'ba', sqft + 'sqft'];
   if (priceSqft) metaParts.push(priceSqft + '/sqft');
   var metaEl = el('div', {className: 'card-meta'});
-  metaEl.textContent = metaParts.join(' · ');
+  metaEl.appendChild(txt(metaParts.join(' \u00B7 ')));
+  /* Commute badge */
+  if (l.commute_minutes != null) {
+    var commuteCls = 'enrichment-badge commute-badge' + (l.commute_minutes > 90 ? ' long' : '');
+    metaEl.appendChild(txt(' \u00B7 '));
+    metaEl.appendChild(el('span', {className: commuteCls}, l.commute_minutes + 'min \uD83D\uDE86'));
+  }
+  /* School badge (best elementary percentile) */
+  var schoolPct = getTopSchoolPercentile(l);
+  if (schoolPct != null) {
+    metaEl.appendChild(txt(' \u00B7 '));
+    metaEl.appendChild(el('span', {className: 'enrichment-badge school-badge'}, 'Schools ' + schoolPct + '%'));
+  }
   /* Status tag inline */
   if (l.listing_status) {
     var statusCls = 'listing-status-tag ';
@@ -1364,6 +1472,13 @@ function buildCard(l) {
   var badgeText = method === 'ai' ? 'AI' + (l.criteria_version ? ' v' + l.criteria_version : '') : 'Auto';
   scoreRow.appendChild(el('span', {className: badgeClass}, badgeText));
   detailInner.appendChild(el('div', {className: 'score-section'}, [scoreRow]));
+
+  /* Enrichment section (commute + schools) */
+  var hasCommute = l.commute_minutes != null;
+  var schoolData = parseJSON(l.school_data_json, null);
+  if (hasCommute || schoolData) {
+    detailInner.appendChild(buildEnrichmentSection(l.commute_minutes, schoolData));
+  }
 
   /* AI property summary (replaces hard_results + concerns + reasoning for AI-scored listings) */
   if (l.property_summary) {
@@ -1467,6 +1582,71 @@ function buildConcerns(concerns) {
   var container = el('div', {className: 'concerns'}, [el('h4', null, 'Concerns')]);
   concerns.forEach(function(c) { container.appendChild(el('div', {className: 'concern-item'}, c)); });
   return container;
+}
+
+function getTopSchoolPercentile(l) {
+  var data = parseJSON(l.school_data_json, null);
+  if (!data) return null;
+  /* Return the best elementary school percentile (most relevant for homebuyers) */
+  var schools = data.elementary || [];
+  if (schools.length === 0) {
+    /* Fall back to any level */
+    schools = (data.middle || []).concat(data.high || []);
+  }
+  if (schools.length === 0) return null;
+  var best = 0;
+  schools.forEach(function(s) {
+    if (s.rank_percentile && s.rank_percentile > best) best = s.rank_percentile;
+  });
+  return best > 0 ? Math.round(best) : null;
+}
+
+function buildEnrichmentSection(commuteMinutes, schoolData) {
+  var section = el('div', {className: 'enrichment-section'});
+
+  /* Commute card */
+  if (commuteMinutes != null) {
+    var isLong = commuteMinutes > 90;
+    var commuteCard = el('div', {className: 'enrichment-card'}, [
+      el('h5', null, 'Transit Commute'),
+      el('div', {className: 'commute-detail-value' + (isLong ? ' long' : '')}, commuteMinutes + ' min'),
+      el('div', {className: 'commute-detail-label'}, 'to Brookfield Place (8 AM weekday)')
+    ]);
+    section.appendChild(commuteCard);
+  }
+
+  /* Schools card */
+  if (schoolData) {
+    var schoolCard = el('div', {className: 'enrichment-card'});
+    schoolCard.appendChild(el('h5', null, 'Nearby Schools'));
+
+    var levels = [
+      {key: 'elementary', label: 'Elementary'},
+      {key: 'middle', label: 'Middle'},
+      {key: 'high', label: 'High'}
+    ];
+    var hasAny = false;
+    levels.forEach(function(lvl) {
+      var schools = schoolData[lvl.key] || [];
+      if (schools.length === 0) return;
+      hasAny = true;
+      schoolCard.appendChild(el('div', {className: 'school-level-header'}, lvl.label));
+      schools.forEach(function(s) {
+        var rankText = s.rank_percentile ? Math.round(s.rank_percentile) + '%' : '?';
+        var distText = s.distance_miles ? ' (' + s.distance_miles.toFixed(1) + ' mi)' : '';
+        schoolCard.appendChild(el('div', {className: 'school-row'}, [
+          el('span', {className: 'school-name'}, (s.name || 'Unknown') + distText),
+          el('span', {className: 'school-rank'}, rankText)
+        ]));
+      });
+    });
+    if (!hasAny) {
+      schoolCard.appendChild(el('div', {style: 'font-size:12px;color:var(--text-muted)'}, 'No school data available'));
+    }
+    section.appendChild(schoolCard);
+  }
+
+  return section;
 }
 
 function buildImageSection(l) {

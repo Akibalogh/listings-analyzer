@@ -462,6 +462,15 @@ def _rescore_one_listing(listing_row: dict, criteria: dict) -> "ScoringResult":
         "description": listing_row.get("description"),
     }
 
+    # Add enrichment data (school quality + commute time)
+    if listing_row.get("school_data_json"):
+        try:
+            listing_data["school_data"] = json.loads(listing_row["school_data_json"])
+        except (json.JSONDecodeError, TypeError):
+            pass
+    if listing_row.get("commute_minutes") is not None:
+        listing_data["commute_minutes"] = listing_row["commute_minutes"]
+
     # Get image URLs if available
     image_urls = None
     raw_images = listing_row.get("image_urls_json")
@@ -819,6 +828,101 @@ def manage_scrape_descriptions(request: Request):
         "descriptions_scraped": scraped,
         "images_found": images_found,
         "skipped": skipped,
+        "errors": errors,
+        "rescore_started": rescore_started,
+    }
+
+
+@app.post("/manage/enrich")
+def manage_enrich(request: Request):
+    """Backfill enrichment data (school scores + commute times) for existing listings.
+
+    Iterates all listings and calls SchoolDigger + Google Routes APIs for
+    those missing enrichment data. Respects rate limits by caching school
+    data per zip code in the DB.
+
+    Protected by MANAGE_KEY env var.
+    """
+    from app.enrichment import fetch_commute_time, fetch_school_data, normalize_address
+
+    key = request.headers.get("x-manage-key", "")
+    if not settings.manage_key or key != settings.manage_key:
+        raise HTTPException(status_code=403, detail="Invalid or missing management key")
+
+    listing_ids = db.get_all_listing_ids()
+    enriched = 0
+    school_calls = 0
+    commute_calls = 0
+    errors = []
+
+    for lid in listing_ids:
+        listing = db.get_listing_by_id(lid)
+        if not listing:
+            continue
+
+        enrichment: dict = {}
+        changed = False
+
+        # Address key (for dedup)
+        if not listing.get("address_key"):
+            address_key = normalize_address(
+                listing.get("address"), listing.get("town"), listing.get("state")
+            )
+            if address_key:
+                enrichment["address_key"] = address_key
+                changed = True
+
+        # School data — check DB cache first
+        if not listing.get("school_data_json"):
+            zip_code = listing.get("zip_code")
+            cached_json = db.get_school_data_by_zip(zip_code) if zip_code else None
+            if cached_json:
+                enrichment["school_data_json"] = cached_json
+                changed = True
+            else:
+                school_data = fetch_school_data(zip_code, listing.get("state"))
+                if school_data:
+                    import json as _json
+
+                    enrichment["school_data_json"] = _json.dumps(school_data)
+                    school_calls += 1
+                    changed = True
+
+        # Commute time
+        if listing.get("commute_minutes") is None:
+            commute_result = fetch_commute_time(
+                listing.get("address"),
+                listing.get("town"),
+                listing.get("state"),
+                listing.get("zip_code"),
+            )
+            if commute_result:
+                enrichment["commute_minutes"] = commute_result["commute_minutes"]
+                enrichment["commute_data_json"] = json.dumps(commute_result)
+                commute_calls += 1
+                changed = True
+
+        if changed:
+            try:
+                db.update_listing_enrichment(lid, enrichment)
+                enriched += 1
+            except Exception as e:
+                logger.error(f"Failed to enrich listing #{lid}: {e}")
+                errors.append(f"#{lid}: {e}")
+
+    # Trigger rescore if we enriched anything
+    rescore_started = False
+    if enriched > 0:
+        criteria = db.get_active_criteria()
+        if criteria:
+            _start_rescore(criteria["version"], criteria["instructions"])
+            rescore_started = True
+
+    return {
+        "listings_checked": len(listing_ids),
+        "enriched": enriched,
+        "school_api_calls": school_calls,
+        "commute_api_calls": commute_calls,
         "errors": errors,
         "rescore_started": rescore_started,
     }

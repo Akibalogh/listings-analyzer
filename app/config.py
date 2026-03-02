@@ -34,6 +34,16 @@ class Settings(BaseSettings):
     # AI evaluation model
     ai_eval_model: str = "claude-haiku-4-5-20251001"
 
+    # SchoolDigger API (free dev tier: 20 calls/day)
+    schooldigger_app_id: str = ""
+    schooldigger_app_key: str = ""
+
+    # Google Maps / Routes API
+    google_maps_api_key: str = ""
+
+    # Commute destination (default: Brookfield Place)
+    commute_destination: str = "Brookfield Place, 230 Vesey St, New York, NY 10281"
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
     @property

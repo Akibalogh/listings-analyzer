@@ -41,17 +41,23 @@ You want:
 - Offer execution
 - Comps / price analysis (future)
 
+### Data Enrichment
+- **School data** — SchoolDigger API (free DEV tier, 20 calls/day) fetches nearby school rankings by zip code; cached in DB to avoid rate limit; displayed on cards and fed into AI scoring
+- **Transit commute times** — Google Routes API (Essentials tier, 10K free/month) calculates Metro-North + subway + walking commute to Brookfield Place NYC (next weekday 8 AM); displayed as badge on dashboard cards
+- **Address-based dedup** — Normalized address keys (Avenue→Ave, Street→St, etc.) prevent duplicate listings across different email parsers
+
 ## 3. User Flow
 
 1. Agent sends listing alert emails to your Gmail.
 2. App auto-polls Gmail (configurable interval, default 1h) or user clicks "Check Email".
 3. Parser extracts structured listing data from email HTML/text.
 4. Listing URLs are extracted from email links; descriptions scraped from listing pages.
-5. AI evaluator (Claude Haiku) scores each listing against user-defined criteria.
-6. User reviews scored listings on mobile dashboard (public read-only — no login required to view).
-7. User can edit AI criteria → all listings auto-re-scored.
-8. User can reprocess old emails to backfill URLs/descriptions after parser updates.
-9. User can mark listings as toured to track which properties have been visited.
+5. Enrichment: school rankings fetched via SchoolDigger API (cached by zip), commute times via Google Routes API.
+6. AI evaluator (Claude Haiku) scores each listing against user-defined criteria, factoring in school quality and commute time.
+7. User reviews scored listings on mobile dashboard (public read-only — no login required to view).
+8. User can edit AI criteria → all listings auto-re-scored.
+9. User can reprocess old emails to backfill URLs/descriptions after parser updates.
+10. User can mark listings as toured to track which properties have been visited.
 
 ## 4. System Architecture
 

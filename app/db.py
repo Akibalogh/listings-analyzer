@@ -247,18 +247,51 @@ def is_listing_duplicate(mls_id: str) -> bool:
         return cur.fetchone() is not None
 
 
-def save_listing(listing: ParsedListing, score: ScoringResult, email_id: int) -> int:
+def is_listing_duplicate_by_address(address_key: str) -> bool:
+    """Check if a listing with this normalized address key already exists."""
+    if not address_key:
+        return False
+    ph = _placeholder()
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(f"SELECT 1 FROM listings WHERE address_key = {ph}", (address_key,))
+        return cur.fetchone() is not None
+
+
+def get_school_data_by_zip(zip_code: str) -> str | None:
+    """Return cached school_data_json from any listing with the same zip code.
+
+    Avoids redundant SchoolDigger API calls for listings in the same zip.
+    """
+    if not zip_code:
+        return None
+    ph = _placeholder()
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            f"SELECT school_data_json FROM listings WHERE zip_code = {ph} AND school_data_json IS NOT NULL LIMIT 1",
+            (zip_code,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        return row[0] if settings.is_postgres else row["school_data_json"]
+
+
+def save_listing(listing: ParsedListing, score: ScoringResult, email_id: int, enrichment: dict | None = None) -> int:
     """Save a listing and its score. Returns the listing ID."""
     ph = _placeholder()
     with get_connection() as conn:
         cur = conn.cursor()
 
+        enr = enrichment or {}
         cur.execute(
             f"""INSERT INTO listings
             (source_email_id, address, town, state, zip_code, mls_id, price, sqft,
              bedrooms, bathrooms, property_type, listing_status, source_format,
-             listing_url, description)
-            VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})""",
+             listing_url, description,
+             address_key, school_data_json, commute_minutes, commute_data_json)
+            VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})""",
             (
                 email_id,
                 listing.address,
@@ -275,6 +308,10 @@ def save_listing(listing: ParsedListing, score: ScoringResult, email_id: int) ->
                 listing.source_format,
                 listing.listing_url,
                 listing.description,
+                enr.get("address_key"),
+                enr.get("school_data_json"),
+                enr.get("commute_minutes"),
+                enr.get("commute_data_json"),
             ),
         )
 
@@ -360,6 +397,10 @@ def _migrate_add_columns():
         ("listings", "image_urls_json", "TEXT"),
         ("listings", "description", "TEXT"),
         ("listings", "toured", "BOOLEAN DEFAULT FALSE"),
+        ("listings", "address_key", "TEXT"),
+        ("listings", "school_data_json", "TEXT"),
+        ("listings", "commute_minutes", "INTEGER"),
+        ("listings", "commute_data_json", "TEXT"),
         ("scores", "evaluation_method", "TEXT DEFAULT 'deterministic'"),
         ("scores", "criteria_version", "INTEGER"),
         ("scores", "ai_reasoning", "TEXT"),
@@ -506,6 +547,26 @@ def update_listing_description(listing_id: int, listing_url: str, description: s
         cur.execute(
             f"UPDATE listings SET listing_url = {ph}, description = {ph} WHERE id = {ph}",
             (listing_url, description, listing_id),
+        )
+
+
+def update_listing_enrichment(listing_id: int, enrichment: dict):
+    """Update enrichment data (address key, school data, commute) for a listing."""
+    ph = _placeholder()
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            f"""UPDATE listings SET
+                address_key = {ph}, school_data_json = {ph},
+                commute_minutes = {ph}, commute_data_json = {ph}
+            WHERE id = {ph}""",
+            (
+                enrichment.get("address_key"),
+                enrichment.get("school_data_json"),
+                enrichment.get("commute_minutes"),
+                enrichment.get("commute_data_json"),
+                listing_id,
+            ),
         )
 
 

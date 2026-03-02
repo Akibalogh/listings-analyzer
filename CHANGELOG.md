@@ -7,6 +7,17 @@ All notable changes to Listings Analyzer are documented here.
 ## [Unreleased]
 
 ### Added
+- **Address-based duplicate prevention** — `normalize_address()` in `app/enrichment.py` generates normalized address keys (Avenue→Ave, Street→St, etc.); `is_listing_duplicate_by_address()` checks DB before saving; prevents "10 Sherman Avenue" (OneHome) and "10 Sherman Ave" (plaintext) from being double-ingested
+- **School data enrichment** — SchoolDigger API integration (free DEV tier, 20 calls/day); fetches nearby school rankings by zip code; caches results in DB (`school_data_json`) to minimize API calls; school percentiles displayed on dashboard cards and fed into AI scoring
+- **Transit commute times** — Google Routes API integration (Essentials tier, 10K free/month); calculates Metro-North + subway + walking commute to Brookfield Place NYC (next weekday 8 AM); `commute_minutes` stored in DB and displayed as badge on dashboard cards
+- **AI scorer enrichment awareness** — system prompt updated to explicitly factor school quality and commute times into evaluations; mentions specific school names/percentiles and commute duration in property_summary
+- **Dashboard enrichment display** — commute badge ("52min 🚆") and school score ("Schools 85%") on compact card meta line; expandable enrichment section with full school breakdown (elementary/middle/high with names, ranks, distances) and commute details; "Commute (shortest)" and "Schools (best)" sort options
+- **`POST /manage/enrich` endpoint** — backfills school data + commute times for existing listings; respects SchoolDigger rate limits via zip-code DB cache; triggers rescore after enrichment
+- **`app/enrichment.py` module** — address normalization, SchoolDigger API client, Google Routes API client
+- 36 new tests: address normalization (19), school data (5), commute time (5), state normalization (1), manage/enrich endpoint (4), DB dedup integration (2)
+- 4 new DB columns: `address_key`, `school_data_json`, `commute_minutes`, `commute_data_json`
+- 4 new env vars: `SCHOOLDIGGER_APP_ID`, `SCHOOLDIGGER_APP_KEY`, `GOOGLE_MAPS_API_KEY`, `COMMUTE_DESTINATION`
+
 - **Domain-level email source matching** — `ALERT_SENDERS` supports domain-level matching (e.g., `redfin.com` catches all Redfin senders: daily alerts, tour confirmations, favorited homes, market updates)
 - **Date-filtered sender support** — `SENDER_DATE_FILTERS` env var (format: `email:days,email:days`) enables time-bounded email ingestion for senders like personal contacts; separate Gmail queries with `newer_than:Nd`
 - **Inline address extraction** — PlainTextParser now handles Redfin-style inline addresses (`31 Lalli Dr, Katonah, NY 10536`) via `INLINE_ADDR_RE` regex; falls back after standalone street/city patterns
