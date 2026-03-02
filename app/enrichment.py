@@ -214,16 +214,54 @@ def _next_weekday_8am() -> datetime:
     return target.astimezone(timezone.utc)
 
 
+def _routes_request(
+    origin: str,
+    destination: str,
+    travel_mode: str,
+    departure_time: datetime | None = None,
+) -> dict | None:
+    """Make a single Google Routes API request. Returns parsed JSON or None."""
+    headers = {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": settings.google_maps_api_key,
+        "X-Goog-FieldMask": "routes.duration,routes.distanceMeters",
+    }
+    body: dict = {
+        "origin": {"address": origin},
+        "destination": {"address": destination},
+        "travelMode": travel_mode,
+        "computeAlternativeRoutes": False,
+    }
+    if departure_time:
+        body["departureTime"] = departure_time.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    try:
+        with httpx.Client(timeout=15.0) as client:
+            response = client.post(_ROUTES_API_URL, headers=headers, json=body)
+            response.raise_for_status()
+            data = response.json()
+        routes = data.get("routes", [])
+        if not routes:
+            return None
+        return routes[0]
+    except Exception as e:
+        logger.warning(f"Google Routes API error ({travel_mode}) for {origin}: {e}")
+        return None
+
+
 def fetch_commute_time(
     address: str | None,
     town: str | None,
     state: str | None,
     zip_code: str | None,
 ) -> dict | None:
-    """Fetch transit commute time to configured destination via Google Routes API.
+    """Fetch commute time to configured destination via Google Routes API.
 
-    Returns dict with keys: commute_minutes (int), departure_time, route_duration_seconds
-    or None on failure/missing config.
+    Tries TRANSIT first; falls back to DRIVE if no transit route is found
+    (common for suburban addresses too far from a station for walking access).
+
+    Returns dict with keys: commute_minutes, commute_mode ("transit"|"drive"),
+    departure_time, route_duration_seconds — or None on failure/missing config.
     """
     if not settings.google_maps_api_key:
         logger.debug("Google Maps API key not configured, skipping commute")
@@ -240,43 +278,31 @@ def fetch_commute_time(
     origin = f"{address}, {town}, {state or ''} {zip_code or ''}".strip()
     departure_time = _next_weekday_8am()
 
-    try:
-        headers = {
-            "Content-Type": "application/json",
-            "X-Goog-Api-Key": settings.google_maps_api_key,
-            "X-Goog-FieldMask": "routes.duration,routes.distanceMeters",
-        }
-        body = {
-            "origin": {"address": origin},
-            "destination": {"address": destination},
-            "travelMode": "TRANSIT",
-            "departureTime": departure_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "computeAlternativeRoutes": False,
-        }
+    # Try TRANSIT first
+    route = _routes_request(origin, destination, "TRANSIT", departure_time)
+    mode = "transit"
 
-        with httpx.Client(timeout=15.0) as client:
-            response = client.post(_ROUTES_API_URL, headers=headers, json=body)
-            response.raise_for_status()
-            data = response.json()
+    # Fall back to DRIVE if no transit route
+    if not route:
+        logger.info(f"No transit routes from {origin}, falling back to DRIVE")
+        route = _routes_request(origin, destination, "DRIVE")
+        mode = "drive"
 
-        routes = data.get("routes", [])
-        if not routes:
-            logger.warning(f"No transit routes found from {origin}")
-            return None
-
-        route = routes[0]
-        duration_str = route.get("duration", "0s")  # e.g., "4320s"
-        duration_seconds = int(duration_str.rstrip("s"))
-        commute_minutes = round(duration_seconds / 60)
-
-        logger.info(f"Commute: {origin} → {destination} = {commute_minutes} min")
-
-        return {
-            "commute_minutes": commute_minutes,
-            "departure_time": departure_time.isoformat(),
-            "route_duration_seconds": duration_seconds,
-        }
-
-    except Exception as e:
-        logger.warning(f"Google Routes API error for {origin}: {e}")
+    if not route:
+        logger.warning(f"No routes found (transit or drive) from {origin}")
         return None
+
+    duration_str = route.get("duration", "0s")  # e.g., "4320s"
+    duration_seconds = int(duration_str.rstrip("s"))
+    commute_minutes = round(duration_seconds / 60)
+
+    logger.info(
+        f"Commute ({mode}): {origin} → {destination} = {commute_minutes} min"
+    )
+
+    return {
+        "commute_minutes": commute_minutes,
+        "commute_mode": mode,
+        "departure_time": departure_time.isoformat(),
+        "route_duration_seconds": duration_seconds,
+    }

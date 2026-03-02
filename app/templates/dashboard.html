@@ -1460,9 +1460,11 @@ function buildCard(l) {
 
   /* Enrichment section (commute + schools) */
   var hasCommute = l.commute_minutes != null;
+  var commuteData = parseJSON(l.commute_data_json, null);
+  var commuteMode = (commuteData && commuteData.commute_mode) || 'transit';
   var schoolData = parseJSON(l.school_data_json, null);
   if (hasCommute || schoolData) {
-    detailInner.appendChild(buildEnrichmentSection(l.commute_minutes, schoolData));
+    detailInner.appendChild(buildEnrichmentSection(l.commute_minutes, commuteMode, schoolData));
   }
 
   /* AI property summary (replaces hard_results + concerns + reasoning for AI-scored listings) */
@@ -1586,16 +1588,19 @@ function getTopSchoolPercentile(l) {
   return best > 0 ? Math.round(best) : null;
 }
 
-function buildEnrichmentSection(commuteMinutes, schoolData) {
+function buildEnrichmentSection(commuteMinutes, commuteMode, schoolData) {
   var section = el('div', {className: 'enrichment-section'});
 
   /* Commute card */
   if (commuteMinutes != null) {
     var isLong = commuteMinutes > 90;
+    var isDrive = commuteMode === 'drive';
+    var icon = isDrive ? '\uD83D\uDE97' : '\uD83D\uDE86';
+    var modeLabel = isDrive ? 'Driving' : 'Transit';
     var commuteCard = el('div', {className: 'enrichment-card'}, [
-      el('h5', null, 'Transit Commute'),
+      el('h5', null, icon + ' ' + modeLabel + ' Commute'),
       el('div', {className: 'commute-detail-value' + (isLong ? ' long' : '')}, commuteMinutes + ' min'),
-      el('div', {className: 'commute-detail-label'}, 'to Brookfield Place (8 AM weekday)')
+      el('div', {className: 'commute-detail-label'}, 'to Brookfield Place' + (isDrive ? '' : ' (8 AM weekday)'))
     ]);
     section.appendChild(commuteCard);
   }

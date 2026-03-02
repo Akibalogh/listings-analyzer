@@ -467,6 +467,14 @@ def _build_listing_data(listing_row: dict) -> dict:
             pass
     if listing_row.get("commute_minutes") is not None:
         listing_data["commute_minutes"] = listing_row["commute_minutes"]
+        # Extract commute_mode from stored JSON (transit or drive)
+        commute_json = listing_row.get("commute_data_json")
+        if commute_json:
+            try:
+                cd = json.loads(commute_json)
+                listing_data["commute_mode"] = cd.get("commute_mode", "transit")
+            except (json.JSONDecodeError, TypeError):
+                pass
 
     return listing_data
 
@@ -967,8 +975,11 @@ _enrich_state: dict = {"in_progress": False, "result": None}
 def _enrich_all(clear_bogus: bool = False):
     """Background thread: backfill enrichment data for all listings.
 
-    Respects SchoolDigger's 1-call-per-minute + 20-calls-per-day rate limits.
+    Phase 1 (serial): address keys + school data (SchoolDigger rate-limited).
+    Phase 2 (parallel): commute times via Google Routes API (no rate limit).
     """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     from app.enrichment import fetch_commute_time, fetch_school_data, normalize_address
 
     try:
@@ -978,8 +989,7 @@ def _enrich_all(clear_bogus: bool = False):
         commute_calls = 0
         errors = []
 
-        # Phase 1: Clear ALL bogus school data before enrichment
-        # (prevents zip cache from returning bogus data)
+        # Phase 0: Clear ALL bogus school data before enrichment
         if clear_bogus:
             cleared = 0
             for lid in listing_ids:
@@ -996,7 +1006,9 @@ def _enrich_all(clear_bogus: bool = False):
                     pass
             logger.info(f"Cleared bogus school data from {cleared} listings")
 
-        # Phase 2: Enrich all listings
+        # Phase 1 (serial): address keys + school data
+        commute_needed: list[tuple[int, dict]] = []  # (lid, listing) pairs needing commute
+
         for lid in listing_ids:
             listing = db.get_listing_by_id(lid)
             if not listing:
@@ -1028,20 +1040,7 @@ def _enrich_all(clear_bogus: bool = False):
                         school_calls += 1
                         changed = True
 
-            # Commute time
-            if listing.get("commute_minutes") is None:
-                commute_result = fetch_commute_time(
-                    listing.get("address"),
-                    listing.get("town"),
-                    listing.get("state"),
-                    listing.get("zip_code"),
-                )
-                if commute_result:
-                    enrichment["commute_minutes"] = commute_result["commute_minutes"]
-                    enrichment["commute_data_json"] = json.dumps(commute_result)
-                    commute_calls += 1
-                    changed = True
-
+            # Save address key + school data immediately
             if changed:
                 try:
                     db.update_listing_enrichment(lid, enrichment)
@@ -1049,6 +1048,42 @@ def _enrich_all(clear_bogus: bool = False):
                 except Exception as e:
                     logger.error(f"Failed to enrich listing #{lid}: {e}")
                     errors.append(f"#{lid}: {e}")
+
+            # Collect listings needing commute data for parallel fetch
+            if listing.get("commute_minutes") is None:
+                commute_needed.append((lid, listing))
+
+        # Phase 2 (parallel): commute times — no rate limit on Google Routes API
+        if commute_needed:
+            logger.info(f"Fetching commute times for {len(commute_needed)} listings in parallel")
+
+            def _fetch_commute(item: tuple[int, dict]) -> tuple[int, dict | None]:
+                lid, listing = item
+                result = fetch_commute_time(
+                    listing.get("address"),
+                    listing.get("town"),
+                    listing.get("state"),
+                    listing.get("zip_code"),
+                )
+                return lid, result
+
+            with ThreadPoolExecutor(max_workers=5) as pool:
+                futures = {pool.submit(_fetch_commute, item): item for item in commute_needed}
+                for future in as_completed(futures):
+                    try:
+                        lid, commute_result = future.result()
+                        if commute_result:
+                            enrichment = {
+                                "commute_minutes": commute_result["commute_minutes"],
+                                "commute_data_json": json.dumps(commute_result),
+                            }
+                            db.update_listing_enrichment(lid, enrichment)
+                            commute_calls += 1
+                            enriched += 1
+                    except Exception as e:
+                        lid = futures[future][0]
+                        logger.error(f"Commute fetch failed for listing #{lid}: {e}")
+                        errors.append(f"#{lid}: {e}")
 
         # Trigger rescore if we enriched anything
         rescore_started = False
