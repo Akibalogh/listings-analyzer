@@ -254,6 +254,23 @@ def _parse_duration(route: dict) -> int:
     return int(route.get("duration", "0s").rstrip("s"))
 
 
+# Towns whose nearest Metro-North station has a different name
+_STATION_OVERRIDES: dict[str, str] = {
+    "bedford": "Bedford Hills",
+    "pound ridge": "Katonah",
+    "south salem": "Katonah",
+    "lewisboro": "Katonah",
+    "north salem": "Purdy's",
+    "waccabuc": "Katonah",
+    "cross river": "Katonah",
+    "yorktown": "Croton-Harmon",
+    "yorktown heights": "Croton-Harmon",
+    "cortlandt": "Croton-Harmon",
+    "mohegan lake": "Cortlandt",
+    "somers": "Katonah",
+}
+
+
 def fetch_commute_time(
     address: str | None,
     town: str | None,
@@ -300,8 +317,10 @@ def fetch_commute_time(
         }
 
     # Strategy 2: drive to station + transit from station
-    logger.info(f"No walk-to-transit from {origin}, trying drive-to-station")
-    station = f"{town} train station, {state or 'NY'}"
+    # Use station override if the town's station has a different name
+    station_town = _STATION_OVERRIDES.get(town.lower(), town)
+    logger.info(f"No walk-to-transit from {origin}, trying drive to {station_town} station")
+    station = f"{station_town} train station, {state or 'NY'}"
     station_transit = _routes_request(station, destination, "TRANSIT", departure_time)
     if station_transit:
         drive_to_station = _routes_request(origin, station, "DRIVE")
