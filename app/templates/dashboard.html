@@ -321,10 +321,18 @@
     line-height: 1.3;
     letter-spacing: -0.1px;
     color: var(--text);
-    display: -webkit-box;
-    -webkit-line-clamp: 2;
-    -webkit-box-orient: vertical;
+    white-space: nowrap;
     overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .card-town {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-muted);
+    margin-top: 1px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .card-meta {
     font-size: 12px;
@@ -1389,7 +1397,6 @@ function buildCard(l) {
   var beds = l.bedrooms != null ? String(l.bedrooms) : '?';
   var baths = l.bathrooms != null ? String(l.bathrooms) : '?';
   var address = l.address || 'Unknown Address';
-  if (l.town) address += ', ' + l.town;
   var verdictClass = 'verdict ' + verdictCSSClass(l.verdict);
   var scoreColor = scoreBarColor(l.score || 0, l.verdict);
   var priceSqft = (l.price && l.sqft) ? '$' + Math.round(l.price / l.sqft).toLocaleString() : null;
@@ -1415,6 +1422,9 @@ function buildCard(l) {
     addressEl.textContent = address;
   }
   info.appendChild(addressEl);
+  if (l.town) {
+    info.appendChild(el('div', {className: 'card-town'}, l.town + (l.state ? ', ' + l.state : '')));
+  }
   summary.appendChild(info);
 
   /* Verdict badge */
