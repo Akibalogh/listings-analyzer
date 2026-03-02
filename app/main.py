@@ -217,6 +217,15 @@ def reprocess_emails(request: Request):
 
             db.update_listing_url_by_mls(listing.mls_id, listing.listing_url, description)
 
+            # Backfill address fields from re-parsed data
+            db.backfill_listing_address(
+                listing.mls_id,
+                listing.address,
+                listing.town,
+                listing.state,
+                listing.zip_code,
+            )
+
             # Attach scraped images if found
             if image_urls:
                 listing_row = db.get_listing_by_mls(listing.mls_id)
@@ -867,6 +876,15 @@ def manage_reprocess(request: Request):
                 if description:
                     scraped += 1
             db.update_listing_url_by_mls(listing.mls_id, listing.listing_url, description)
+
+            # Backfill address fields from re-parsed data
+            db.backfill_listing_address(
+                listing.mls_id,
+                listing.address,
+                listing.town,
+                listing.state,
+                listing.zip_code,
+            )
 
             # Attach scraped images
             if image_urls:

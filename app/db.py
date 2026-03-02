@@ -239,6 +239,42 @@ def update_listing_url_by_mls(mls_id: str, listing_url: str, description: str | 
         )
 
 
+def backfill_listing_address(
+    mls_id: str,
+    address: str | None,
+    town: str | None,
+    state: str | None,
+    zip_code: str | None,
+):
+    """Backfill address fields for a listing that's missing them.
+
+    Only updates fields that are currently NULL or empty in the DB.
+    """
+    if not mls_id:
+        return
+    updates = []
+    values = []
+    ph = _placeholder()
+    for col, val in [
+        ("address", address),
+        ("town", town),
+        ("state", state),
+        ("zip_code", zip_code),
+    ]:
+        if val:
+            updates.append(f"{col} = CASE WHEN {col} IS NULL OR {col} = '' THEN {ph} ELSE {col} END")
+            values.append(val)
+    if not updates:
+        return
+    values.append(mls_id)
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            f"UPDATE listings SET {', '.join(updates)} WHERE mls_id = {ph}",
+            values,
+        )
+
+
 def is_listing_duplicate(mls_id: str) -> bool:
     """Check if a listing with this MLS ID already exists."""
     if not mls_id:
