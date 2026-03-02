@@ -14,8 +14,13 @@ All notable changes to Listings Analyzer are documented here.
 - `build_batch_request()` and `parse_batch_result()` helpers in `app/scorer.py`
 - `rescore_state` now includes `skipped` count and `batch_id` for monitoring
 - 12 new tests: batch request construction (3), batch result parsing (4), skip-unchanged logic (5)
+- **Commute DRIVE fallback** — `fetch_commute_time()` now falls back to Google Routes DRIVE mode when TRANSIT returns no routes (common for suburban addresses far from train stations); `commute_mode` ("transit"|"drive") tracked in `commute_data_json`
+- **Parallel commute enrichment** — `/manage/enrich` runs commute API calls in parallel (5 workers via ThreadPoolExecutor); school data calls remain serial (SchoolDigger rate limit)
+- **Commute mode display** — dashboard enrichment card shows 🚆 Transit or 🚗 Driving label based on which mode was used
+- 2 new tests: DRIVE fallback (1), both-modes-fail (1)
 
 ### Changed
+- **Compact card layout** — cards show address on line 1, town+state on line 2; removed price/beds/sqft/badge meta row from compact view
 - **Card height fix** — `.card-address` and `.card-meta` now use `-webkit-line-clamp: 2` for multi-line wrapping instead of single-line truncation; cards display ~3 visible rows
 - Extracted `_build_listing_data()` and `_get_image_urls()` helpers from `_rescore_one_listing()` for reuse by both single and batch scoring paths
 - Removed `ThreadPoolExecutor` from rescoring (replaced by Batch API)
