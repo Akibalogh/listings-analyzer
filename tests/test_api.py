@@ -459,6 +459,107 @@ class TestManageEnrichEndpoint:
         assert "in_progress" in data
 
 
+class TestManageDataQuality:
+    """Tests for POST /manage/data-quality."""
+
+    def test_data_quality_rejects_missing_key(self, client):
+        res = client.post("/manage/data-quality")
+        assert res.status_code == 403
+
+    def test_data_quality_rejects_wrong_key(self, client):
+        res = client.post("/manage/data-quality", headers={"x-manage-key": "wrong"})
+        assert res.status_code == 403
+
+    @patch("app.main.db.get_connection")
+    @patch("app.main.settings")
+    def test_data_quality_dry_run_no_bad_listings(self, mock_settings, mock_conn, client):
+        mock_settings.manage_key = "test-key"
+        mock_settings.is_postgres = False
+        # Simulate empty result set
+        mock_cursor = MagicMock()
+        mock_cursor.fetchall.return_value = []
+        mock_conn.return_value.__enter__ = MagicMock(return_value=MagicMock(cursor=MagicMock(return_value=mock_cursor)))
+        mock_conn.return_value.__exit__ = MagicMock(return_value=False)
+
+        res = client.post("/manage/data-quality", headers={"x-manage-key": "test-key"})
+        assert res.status_code == 200
+        data = res.json()
+        assert data["no_address_count"] == 0
+        assert data["no_url_count"] == 0
+        assert data["fix"] is False
+
+    @patch("app.main.db._placeholder", return_value="?")
+    @patch("app.main.db.get_connection")
+    @patch("app.main.settings")
+    def test_data_quality_dry_run_finds_bad_listings(self, mock_settings, mock_conn, mock_ph, client):
+        mock_settings.manage_key = "test-key"
+        mock_settings.is_postgres = False
+
+        # Simulate rows: one with no address, one with no URL, one with both missing
+        mock_rows = [
+            {"id": 1, "mls_id": "M001", "address": "", "listing_url": "https://example.com"},
+            {"id": 2, "mls_id": "M002", "address": "10 Main St", "listing_url": ""},
+            {"id": 3, "mls_id": "M003", "address": None, "listing_url": None},
+        ]
+        mock_cursor = MagicMock()
+        mock_cursor.fetchall.return_value = mock_rows
+        mock_connection = MagicMock()
+        mock_connection.cursor.return_value = mock_cursor
+        mock_conn.return_value.__enter__ = MagicMock(return_value=mock_connection)
+        mock_conn.return_value.__exit__ = MagicMock(return_value=False)
+
+        res = client.post("/manage/data-quality", headers={"x-manage-key": "test-key"})
+        assert res.status_code == 200
+        data = res.json()
+        assert data["no_address_count"] == 2  # IDs 1 and 3
+        assert data["no_url_count"] == 2  # IDs 2 and 3
+        assert data["fix"] is False
+        # Should not contain fix-mode keys
+        assert "deleted" not in data
+
+    @patch("app.main.db._placeholder", return_value="?")
+    @patch("app.main.poll_once", return_value=[])
+    @patch("app.main.db.get_active_criteria", return_value=None)
+    @patch("app.main.db.get_connection")
+    @patch("app.main.settings")
+    def test_data_quality_fix_mode_deletes_and_repolls(
+        self, mock_settings, mock_conn, mock_criteria, mock_poll, mock_ph, client,
+    ):
+        mock_settings.manage_key = "test-key"
+        mock_settings.is_postgres = False
+
+        # First call: find bad listings; subsequent calls: orphan check + delete
+        call_count = [0]
+        mock_cursor = MagicMock()
+
+        def fake_fetchall():
+            call_count[0] += 1
+            if call_count[0] == 1:
+                # Bad listings query
+                return [
+                    {"id": 5, "mls_id": "M005", "address": None, "listing_url": None},
+                ]
+            else:
+                # Orphan query returns empty
+                return []
+
+        mock_cursor.fetchall = fake_fetchall
+        mock_cursor.rowcount = 1
+        mock_connection = MagicMock()
+        mock_connection.cursor.return_value = mock_cursor
+        mock_conn.return_value.__enter__ = MagicMock(return_value=mock_connection)
+        mock_conn.return_value.__exit__ = MagicMock(return_value=False)
+
+        res = client.post("/manage/data-quality?fix=true", headers={"x-manage-key": "test-key"})
+        assert res.status_code == 200
+        data = res.json()
+        assert data["fix"] is True
+        assert data["deleted"] == 1
+        assert data["re_polled"] == 0
+        assert data["rescore_started"] is False
+        mock_poll.assert_called_once()
+
+
 class TestDateFilteredSenderConfig:
     """Tests for SENDER_DATE_FILTERS config parsing."""
 

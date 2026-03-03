@@ -146,7 +146,9 @@ Listing data (address, description, etc.) could contain malicious instructions.
 ### Bulk Re-scoring
 - Triggered when criteria are saved, or manually via `/manage/sync-criteria`
 - Runs in a background daemon thread; progress exposed via `GET /rescore/status`
-- **Serialized execution** — `ThreadPoolExecutor` with `_RESCORE_WORKERS = 1` worker (serialized); image-heavy listings send large base64 payloads that exceed the Anthropic 10k tokens/minute org limit when run concurrently; serial execution avoids rate limiting
+- **Chunked batch processing** — listings processed in chunks of 10 (`_BATCH_CHUNK_SIZE`) to keep peak memory under control; each listing can include ~6.6MB of base64-encoded images; building all requests at once caused OOM on 512MB Fly.io machines
+- **Batch API** — each chunk submitted as a Message Batch (50% token discount); poll every 30s until complete; results processed and memory freed before next chunk
+- Sequential fallback preserved if batch API fails on any chunk
 
 ### Evaluation Criteria (Editable)
 - Stored in `evaluation_criteria` table with versioning (each save = new version row)
@@ -311,6 +313,7 @@ Mobile-first single-page app served at `/` (`app/templates/dashboard.html`).
 - `POST /manage/poll` — trigger email poll without Google auth
 - `POST /manage/cleanup` — delete listings by ID list (body: `{"listing_ids": [1,2,3]}`)
 - `POST /manage/reset-emails` — clear orphaned processed_emails and remove Gmail labels for re-ingestion
+- `POST /manage/data-quality` — audit listings with missing address or URL (dry-run by default); with `?fix=true`: delete bad listings, reset orphaned emails, trigger re-poll + rescore
 
 ## 9. Key Technical Decisions
 
@@ -351,7 +354,8 @@ Mobile-first single-page app served at `/` (`app/templates/dashboard.html`).
 - Multi-story / non-standard layouts (e.g., 34 Lakeshore Drive — upper/lower floors, no clear basement) → AI may Reject on "finished basement" hard requirement; these should be reviewed manually for future AI criteria refinement
 - **Status prefix stripping** — Redfin alert emails prepend status labels ("New Listing", "Pending", "Coming Soon", "Price Drop", etc.) as plain text before listing data. The plaintext parser strips these and captures them in `listing_status`. Known labels: New Listing, Pending, Coming Soon, New Favorite, Price Drop, Price Decreased, Price Increased, Back on Market, Sold, Contingent, Under Contract, Active, Open House, New Tour Insight, Updated MLS Listing.
 - **Directional address suffixes** — Street addresses may end with a cardinal direction (N, S, E, W, NE, NW, SE, SW) after the street type suffix (e.g., "101 Long Hill Rd E"). Both `STREET_RE` and `INLINE_ADDR_RE` patterns handle optional directional suffixes.
-- **Address-less listings** — Listings without an extractable address fall back to Redfin URL parsing, then zip-code-only. Address-less listings can be cleaned up via `/manage/cleanup` and re-ingested via reset + poll.
+- **Address-less listings** — Listings without an extractable address fall back to Redfin URL parsing, then zip-code-only. Address-less listings can be cleaned up via `/manage/data-quality?fix=true` (or manually via `/manage/cleanup`) and re-ingested via reset + poll.
+- **DB connection timeouts** — `psycopg2` connections use `connect_timeout=5` (5s TCP connect) and `statement_timeout=30000` (30s query); SQLite uses `timeout=5` (5s lock wait). Prevents indefinite hangs when Postgres is temporarily unreachable.
 
 ## 11. Phase Plan
 

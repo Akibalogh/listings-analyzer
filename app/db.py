@@ -135,7 +135,11 @@ def get_connection():
 
         # Heroku uses postgres:// but psycopg2 needs postgresql://
         url = settings.database_url.replace("postgres://", "postgresql://", 1)
-        conn = psycopg2.connect(url)
+        conn = psycopg2.connect(
+            url,
+            connect_timeout=5,
+            options="-c statement_timeout=30000",
+        )
         try:
             yield conn
             conn.commit()
@@ -146,7 +150,7 @@ def get_connection():
             conn.close()
     else:
         db_path = settings.database_url.replace("sqlite:///", "")
-        conn = sqlite3.connect(db_path)
+        conn = sqlite3.connect(db_path, timeout=5)
         conn.row_factory = sqlite3.Row
         try:
             yield conn

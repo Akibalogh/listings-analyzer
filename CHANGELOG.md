@@ -7,6 +7,18 @@ All notable changes to Listings Analyzer are documented here.
 ## [Unreleased]
 
 ### Added
+- **DB connection timeouts** — `psycopg2.connect()` now uses `connect_timeout=5` and `statement_timeout=30000` (30s); `sqlite3.connect()` uses `timeout=5`; prevents indefinite hangs when Postgres is unreachable
+- **Chunked batch rescore** — `_rescore_all()` now processes listings in chunks of 10 (`_BATCH_CHUNK_SIZE`) instead of building all batch requests in memory at once; peak memory drops from ~193MB to ~33MB; Batch API 50% discount preserved
+- **`POST /manage/data-quality` endpoint** — audits listings with missing address or URL (dry-run by default); with `?fix=true`: deletes bad listings, resets orphaned emails (removes Gmail label + processed_emails records), triggers re-poll + rescore; protected by MANAGE_KEY
+
+### Changed
+- `_rescore_all()` refactored: first pass collects IDs needing rescore (lightweight, no images loaded), then processes in chunks — build → submit → poll → process → free memory per chunk
+
+---
+
+## [2026-03-03]
+
+### Added
 - **Anthropic prompt caching** — system prompt now returns `cache_control: {"type": "ephemeral"}` block; cached across all scoring calls for ~90% savings on system prompt tokens
 - **Batch API for rescoring** — `_rescore_all()` now uses Anthropic Message Batches API (50% discount on all tokens); polls batch status every 30s; falls back to sequential scoring if batch submission fails
 - **Skip-unchanged listings** — `_should_skip()` checks `criteria_version` + `enriched_at`/`scored_at` timestamps; listings with same criteria and no new enrichment are skipped during rescore (instant completion on re-rescore)

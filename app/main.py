@@ -25,6 +25,11 @@ logger = logging.getLogger(__name__)
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 
+# Number of listings per batch chunk to limit memory usage during rescore.
+# Each listing can include ~6.6MB of base64-encoded images; chunking keeps
+# peak memory at ~33MB instead of ~193MB for the full batch.
+_BATCH_CHUNK_SIZE = 10
+
 
 def _scheduled_poll_loop(interval_hours: int):
     """Background thread: poll Gmail on a fixed interval."""
@@ -539,6 +544,10 @@ def _should_skip(listing_row: dict, score_meta: dict | None, criteria_version: i
 def _rescore_all(criteria_version: int, instructions: str):
     """Background thread: re-score all listings using the Batch API (50% discount).
 
+    Processes listings in chunks of _BATCH_CHUNK_SIZE to limit peak memory —
+    each listing can include ~6.6MB of base64-encoded images, so building all
+    batch requests at once causes OOM on 512MB machines.
+
     Falls back to sequential scoring if batch submission fails.
     """
     import anthropic
@@ -546,32 +555,21 @@ def _rescore_all(criteria_version: int, instructions: str):
     try:
         listing_ids = db.get_all_listing_ids()
         score_metadata = db.get_all_score_metadata()
-        criteria = {"instructions": instructions, "version": criteria_version}
 
-        # Build batch requests, skipping unchanged listings
-        batch_requests = []
+        # First pass: collect IDs that need rescoring (lightweight — no images loaded)
+        ids_to_score = []
         skip_count = 0
         for lid in listing_ids:
             listing = db.get_listing_by_id(lid)
             if not listing:
                 continue
-
             meta = score_metadata.get(lid)
             if _should_skip(listing, meta, criteria_version):
                 skip_count += 1
-                continue
+            else:
+                ids_to_score.append(lid)
 
-            listing_data = _build_listing_data(listing)
-            image_urls = _get_image_urls(listing)
-            req = build_batch_request(
-                custom_id=f"listing_{lid}",
-                listing_data=listing_data,
-                instructions=instructions,
-                image_urls=image_urls,
-            )
-            batch_requests.append(req)
-
-        total_to_score = len(batch_requests)
+        total_to_score = len(ids_to_score)
         db.rescore_state["total"] = total_to_score + skip_count
         db.rescore_state["completed"] = skip_count
         db.rescore_state["skipped"] = skip_count
@@ -585,52 +583,83 @@ def _rescore_all(criteria_version: int, instructions: str):
             logger.info("Nothing to rescore — all listings up to date")
             return
 
-        # Try batch API first
         if not settings.anthropic_api_key:
             logger.error("ANTHROPIC_API_KEY not set, cannot rescore")
             return
 
         try:
             client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
-            batch = client.messages.batches.create(requests=batch_requests)
-            batch_id = batch.id
-            db.rescore_state["batch_id"] = batch_id
-            logger.info(f"Batch submitted: {batch_id} ({total_to_score} requests)")
+            scored_so_far = 0
 
-            # Poll until batch completes
-            while True:
-                time.sleep(30)
-                batch = client.messages.batches.retrieve(batch_id)
-                status = batch.processing_status
-                logger.info(f"Batch {batch_id}: {status}")
-                if status == "ended":
-                    break
+            # Process in chunks to keep peak memory low
+            for chunk_start in range(0, total_to_score, _BATCH_CHUNK_SIZE):
+                chunk_ids = ids_to_score[chunk_start : chunk_start + _BATCH_CHUNK_SIZE]
+                chunk_num = chunk_start // _BATCH_CHUNK_SIZE + 1
+                total_chunks = (total_to_score + _BATCH_CHUNK_SIZE - 1) // _BATCH_CHUNK_SIZE
 
-            # Process results
-            processed = 0
-            for result in client.messages.batches.results(batch_id):
-                custom_id = result.custom_id
-                lid = int(custom_id.split("_")[1])
-
-                score_result, reasoning = parse_batch_result(result)
-                if score_result:
-                    score_result.criteria_version = criteria_version
-                    db.update_score(
-                        listing_id=lid,
-                        score=score_result,
-                        method=score_result.evaluation_method,
-                        criteria_version=criteria_version,
-                        reasoning=reasoning,
-                        property_summary=score_result.property_summary,
+                # Build batch requests for this chunk only
+                batch_requests = []
+                for lid in chunk_ids:
+                    listing = db.get_listing_by_id(lid)
+                    if not listing:
+                        continue
+                    listing_data = _build_listing_data(listing)
+                    image_urls = _get_image_urls(listing)
+                    req = build_batch_request(
+                        custom_id=f"listing_{lid}",
+                        listing_data=listing_data,
+                        instructions=instructions,
+                        image_urls=image_urls,
                     )
-                else:
-                    logger.warning(f"Batch result for listing #{lid} could not be parsed")
+                    batch_requests.append(req)
 
-                processed += 1
-                db.rescore_state["completed"] = skip_count + processed
+                if not batch_requests:
+                    continue
+
+                batch = client.messages.batches.create(requests=batch_requests)
+                batch_id = batch.id
+                db.rescore_state["batch_id"] = batch_id
+                logger.info(
+                    f"Batch chunk {chunk_num}/{total_chunks} submitted: "
+                    f"{batch_id} ({len(batch_requests)} requests)"
+                )
+
+                # Free memory before polling
+                del batch_requests
+
+                # Poll until batch completes
+                while True:
+                    time.sleep(30)
+                    batch = client.messages.batches.retrieve(batch_id)
+                    status = batch.processing_status
+                    logger.info(f"Batch {batch_id}: {status}")
+                    if status == "ended":
+                        break
+
+                # Process results for this chunk
+                for result in client.messages.batches.results(batch_id):
+                    custom_id = result.custom_id
+                    lid = int(custom_id.split("_")[1])
+
+                    score_result, reasoning = parse_batch_result(result)
+                    if score_result:
+                        score_result.criteria_version = criteria_version
+                        db.update_score(
+                            listing_id=lid,
+                            score=score_result,
+                            method=score_result.evaluation_method,
+                            criteria_version=criteria_version,
+                            reasoning=reasoning,
+                            property_summary=score_result.property_summary,
+                        )
+                    else:
+                        logger.warning(f"Batch result for listing #{lid} could not be parsed")
+
+                    scored_so_far += 1
+                    db.rescore_state["completed"] = skip_count + scored_so_far
 
             logger.info(
-                f"Batch rescore complete: {processed}/{total_to_score} scored, "
+                f"Batch rescore complete: {scored_so_far}/{total_to_score} scored, "
                 f"{skip_count} skipped (criteria v{criteria_version})"
             )
 
@@ -1163,3 +1192,136 @@ def manage_enrich_status():
         "in_progress": _enrich_state["in_progress"],
         "result": _enrich_state["result"],
     }
+
+
+# --- Data Quality ---
+
+
+@app.post("/manage/data-quality")
+def manage_data_quality(request: Request):
+    """Audit and optionally fix listings with missing address or URL.
+
+    Default (dry-run): returns counts and listing IDs of bad data.
+    With ?fix=true: deletes bad listings, resets orphaned emails
+    (removes Gmail label + processed_emails records), then triggers
+    a re-poll and rescore.
+
+    Protected by MANAGE_KEY env var.
+    """
+    key = request.headers.get("x-manage-key", "")
+    if not settings.manage_key or key != settings.manage_key:
+        raise HTTPException(status_code=403, detail="Invalid or missing management key")
+
+    fix = request.query_params.get("fix", "").lower() == "true"
+
+    # Find bad listings
+    no_address = []
+    no_url = []
+    with db.get_connection() as conn:
+        cur = conn.cursor()
+        ph = db._placeholder()
+
+        cur.execute("SELECT id, mls_id, address, listing_url FROM listings")
+        rows = cur.fetchall()
+        if settings.is_postgres:
+            columns = [desc[0] for desc in cur.description]
+            rows = [dict(zip(columns, r)) for r in rows]
+        else:
+            rows = [dict(r) for r in rows]
+
+    for row in rows:
+        addr = (row.get("address") or "").strip()
+        url = (row.get("listing_url") or "").strip()
+        if not addr:
+            no_address.append({"id": row["id"], "mls_id": row.get("mls_id")})
+        if not url:
+            no_url.append({"id": row["id"], "mls_id": row.get("mls_id")})
+
+    report = {
+        "no_address_count": len(no_address),
+        "no_url_count": len(no_url),
+        "no_address": no_address,
+        "no_url": no_url,
+        "fix": fix,
+    }
+
+    if not fix:
+        return report
+
+    # --- Fix mode ---
+    # Collect all bad listing IDs (union of both sets)
+    bad_ids = {item["id"] for item in no_address} | {item["id"] for item in no_url}
+
+    # Delete bad listings and their scores
+    deleted = 0
+    with db.get_connection() as conn:
+        cur = conn.cursor()
+        ph = db._placeholder()
+        for lid in bad_ids:
+            cur.execute(f"DELETE FROM scores WHERE listing_id = {ph}", (lid,))
+            cur.execute(f"DELETE FROM listings WHERE id = {ph}", (lid,))
+            deleted += 1
+
+    # Reset orphaned emails (processed_emails with no remaining listings)
+    from app.gmail import _build_service, _get_or_create_label
+
+    orphans = []
+    with db.get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT pe.id, pe.gmail_id
+            FROM processed_emails pe
+            LEFT JOIN listings l ON l.source_email_id = pe.id
+            WHERE l.id IS NULL
+        """)
+        if settings.is_postgres:
+            orphans = [(row[0], row[1]) for row in cur.fetchall()]
+        else:
+            orphans = [(row["id"], row["gmail_id"]) for row in cur.fetchall()]
+
+    gmail_reset = 0
+    if orphans:
+        try:
+            service = _build_service()
+            label_id = _get_or_create_label(service)
+            for _, gmail_id in orphans:
+                try:
+                    service.users().messages().modify(
+                        userId="me",
+                        id=gmail_id,
+                        body={"removeLabelIds": [label_id]},
+                    ).execute()
+                    gmail_reset += 1
+                except Exception as e:
+                    logger.warning(f"Failed to remove label from {gmail_id}: {e}")
+        except Exception as e:
+            logger.error(f"Failed to connect to Gmail: {e}")
+
+        # Delete orphaned processed_emails records
+        ph = db._placeholder()
+        with db.get_connection() as conn:
+            cur = conn.cursor()
+            for pe_id, _ in orphans:
+                cur.execute(f"DELETE FROM processed_emails WHERE id = {ph}", (pe_id,))
+
+    # Re-poll to re-ingest cleaned emails
+    poll_result = None
+    try:
+        poll_result = poll_once()
+        logger.info(f"Data-quality re-poll: {len(poll_result)} listing(s)")
+    except Exception as e:
+        logger.error(f"Data-quality re-poll failed: {e}")
+
+    # Trigger rescore
+    rescore_started = False
+    criteria = db.get_active_criteria()
+    if criteria:
+        _start_rescore(criteria["version"], criteria["instructions"])
+        rescore_started = True
+
+    report["deleted"] = deleted
+    report["emails_reset"] = len(orphans)
+    report["gmail_labels_removed"] = gmail_reset
+    report["re_polled"] = len(poll_result) if poll_result else 0
+    report["rescore_started"] = rescore_started
+    return report
