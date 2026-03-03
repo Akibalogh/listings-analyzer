@@ -73,6 +73,14 @@ def poll_once() -> list[dict]:
 
         # Score and save each listing
         for listing in listings:
+            # Validation: reject listings with no identifying info
+            if not listing.mls_id and not listing.address:
+                logger.warning(
+                    f"Skipping listing with no address and no MLS ID "
+                    f"(price={listing.price}, source={listing.source_format})"
+                )
+                continue
+
             # Dedup: check MLS ID first
             if db.is_listing_duplicate(listing.mls_id):
                 logger.info(f"Duplicate listing MLS #{listing.mls_id}, skipping")

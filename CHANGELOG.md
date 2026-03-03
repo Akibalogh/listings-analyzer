@@ -10,6 +10,7 @@ All notable changes to Listings Analyzer are documented here.
 - **DB connection timeouts** — `psycopg2.connect()` now uses `connect_timeout=5` and `statement_timeout=30000` (30s); `sqlite3.connect()` uses `timeout=5`; prevents indefinite hangs when Postgres is unreachable
 - **Chunked batch rescore** — `_rescore_all()` now processes listings in chunks of 10 (`_BATCH_CHUNK_SIZE`) instead of building all batch requests in memory at once; peak memory drops from ~193MB to ~33MB; Batch API 50% discount preserved
 - **`POST /manage/data-quality` endpoint** — audits listings with missing address or URL (dry-run by default); with `?fix=true`: deletes bad listings, resets orphaned emails (removes Gmail label + processed_emails records), triggers re-poll + rescore; protected by MANAGE_KEY
+- **Listing validation gate** — `poll_once()` now rejects listings with no address AND no MLS ID before saving; prevents garbage rows from bypassing both dedup checks
 
 ### Changed
 - `_rescore_all()` refactored: first pass collects IDs needing rescore (lightweight, no images loaded), then processes in chunks — build → submit → poll → process → free memory per chunk

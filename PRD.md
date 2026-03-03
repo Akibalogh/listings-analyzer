@@ -95,6 +95,7 @@ Primary alert source is OneKey MLS NY via `mlsalerts.example.com`.
   - Property type, Listing status (New, Price Changed, etc.)
   - **Listing URL** (OneHome portal link)
 - Duplicate detection by MLS ID
+- **Validation gate:** listings with no address AND no MLS ID are rejected before saving (prevents garbage rows from bypassing dedup)
 
 ### Description + Image Scraping Layer
 - After parsing, scrape each listing's URL for full property description and photos
