@@ -103,6 +103,43 @@ class TestNormalizeAddress:
         key2 = normalize_address("10 Sherman Ave", "Harrison", "NY")
         assert key1 != key2
 
+    def test_parkway_vs_pkwy_match(self):
+        key1 = normalize_address("50 Bronx River Parkway", "Yonkers", "NY")
+        key2 = normalize_address("50 Bronx River Pkwy", "Yonkers", "NY")
+        assert key1 == key2
+
+    def test_highway_vs_hwy_match(self):
+        key1 = normalize_address("100 Route 9 Highway", "Croton", "NY")
+        key2 = normalize_address("100 Route 9 Hwy", "Croton", "NY")
+        assert key1 == key2
+
+    def test_trail_vs_trl_match(self):
+        key1 = normalize_address("8 Deer Trail", "Pound Ridge", "NY")
+        key2 = normalize_address("8 Deer Trl", "Pound Ridge", "NY")
+        assert key1 == key2
+
+    def test_north_vs_n_match(self):
+        """'North' and 'N' should produce the same key."""
+        key1 = normalize_address("473 Winding Road North", "Ardsley", "NY")
+        key2 = normalize_address("473 Winding Road N", "Ardsley", "NY")
+        assert key1 == key2
+
+    def test_south_vs_s_match(self):
+        key1 = normalize_address("10 South Broadway", "Irvington", "NY")
+        key2 = normalize_address("10 S Broadway", "Irvington", "NY")
+        assert key1 == key2
+
+    def test_northeast_vs_ne_match(self):
+        key1 = normalize_address("5 Northeast Plaza", "Rye", "NY")
+        key2 = normalize_address("5 NE Plaza", "Rye", "NY")
+        assert key1 == key2
+
+    def test_direction_doesnt_clobber_street_name(self):
+        """'North' inside a street name shouldn't be shortened."""
+        key = normalize_address("10 Northfield Ave", "Dobbs Ferry", "NY")
+        # "north" is a whole-word match, so "northfield" stays intact
+        assert "northfield" in key
+
 
 # ---------------------------------------------------------------------------
 # School data (mocked HTTP)

@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 # Address normalization for dedup
 # ---------------------------------------------------------------------------
 
-# Suffix map — derived from _SUFFIXES in plaintext.py
+# Suffix map — normalize long forms to USPS standard abbreviations
 _SUFFIX_MAP = {
     "street": "st",
     "avenue": "ave",
@@ -33,6 +33,25 @@ _SUFFIX_MAP = {
     "circle": "cir",
     "boulevard": "blvd",
     "terrace": "ter",
+    "parkway": "pkwy",
+    "highway": "hwy",
+    "trail": "trl",
+    "crossing": "xing",
+    "turnpike": "tpke",
+    "expressway": "expy",
+    "way": "way",
+}
+
+# Directional words → abbreviations (USPS standard)
+_DIRECTION_MAP = {
+    "north": "n",
+    "south": "s",
+    "east": "e",
+    "west": "w",
+    "northeast": "ne",
+    "northwest": "nw",
+    "southeast": "se",
+    "southwest": "sw",
 }
 
 
@@ -57,6 +76,11 @@ def normalize_address(
 
     # Normalize suffixes: "avenue" -> "ave", "street" -> "st", etc.
     for long_form, short_form in _SUFFIX_MAP.items():
+        addr = re.sub(rf"\b{long_form}\b", short_form, addr)
+
+    # Normalize directions: "north" -> "n", "southwest" -> "sw", etc.
+    # Process longer forms first so "northeast" matches before "north"
+    for long_form, short_form in sorted(_DIRECTION_MAP.items(), key=lambda x: -len(x[0])):
         addr = re.sub(rf"\b{long_form}\b", short_form, addr)
 
     return f"{addr}|{town_norm}|{state_norm}"
