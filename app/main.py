@@ -26,9 +26,9 @@ logger = logging.getLogger(__name__)
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 
 # Number of listings per batch chunk to limit memory usage during rescore.
-# Each listing can include ~6.6MB of base64-encoded images; chunking keeps
-# peak memory at ~33MB instead of ~193MB for the full batch.
-_BATCH_CHUNK_SIZE = 10
+# Each listing can include ~6.6MB of base64-encoded images; on a 512MB
+# Fly machine, 5 is safe even if a background poll is still in memory.
+_BATCH_CHUNK_SIZE = 5
 
 
 def _scheduled_poll_loop(interval_hours: int):
