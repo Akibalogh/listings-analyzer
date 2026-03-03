@@ -26,6 +26,7 @@ _STATUS_LABELS = (
     "Price Drop", "Price Decreased", "Price Increased",
     "Back on Market", "Sold", "Contingent", "Under Contract",
     "Active", "Open House",
+    "New Tour Insight", "Updated MLS Listing",
 )
 STATUS_PREFIX_RE = re.compile(
     r"^\s*(" + "|".join(re.escape(s) for s in _STATUS_LABELS) + r")\s*$",

@@ -266,6 +266,32 @@ $1,400,000 5 Beds 3.5 Baths 3,274 sqft
         assert listings[1].listing_status == "Price Drop"
         assert listings[1].address == "7 Dickson Ln"
 
+    def test_status_prefix_stripped_updated_mls_listing(self):
+        """Status prefix 'Updated MLS Listing' stripped and captured."""
+        text = """
+Updated MLS Listing
+$1,200,000 4 Beds 2.5 Baths 3,034 sqft
+10 Barnes Ln, Chappaqua, NY 10514
+        """
+        listings = self.parser.parse(None, text)
+        assert len(listings) == 1
+        assert listings[0].listing_status == "Updated MLS Listing"
+        assert listings[0].address == "10 Barnes Ln"
+        assert listings[0].town == "Chappaqua"
+
+    def test_status_prefix_stripped_new_tour_insight(self):
+        """Status prefix 'New Tour Insight' stripped and captured."""
+        text = """
+New Tour Insight
+$1,500,000 5 Beds 3 Baths 3,500 sqft
+145 Cedar Ln, Ossining, NY 10562
+        """
+        listings = self.parser.parse(None, text)
+        assert len(listings) == 1
+        assert listings[0].listing_status == "New Tour Insight"
+        assert listings[0].address == "145 Cedar Ln"
+        assert listings[0].town == "Ossining"
+
     # --- Directional suffixes ---
 
     def test_inline_address_directional_suffix(self):
