@@ -179,6 +179,9 @@ def init_db():
     # Add columns to existing tables (idempotent)
     _migrate_add_columns()
 
+    # Backfill address_key for any listings missing it (idempotent)
+    _backfill_address_keys()
+
     logger.info("Database initialized")
 
 
@@ -485,6 +488,43 @@ def _migrate_add_columns():
                 cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
         except Exception:
             pass  # Column already exists
+
+
+def _backfill_address_keys():
+    """Backfill address_key for listings that have address+town but no key.
+
+    Prevents duplicates from bypassing the address_key dedup check
+    when old listings were ingested before normalization was added.
+    """
+    from app.enrichment import normalize_address
+
+    ph = _placeholder()
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, address, town, state FROM listings "
+            "WHERE address_key IS NULL AND address IS NOT NULL AND town IS NOT NULL"
+        )
+        if settings.is_postgres:
+            columns = [desc[0] for desc in cur.description]
+            rows = [dict(zip(columns, r)) for r in cur.fetchall()]
+        else:
+            rows = [dict(r) for r in cur.fetchall()]
+
+    updated = 0
+    for row in rows:
+        key = normalize_address(row["address"], row["town"], row["state"])
+        if key:
+            with get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    f"UPDATE listings SET address_key = {ph} WHERE id = {ph}",
+                    (key, row["id"]),
+                )
+                updated += 1
+
+    if updated:
+        logger.info(f"Backfilled address_key for {updated} listing(s)")
 
 
 # --- Evaluation criteria CRUD ---

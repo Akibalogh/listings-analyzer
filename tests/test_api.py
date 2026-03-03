@@ -441,16 +441,20 @@ class TestManageEnrichEndpoint:
         data = res.json()
         assert data["status"] == "started"
 
+    @patch("app.main._enrich_all")
     @patch("app.main.settings")
-    def test_enrich_rejects_concurrent(self, mock_settings, client):
+    def test_enrich_rejects_concurrent(self, mock_settings, mock_enrich, client):
         mock_settings.manage_key = "test-key"
         from app.main import _enrich_state
         _enrich_state["in_progress"] = True
-        res = client.post("/manage/enrich", headers={"x-manage-key": "test-key"})
-        assert res.status_code == 200
-        data = res.json()
-        assert data["status"] == "already_running"
-        _enrich_state["in_progress"] = False
+        try:
+            res = client.post("/manage/enrich", headers={"x-manage-key": "test-key"})
+            assert res.status_code == 200
+            data = res.json()
+            assert data["status"] == "already_running"
+            mock_enrich.assert_not_called()
+        finally:
+            _enrich_state["in_progress"] = False
 
     def test_enrich_status_endpoint(self, client):
         res = client.get("/manage/enrich/status")
@@ -558,6 +562,76 @@ class TestManageDataQuality:
         assert data["re_polled"] == 0
         assert data["rescore_started"] is False
         mock_poll.assert_called_once()
+
+
+class TestAddressKeyBackfill:
+    """Tests for address_key backfill on init and dedup prevention."""
+
+    def test_normalize_address_ave_avenue_match(self):
+        """Avenue and Ave normalize to the same key."""
+        from app.enrichment import normalize_address
+
+        key1 = normalize_address("10 Sherman Avenue", "Dobbs Ferry", "NY")
+        key2 = normalize_address("10 Sherman Ave", "Dobbs Ferry", "NY")
+        assert key1 == key2
+
+    @patch("app.main.settings")
+    def test_backfill_address_keys_updates_null_keys(self, mock_settings):
+        """_backfill_address_keys fills NULL address_key for listings with addr+town."""
+        import sqlite3
+
+        from app.db import _backfill_address_keys
+        from app.enrichment import normalize_address
+
+        mock_settings.is_postgres = False
+        mock_settings.database_url = None
+
+        # Create in-memory DB with a listing missing address_key
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            "CREATE TABLE listings (id INTEGER PRIMARY KEY, address TEXT, "
+            "town TEXT, state TEXT, address_key TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO listings (id, address, town, state, address_key) "
+            "VALUES (1, '10 Sherman Avenue', 'Dobbs Ferry', 'NY', NULL)"
+        )
+        conn.commit()
+
+        with patch("app.db.get_connection") as mock_conn:
+            mock_conn.return_value.__enter__ = MagicMock(return_value=conn)
+            mock_conn.return_value.__exit__ = MagicMock(return_value=False)
+            _backfill_address_keys()
+
+        row = conn.execute("SELECT address_key FROM listings WHERE id = 1").fetchone()
+        expected = normalize_address("10 Sherman Avenue", "Dobbs Ferry", "NY")
+        assert row["address_key"] == expected
+
+    def test_data_quality_reports_no_town(self, client):
+        """Data-quality dry run includes no_town_count."""
+        with patch("app.main.settings") as mock_settings, \
+             patch("app.main.db.get_connection") as mock_conn, \
+             patch("app.main.db._placeholder", return_value="?"):
+            mock_settings.manage_key = "test-key"
+            mock_settings.is_postgres = False
+            mock_cursor = MagicMock()
+            mock_cursor.fetchall.return_value = [
+                {"id": 1, "mls_id": None, "address": "123 Main St",
+                 "town": None, "listing_url": "https://redfin.com/test"},
+                {"id": 2, "mls_id": None, "address": "456 Oak Ave",
+                 "town": "Rye", "listing_url": ""},
+            ]
+            mock_connection = MagicMock()
+            mock_connection.cursor.return_value = mock_cursor
+            mock_conn.return_value.__enter__ = MagicMock(return_value=mock_connection)
+            mock_conn.return_value.__exit__ = MagicMock(return_value=False)
+
+            res = client.post("/manage/data-quality", headers={"x-manage-key": "test-key"})
+            assert res.status_code == 200
+            data = res.json()
+            assert data["no_town_count"] == 1
+            assert data["no_town"][0]["id"] == 1
 
 
 class TestDateFilteredSenderConfig:

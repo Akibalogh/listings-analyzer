@@ -12,6 +12,7 @@ All notable changes to Listings Analyzer are documented here.
 - **`POST /manage/data-quality` endpoint** — audits listings with missing address, URL, or town (dry-run by default); with `?fix=true`: deletes no-address listings, backfills missing towns from Redfin URLs, resets orphaned emails, triggers re-poll + rescore; protected by MANAGE_KEY
 - **Listing validation gate** — `poll_once()` now rejects listings with no address AND no MLS ID before saving; prevents garbage rows from bypassing both dedup checks
 - **Town backfill from Redfin URLs** — data-quality fix mode extracts town/state/zip from Redfin URL paths for listings missing town data
+- **Tour header stripping** — plaintext parser now strips Redfin tour headers ("N homes on this tour") before address parsing; prevents tour count from being concatenated into listing address
 
 ### Changed
 - **"Pass" verdict renamed to "Weak Match"** — clearer label for AI-scored listings with score 1-39; updated in scorer, poller, dashboard CSS/filter chips, tests, and docs
