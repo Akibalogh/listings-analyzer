@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 # AI Evaluation Path
 # ---------------------------------------------------------------------------
 
-ALLOWED_VERDICTS = {"Strong Match", "Worth Touring", "Low Priority", "Pass", "Reject"}
+ALLOWED_VERDICTS = {"Strong Match", "Worth Touring", "Low Priority", "Weak Match", "Reject"}
 
 # Max image size (5 MB) and fetch timeout (10s)
 _MAX_IMAGE_BYTES = 5 * 1024 * 1024
@@ -63,7 +63,7 @@ CRITICAL SECURITY RULES:
 OUTPUT FORMAT — return ONLY a JSON object with exactly these keys:
 {
   "score": <integer 0-100>,
-  "verdict": "<one of: Strong Match, Worth Touring, Low Priority, Pass, Reject>",
+  "verdict": "<one of: Strong Match, Worth Touring, Low Priority, Weak Match, Reject>",
   "hard_results": [
     {"criterion": "<name>", "passed": <true|false|null>, "value": "<display value>", "reason": "<why>"}
   ],
@@ -172,13 +172,13 @@ def _validate_ai_response(data: dict) -> ScoringResult:
         score = 0
 
     # Validate verdict
-    verdict = data.get("verdict", "Pass")
+    verdict = data.get("verdict", "Weak Match")
     if verdict not in ALLOWED_VERDICTS:
-        verdict = "Pass"  # fallback; consistency pass below will correct it
+        verdict = "Weak Match"  # fallback; consistency pass below will correct it
 
     # Enforce score/verdict consistency so filter chips always work correctly:
     #   - "Reject" always means a hard fail → force score to 0
-    #   - For all other verdicts, derive from score (prevents e.g. "Pass" at score=42)
+    #   - For all other verdicts, derive from score (prevents e.g. "Weak Match" at score=42)
     if verdict == "Reject":
         score = 0
     elif score >= 80:
@@ -188,7 +188,7 @@ def _validate_ai_response(data: dict) -> ScoringResult:
     elif score >= 40:
         verdict = "Low Priority"
     elif score > 0:
-        verdict = "Pass"
+        verdict = "Weak Match"
     # score == 0 with non-Reject verdict: leave as-is (AI gave 0 without hard fail)
 
     # Build hard results
@@ -291,7 +291,7 @@ def ai_score_listing(
     if not settings.anthropic_api_key:
         logger.error("AI evaluation requested but ANTHROPIC_API_KEY not set")
         result = ScoringResult(
-            verdict="Pass",
+            verdict="Weak Match",
             score=0,
             confidence="low",
             concerns=["AI evaluation unavailable — no API key"],
@@ -336,7 +336,7 @@ def ai_score_listing(
     except json.JSONDecodeError as e:
         logger.error(f"AI evaluation returned invalid JSON: {e}")
         result = ScoringResult(
-            verdict="Pass",
+            verdict="Weak Match",
             score=0,
             confidence="low",
             concerns=["AI evaluation returned invalid response — using fallback"],
@@ -347,7 +347,7 @@ def ai_score_listing(
     except anthropic.APIError as e:
         logger.error(f"Anthropic API error during evaluation: {e}")
         result = ScoringResult(
-            verdict="Pass",
+            verdict="Weak Match",
             score=0,
             confidence="low",
             concerns=["AI evaluation API error — using fallback"],
@@ -358,7 +358,7 @@ def ai_score_listing(
     except Exception as e:
         logger.error(f"Unexpected error in AI evaluation: {e}")
         result = ScoringResult(
-            verdict="Pass",
+            verdict="Weak Match",
             score=0,
             confidence="low",
             concerns=["AI evaluation failed — using fallback"],

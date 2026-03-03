@@ -183,12 +183,12 @@ def _evaluate_listing(
     """Evaluate a listing using AI criteria.
 
     Returns a placeholder result if no API key or criteria are configured.
-    AI failures are recorded as low-confidence Pass results (no deterministic fallback).
+    AI failures are recorded as low-confidence Weak Match results (no deterministic fallback).
     image_urls are passed directly to the AI scorer for vision analysis.
     """
     if not settings.anthropic_api_key:
         return ScoringResult(
-            verdict="Pass",
+            verdict="Weak Match",
             score=0,
             confidence="low",
             concerns=["No Anthropic API key configured — listing not evaluated"],
@@ -201,7 +201,7 @@ def _evaluate_listing(
 
     if not criteria:
         return ScoringResult(
-            verdict="Pass",
+            verdict="Weak Match",
             score=0,
             confidence="low",
             concerns=["No evaluation criteria set — configure via AI Criteria in dashboard"],

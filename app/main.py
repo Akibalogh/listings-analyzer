@@ -1225,13 +1225,16 @@ def manage_data_quality(request: Request):
     fix = request.query_params.get("fix", "").lower() == "true"
 
     # Find bad listings
+    from app.parsers.plaintext import REDFIN_URL_ADDR_RE
+
     no_address = []
     no_url = []
+    no_town = []
     with db.get_connection() as conn:
         cur = conn.cursor()
         ph = db._placeholder()
 
-        cur.execute("SELECT id, mls_id, address, listing_url FROM listings")
+        cur.execute("SELECT id, mls_id, address, town, listing_url FROM listings")
         rows = cur.fetchall()
         if settings.is_postgres:
             columns = [desc[0] for desc in cur.description]
@@ -1242,16 +1245,21 @@ def manage_data_quality(request: Request):
     for row in rows:
         addr = (row.get("address") or "").strip()
         url = (row.get("listing_url") or "").strip()
+        town = (row.get("town") or "").strip()
         if not addr:
             no_address.append({"id": row["id"], "mls_id": row.get("mls_id")})
         if not url:
             no_url.append({"id": row["id"], "mls_id": row.get("mls_id")})
+        if not town:
+            no_town.append({"id": row["id"], "address": row.get("address"), "listing_url": url})
 
     report = {
         "no_address_count": len(no_address),
         "no_url_count": len(no_url),
+        "no_town_count": len(no_town),
         "no_address": no_address,
         "no_url": no_url,
+        "no_town": no_town,
         "fix": fix,
     }
 
@@ -1259,8 +1267,9 @@ def manage_data_quality(request: Request):
         return report
 
     # --- Fix mode ---
-    # Collect all bad listing IDs (union of both sets)
-    bad_ids = {item["id"] for item in no_address} | {item["id"] for item in no_url}
+    # Only delete listings with no address (truly garbage data).
+    # No-URL listings are real listings that just can't be clicked — don't delete.
+    bad_ids = {item["id"] for item in no_address}
 
     # Delete bad listings and their scores
     deleted = 0
@@ -1313,6 +1322,21 @@ def manage_data_quality(request: Request):
             cur = conn.cursor()
             for pe_id, _ in orphans:
                 cur.execute(f"DELETE FROM processed_emails WHERE id = {ph}", (pe_id,))
+
+    # Backfill missing towns from Redfin URLs
+    towns_fixed = 0
+    for item in no_town:
+        url = item.get("listing_url", "")
+        if url:
+            m = REDFIN_URL_ADDR_RE.search(url)
+            if m:
+                town = m.group(2).replace("-", " ").title()
+                state = m.group(1).upper()
+                zip_code = m.group(4) if m.group(4) else None
+                db.update_listing_fields_by_id(item["id"], town=town, state=state, zip_code=zip_code)
+                towns_fixed += 1
+                logger.info(f"Backfilled town for listing #{item['id']}: {town}")
+    report["towns_fixed"] = towns_fixed
 
     # Re-poll to re-ingest cleaned emails
     poll_result = None

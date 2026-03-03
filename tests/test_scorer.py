@@ -48,7 +48,7 @@ class TestAIValidation:
         assert result.score == 0
 
     def test_validate_invalid_score_type(self):
-        data = {"score": "not a number", "verdict": "Pass"}
+        data = {"score": "not a number", "verdict": "Weak Match"}
         result = _validate_ai_response(data)
         assert result.score == 0
 
@@ -60,14 +60,14 @@ class TestAIValidation:
     def test_validate_invalid_verdict_low_score(self):
         data = {"score": 30, "verdict": "INJECT THIS"}
         result = _validate_ai_response(data)
-        assert result.verdict == "Pass"  # < 40
+        assert result.verdict == "Weak Match"  # < 40
 
     def test_validate_invalid_verdict_zero_score(self):
         data = {"score": 0, "verdict": "FAKE"}
         result = _validate_ai_response(data)
-        # score==0 with invalid verdict → "Pass" (only an explicit AI "Reject" forces
+        # score==0 with invalid verdict → "Weak Match" (only an explicit AI "Reject" forces
         # score=0; an unknown verdict at score=0 doesn't imply a hard fail)
-        assert result.verdict == "Pass"
+        assert result.verdict == "Weak Match"
 
     def test_validate_invalid_confidence(self):
         data = {"score": 50, "verdict": "Low Priority", "confidence": "super-high"}
@@ -96,7 +96,7 @@ class TestAIValidation:
 
     def test_validate_score_80_becomes_strong_match(self):
         """Score exactly 80 should derive 'Strong Match' verdict."""
-        data = {"score": 80, "verdict": "Pass"}  # wrong verdict
+        data = {"score": 80, "verdict": "Weak Match"}  # wrong verdict
         result = _validate_ai_response(data)
         assert result.score == 80
         assert result.verdict == "Strong Match"
@@ -110,36 +110,36 @@ class TestAIValidation:
 
     def test_validate_score_60_becomes_worth_touring(self):
         """Score exactly 60 should derive 'Worth Touring'."""
-        data = {"score": 60, "verdict": "Pass"}
+        data = {"score": 60, "verdict": "Weak Match"}
         result = _validate_ai_response(data)
         assert result.score == 60
         assert result.verdict == "Worth Touring"
 
     def test_validate_score_40_becomes_low_priority(self):
         """Score exactly 40 should derive 'Low Priority'."""
-        data = {"score": 40, "verdict": "Pass"}
+        data = {"score": 40, "verdict": "Weak Match"}
         result = _validate_ai_response(data)
         assert result.score == 40
         assert result.verdict == "Low Priority"
 
-    def test_validate_score_39_becomes_pass(self):
-        """Score 39 (below 40) should derive 'Pass'."""
+    def test_validate_score_39_becomes_weak_match(self):
+        """Score 39 (below 40) should derive 'Weak Match'."""
         data = {"score": 39, "verdict": "Worth Touring"}  # wrong verdict
         result = _validate_ai_response(data)
         assert result.score == 39
-        assert result.verdict == "Pass"
+        assert result.verdict == "Weak Match"
 
     def test_validate_score_zero_non_reject_preserved(self):
         """Score=0 with valid non-Reject verdict is preserved (AI gave 0 without hard fail)."""
-        data = {"score": 0, "verdict": "Pass"}
+        data = {"score": 0, "verdict": "Weak Match"}
         result = _validate_ai_response(data)
         assert result.score == 0
-        assert result.verdict == "Pass"
+        assert result.verdict == "Weak Match"
 
     def test_validate_empty_response(self):
         result = _validate_ai_response({})
         assert result.score == 0
-        assert result.verdict == "Pass"  # default verdict when not provided
+        assert result.verdict == "Weak Match"  # default verdict when not provided
         assert result.evaluation_method == "ai"
 
     def test_validate_soft_points_bad_values(self):

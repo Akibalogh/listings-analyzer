@@ -8,11 +8,15 @@ All notable changes to Listings Analyzer are documented here.
 
 ### Added
 - **DB connection timeouts** — `psycopg2.connect()` now uses `connect_timeout=5` and `statement_timeout=30000` (30s); `sqlite3.connect()` uses `timeout=5`; prevents indefinite hangs when Postgres is unreachable
-- **Chunked batch rescore** — `_rescore_all()` now processes listings in chunks of 10 (`_BATCH_CHUNK_SIZE`) instead of building all batch requests in memory at once; peak memory drops from ~193MB to ~33MB; Batch API 50% discount preserved
-- **`POST /manage/data-quality` endpoint** — audits listings with missing address or URL (dry-run by default); with `?fix=true`: deletes bad listings, resets orphaned emails (removes Gmail label + processed_emails records), triggers re-poll + rescore; protected by MANAGE_KEY
+- **Chunked batch rescore** — `_rescore_all()` now processes listings in chunks of 5 (`_BATCH_CHUNK_SIZE`) instead of building all batch requests in memory at once; peak memory drops from ~193MB to ~33MB; Batch API 50% discount preserved
+- **`POST /manage/data-quality` endpoint** — audits listings with missing address, URL, or town (dry-run by default); with `?fix=true`: deletes no-address listings, backfills missing towns from Redfin URLs, resets orphaned emails, triggers re-poll + rescore; protected by MANAGE_KEY
 - **Listing validation gate** — `poll_once()` now rejects listings with no address AND no MLS ID before saving; prevents garbage rows from bypassing both dedup checks
+- **Town backfill from Redfin URLs** — data-quality fix mode extracts town/state/zip from Redfin URL paths for listings missing town data
 
 ### Changed
+- **"Pass" verdict renamed to "Weak Match"** — clearer label for AI-scored listings with score 1-39; updated in scorer, poller, dashboard CSS/filter chips, tests, and docs
+- **"Pass+" filter chip renamed to "Non-Reject"** — shows all non-rejected listings regardless of score tier
+- **Data-quality fix mode** — no longer deletes no-URL listings (only no-address); no-URL listings are real but just lack a clickable link
 - `_rescore_all()` refactored: first pass collects IDs needing rescore (lightweight, no images loaded), then processes in chunks — build → submit → poll → process → free memory per chunk
 
 ---
@@ -72,7 +76,7 @@ All notable changes to Listings Analyzer are documented here.
 - **Email fetching refactored** — `fetch_new_emails()` now runs multiple query groups (regular senders + date-filtered senders) with deduplication via `_fetch_query()` helper; replaces single-query approach
 - **ALERT_SENDERS default** updated from individual Redfin addresses to `redfin.com,alerts@mls.example.com` (domain-level matching)
 - **Serialized bulk re-scoring** — `_RESCORE_WORKERS` reduced from 5 to 1; image-heavy listings (18-46 images each) exceed Anthropic's 10k tokens/minute org limit when run concurrently; serial execution avoids rate limiting
-- **Verdict/score consistency enforcement** in `_validate_ai_response()` — "Reject" always forces score=0; non-Reject verdicts always re-derived from score (80+=Strong Match, 60+=Worth Touring, 40+=Low Priority, >0=Pass); prevents filter chip mismatches
+- **Verdict/score consistency enforcement** in `_validate_ai_response()` — "Reject" always forces score=0; non-Reject verdicts always re-derived from score (80+=Strong Match, 60+=Worth Touring, 40+=Low Priority, >0=Weak Match); prevents filter chip mismatches
 - **Selector-first description extraction** — site-specific CSS selectors (`section#overview` for OneKey MLS, `div#house-info`/`.remarksContainer` for Redfin) tried before keyword-based fallback; prevents navigation/UI boilerplate from beating real descriptions
 - **Browser User-Agent for static scraping** — `_scrape_static()` now uses a real Chrome UA + Accept headers to bypass basic bot detection
 - **Redfin URL handling** — static HTTP attempted first, then Jina Reader (was Jina-only)

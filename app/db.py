@@ -279,6 +279,33 @@ def backfill_listing_address(
         )
 
 
+def update_listing_fields_by_id(listing_id: int, **fields):
+    """Update arbitrary listing columns by listing ID.
+
+    Only updates fields whose current DB value is NULL or empty.
+    """
+    if not fields:
+        return
+    updates = []
+    values = []
+    ph = _placeholder()
+    for col, val in fields.items():
+        if val is not None:
+            updates.append(
+                f"{col} = CASE WHEN {col} IS NULL OR {col} = '' THEN {ph} ELSE {col} END"
+            )
+            values.append(val)
+    if not updates:
+        return
+    values.append(listing_id)
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            f"UPDATE listings SET {', '.join(updates)} WHERE id = {ph}",
+            values,
+        )
+
+
 def is_listing_duplicate(mls_id: str) -> bool:
     """Check if a listing with this MLS ID already exists."""
     if not mls_id:
