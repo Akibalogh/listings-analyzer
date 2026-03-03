@@ -333,3 +333,16 @@ https://www.redfin.com/NY/Briarcliff-Manor/101-Long-Hill-Rd-E-10510/home/2008226
         assert listings[0].listing_status == "New Listing"
         assert listings[0].address == "101 Long Hill Rd E"
         assert listings[0].town == "Briarcliff Manor"
+
+    def test_tour_header_stripped(self):
+        """Redfin tour header '2 homes on this tour' stripped from block."""
+        text = """
+2 homes on this tour
+
+31 Lalli Dr, Katonah, NY 10536
+$1,200,000 4 Beds 2.5 Baths 3,034 sqft
+        """
+        listings = self.parser.parse(None, text)
+        assert len(listings) == 1
+        assert listings[0].address == "31 Lalli Dr"
+        assert listings[0].town == "Katonah"

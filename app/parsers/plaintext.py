@@ -32,6 +32,11 @@ STATUS_PREFIX_RE = re.compile(
     r"^\s*(" + "|".join(re.escape(s) for s in _STATUS_LABELS) + r")\s*$",
     re.IGNORECASE | re.MULTILINE,
 )
+# Redfin tour headers: "2 homes on this tour", "3 homes on this tour", etc.
+TOUR_HEADER_RE = re.compile(
+    r"^\s*\d+\s+homes?\s+on\s+this\s+tour\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
 
 # Street address on its own line: "11 Jennifer Lane" or "101 Long Hill Rd E"
 STREET_RE = re.compile(
@@ -131,6 +136,9 @@ class PlainTextParser(EmailParser):
         if status_match:
             listing.listing_status = status_match.group(1).strip()
             block = STATUS_PREFIX_RE.sub("", block).strip()
+
+        # Strip tour headers (e.g., "2 homes on this tour")
+        block = TOUR_HEADER_RE.sub("", block).strip()
 
         price_match = PRICE_RE.search(block)
         if price_match:
