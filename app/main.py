@@ -734,7 +734,9 @@ def sync_criteria(request: Request):
 
     Protected by MANAGE_KEY env var (not user auth).
     Useful for triggering a full rescore after deploying code changes.
-    Criteria are set via the dashboard AI Criteria panel — not hardcoded.
+    With ?force=true: clears criteria_version on all scores first,
+    bypassing the skip-unchanged logic (useful after a failed rescore
+    that wrote the version but didn't actually AI-score).
     """
     key = request.headers.get("x-manage-key", "")
     if not settings.manage_key or key != settings.manage_key:
@@ -744,6 +746,13 @@ def sync_criteria(request: Request):
     if not criteria:
         raise HTTPException(status_code=404, detail="No active criteria found — set criteria via AI Criteria in dashboard first")
 
+    force = request.query_params.get("force", "").lower() == "true"
+    if force:
+        with db.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("UPDATE scores SET criteria_version = NULL")
+        logger.info("Force rescore: cleared criteria_version on all scores")
+
     _start_rescore(criteria["version"], criteria["instructions"])
     logger.info(f"Triggered rescore with active criteria v{criteria['version']}")
 
@@ -751,6 +760,7 @@ def sync_criteria(request: Request):
         "synced": True,
         "version": criteria["version"],
         "rescore_started": True,
+        "force": force,
         "instructions_preview": criteria["instructions"][:200] + "...",
     }
 
