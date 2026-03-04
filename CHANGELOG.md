@@ -13,6 +13,8 @@ All notable changes to Listings Analyzer are documented here.
 - **Listing validation gate** — `poll_once()` now rejects listings with no address AND no MLS ID before saving; prevents garbage rows from bypassing both dedup checks
 - **Town backfill from Redfin URLs** — data-quality fix mode extracts town/state/zip from Redfin URL paths for listings missing town data
 - **Tour header stripping** — plaintext parser now strips Redfin tour headers ("N homes on this tour") before address parsing; prevents tour count from being concatenated into listing address
+- **Address key backfill on startup** — `init_db()` now backfills `address_key` for any listing with address+town but NULL key; prevents Ave/Avenue-style duplicates from bypassing dedup
+- **Expanded address normalization** — added parkway/pkwy, highway/hwy, trail/trl, crossing/xing, turnpike/tpke, expressway/expy suffix mappings; added directional word normalization (north→n, south→s, east→e, west→w, northeast→ne, etc.)
 
 ### Changed
 - **"Pass" verdict renamed to "Weak Match"** — clearer label for AI-scored listings with score 1-39; updated in scorer, poller, dashboard CSS/filter chips, tests, and docs
