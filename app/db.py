@@ -179,8 +179,11 @@ def init_db():
     # Add columns to existing tables (idempotent)
     _migrate_add_columns()
 
-    # Backfill address_key for any listings missing it (idempotent)
+    # Recompute address_key for all listings (picks up normalization changes)
     _backfill_address_keys()
+
+    # Remove duplicates that now share the same address_key after recomputation
+    _dedup_by_address_key()
 
     logger.info("Database initialized")
 
@@ -491,10 +494,10 @@ def _migrate_add_columns():
 
 
 def _backfill_address_keys():
-    """Backfill address_key for listings that have address+town but no key.
+    """Recompute address_key for all listings with address+town.
 
-    Prevents duplicates from bypassing the address_key dedup check
-    when old listings were ingested before normalization was added.
+    Runs on every startup so normalization changes (e.g. state name → code)
+    are applied to existing listings, not just new ones.
     """
     from app.enrichment import normalize_address
 
@@ -502,8 +505,8 @@ def _backfill_address_keys():
     with get_connection() as conn:
         cur = conn.cursor()
         cur.execute(
-            "SELECT id, address, town, state FROM listings "
-            "WHERE address_key IS NULL AND address IS NOT NULL AND town IS NOT NULL"
+            "SELECT id, address, town, state, address_key FROM listings "
+            "WHERE address IS NOT NULL AND town IS NOT NULL"
         )
         if settings.is_postgres:
             columns = [desc[0] for desc in cur.description]
@@ -514,7 +517,7 @@ def _backfill_address_keys():
     updated = 0
     for row in rows:
         key = normalize_address(row["address"], row["town"], row["state"])
-        if key:
+        if key and key != row.get("address_key"):
             with get_connection() as conn:
                 cur = conn.cursor()
                 cur.execute(
@@ -524,7 +527,59 @@ def _backfill_address_keys():
                 updated += 1
 
     if updated:
-        logger.info(f"Backfilled address_key for {updated} listing(s)")
+        logger.info(f"Recomputed address_key for {updated} listing(s)")
+
+
+def _dedup_by_address_key():
+    """Remove duplicate listings that share the same address_key.
+
+    Keeps the listing with the most data (prefers: has toured, has mls_id,
+    has listing_url, lowest id as tiebreaker). Deletes the rest.
+    """
+    ph = _placeholder()
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, address_key, toured, mls_id, listing_url FROM listings "
+            "WHERE address_key IS NOT NULL ORDER BY address_key, id"
+        )
+        if settings.is_postgres:
+            columns = [desc[0] for desc in cur.description]
+            rows = [dict(zip(columns, r)) for r in cur.fetchall()]
+        else:
+            rows = [dict(r) for r in cur.fetchall()]
+
+    # Group by address_key
+    from collections import defaultdict
+
+    groups: dict[str, list[dict]] = defaultdict(list)
+    for row in rows:
+        groups[row["address_key"]].append(row)
+
+    delete_ids: list[int] = []
+    for key, listings in groups.items():
+        if len(listings) < 2:
+            continue
+        # Sort: toured first, then has mls_id, then has url, then lowest id
+        listings.sort(
+            key=lambda r: (
+                not r.get("toured"),
+                not r.get("mls_id"),
+                not r.get("listing_url"),
+                r["id"],
+            )
+        )
+        # Keep first (best), delete rest
+        delete_ids.extend(r["id"] for r in listings[1:])
+
+    if delete_ids:
+        with get_connection() as conn:
+            cur = conn.cursor()
+            for lid in delete_ids:
+                cur.execute(f"DELETE FROM scores WHERE listing_id = {ph}", (lid,))
+                cur.execute(f"DELETE FROM listings WHERE id = {ph}", (lid,))
+            conn.commit()
+        logger.info(f"Deduped {len(delete_ids)} listing(s) by address_key")
 
 
 # --- Evaluation criteria CRUD ---

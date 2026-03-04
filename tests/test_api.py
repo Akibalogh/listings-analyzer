@@ -676,6 +676,132 @@ class TestAddressKeyBackfill:
         expected = normalize_address("10 Sherman Avenue", "Dobbs Ferry", "NY")
         assert row["address_key"] == expected
 
+    @patch("app.main.settings")
+    def test_backfill_recomputes_stale_state_keys(self, mock_settings):
+        """Backfill updates keys where state changed from 'New York' to 'ny'."""
+        import sqlite3
+
+        from app.db import _backfill_address_keys
+        from app.enrichment import normalize_address
+
+        mock_settings.is_postgres = False
+        mock_settings.database_url = None
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            "CREATE TABLE listings (id INTEGER PRIMARY KEY, address TEXT, "
+            "town TEXT, state TEXT, address_key TEXT)"
+        )
+        # Old key with full state name (stale)
+        conn.execute(
+            "INSERT INTO listings (id, address, town, state, address_key) "
+            "VALUES (1, '10 Sherman Avenue', 'Dobbs Ferry', 'New York', "
+            "'10 sherman ave|dobbs ferry|new york')"
+        )
+        conn.commit()
+
+        with patch("app.db.get_connection") as mock_conn:
+            mock_conn.return_value.__enter__ = MagicMock(return_value=conn)
+            mock_conn.return_value.__exit__ = MagicMock(return_value=False)
+            _backfill_address_keys()
+
+        row = conn.execute("SELECT address_key FROM listings WHERE id = 1").fetchone()
+        assert row["address_key"] == "10 sherman ave|dobbs ferry|ny"
+
+    @patch("app.main.settings")
+    def test_dedup_removes_duplicate_address_keys(self, mock_settings):
+        """_dedup_by_address_key keeps best listing and deletes duplicates."""
+        import sqlite3
+
+        from app.db import _dedup_by_address_key
+
+        mock_settings.is_postgres = False
+        mock_settings.database_url = None
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            "CREATE TABLE listings (id INTEGER PRIMARY KEY, address TEXT, "
+            "town TEXT, state TEXT, address_key TEXT, toured BOOLEAN, "
+            "mls_id TEXT, listing_url TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE scores (id INTEGER PRIMARY KEY, listing_id INTEGER)"
+        )
+        # Listing 1: toured, has mls_id — should be kept
+        conn.execute(
+            "INSERT INTO listings VALUES (1, '10 Sherman Avenue', 'Dobbs Ferry', "
+            "'NY', '10 sherman ave|dobbs ferry|ny', 1, '923146', 'https://example.com')"
+        )
+        conn.execute("INSERT INTO scores VALUES (1, 1)")
+        # Listing 2: not toured, no mls_id — should be deleted
+        conn.execute(
+            "INSERT INTO listings VALUES (2, '10 Sherman Ave', 'Dobbs Ferry', "
+            "'NY', '10 sherman ave|dobbs ferry|ny', 0, NULL, NULL)"
+        )
+        conn.execute("INSERT INTO scores VALUES (2, 2)")
+        conn.commit()
+
+        with patch("app.db.get_connection") as mock_conn:
+            mock_conn.return_value.__enter__ = MagicMock(return_value=conn)
+            mock_conn.return_value.__exit__ = MagicMock(return_value=False)
+            _dedup_by_address_key()
+
+        remaining = conn.execute("SELECT id FROM listings ORDER BY id").fetchall()
+        assert [r["id"] for r in remaining] == [1]
+        scores = conn.execute("SELECT listing_id FROM scores").fetchall()
+        assert [r["listing_id"] for r in scores] == [1]
+
+    @patch("app.main.settings")
+    def test_dedup_keeps_toured_over_non_toured(self, mock_settings):
+        """Dedup prefers the toured listing even if it has a higher id."""
+        import sqlite3
+
+        from app.db import _dedup_by_address_key
+
+        mock_settings.is_postgres = False
+        mock_settings.database_url = None
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            "CREATE TABLE listings (id INTEGER PRIMARY KEY, address TEXT, "
+            "town TEXT, state TEXT, address_key TEXT, toured BOOLEAN, "
+            "mls_id TEXT, listing_url TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE scores (id INTEGER PRIMARY KEY, listing_id INTEGER)"
+        )
+        # Listing 1: NOT toured, lower id
+        conn.execute(
+            "INSERT INTO listings VALUES (1, '6 Sunset Ln', 'Hartsdale', "
+            "'NY', '6 sunset ln|hartsdale|ny', 0, NULL, NULL)"
+        )
+        # Listing 2: toured, higher id — should be kept
+        conn.execute(
+            "INSERT INTO listings VALUES (2, '6 Sunset Lane', 'Hartsdale', "
+            "'NY', '6 sunset ln|hartsdale|ny', 1, '999999', 'https://example.com')"
+        )
+        conn.commit()
+
+        with patch("app.db.get_connection") as mock_conn:
+            mock_conn.return_value.__enter__ = MagicMock(return_value=conn)
+            mock_conn.return_value.__exit__ = MagicMock(return_value=False)
+            _dedup_by_address_key()
+
+        remaining = conn.execute("SELECT id FROM listings").fetchall()
+        assert [r["id"] for r in remaining] == [2]
+
+    def test_normalize_address_state_name_matches_code(self):
+        """'New York' and 'NY' produce the same address key."""
+        from app.enrichment import normalize_address
+
+        key1 = normalize_address("10 Sherman Ave", "Dobbs Ferry", "New York")
+        key2 = normalize_address("10 Sherman Ave", "Dobbs Ferry", "NY")
+        assert key1 == key2
+        assert key1.endswith("|ny")
+
     def test_data_quality_reports_no_town(self, client):
         """Data-quality dry run includes no_town_count."""
         with patch("app.main.settings") as mock_settings, \

@@ -44,7 +44,7 @@ You want:
 ### Data Enrichment
 - **School data** — SchoolDigger API (free DEV tier, 20 calls/day) fetches nearby school rankings by zip code; cached in DB to avoid rate limit; displayed on cards and fed into AI scoring
 - **Transit commute times** — Google Routes API (Essentials tier, 10K free/month) calculates commute to Brookfield Place NYC (next weekday 8 AM); tries both walk-to-station transit and drive-to-station + transit, picks the shorter one; station overrides map towns to their nearest Metro-North station; displayed as badge on dashboard cards
-- **Address-based dedup** — Normalized address keys (Avenue→Ave, Street→St, etc.) prevent duplicate listings across different email parsers
+- **Address-based dedup** — Normalized address keys (Avenue→Ave, Street→St, New York→NY, etc.) prevent duplicate listings across different email parsers; keys are recomputed on every startup so normalization improvements apply retroactively; startup dedup pass merges any duplicates that emerge, keeping the listing with toured status / most data
 
 ## 3. User Flow
 

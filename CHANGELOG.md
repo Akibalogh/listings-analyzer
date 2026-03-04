@@ -29,6 +29,8 @@ All notable changes to Listings Analyzer are documented here.
 - **"Pass" verdict renamed to "Weak Match"** — clearer label for AI-scored listings with score 1-39; updated in scorer, poller, dashboard CSS/filter chips, tests, and docs
 - **"Pass+" filter chip renamed to "Non-Reject"** — shows all non-rejected listings regardless of score tier
 - **State normalization in address keys** — `normalize_address()` now converts full state names to 2-letter codes ("New York"→"NY", "New Jersey"→"NJ", etc.); prevents duplicates when same listing arrives with "New York" from one source and "NY" from another
+- **Address key recomputation on startup** — `_backfill_address_keys()` now recomputes keys for ALL listings (not just NULL), so normalization improvements apply retroactively
+- **Startup dedup pass** — `_dedup_by_address_key()` runs after key recomputation; merges duplicates by keeping the listing with toured status, MLS ID, and listing URL (in priority order)
 - **Data-quality fix mode** — no longer deletes no-URL listings (only no-address); no-URL listings are real but just lack a clickable link
 - `_rescore_all()` refactored: first pass collects IDs needing rescore (lightweight, no images loaded), then processes in chunks — build → submit → poll → process → free memory per chunk
 
