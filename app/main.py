@@ -381,6 +381,28 @@ async def mark_toured(request: Request, listing_id: int):
     return {"listing_id": listing_id, "toured": toured}
 
 
+# --- Mark as sold (delete) ---
+
+
+@app.post("/listings/{listing_id}/sold")
+async def mark_sold(request: Request, listing_id: int):
+    """Delete a listing that has been sold. Requires auth."""
+    _require_auth(request)
+    listing = db.get_listing_by_id(listing_id)
+    if not listing:
+        raise HTTPException(status_code=404, detail=f"Listing #{listing_id} not found")
+
+    ph = db._placeholder()
+    with db.get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(f"DELETE FROM scores WHERE listing_id = {ph}", (listing_id,))
+        cur.execute(f"DELETE FROM listings WHERE id = {ph}", (listing_id,))
+        conn.commit()
+
+    logger.info("Listing #%s marked as sold and deleted", listing_id)
+    return {"listing_id": listing_id, "deleted": True}
+
+
 # --- Listing URL + description scraping ---
 
 

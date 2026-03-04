@@ -18,8 +18,12 @@ All notable changes to Listings Analyzer are documented here.
 - **Global email age filter** — `MAX_EMAIL_AGE_DAYS` env var (default: 21); Gmail queries now include `newer_than:{days}d` to skip stale emails; prevents ingesting sold/expired listings from months-old alerts
 - **`POST /manage/prune-sold` endpoint** — checks Redfin listing URLs via Jina Reader for sold/off-market status; dry-run by default, `?fix=true` deletes sold listings; protected by MANAGE_KEY
 - **Bare Redfin URL parsing** — plaintext parser now handles emails with only Redfin URLs (no price/beds data); extracts address/town/state/zip from URL path; enables ingesting listings forwarded by personal contacts
+- **`POST /listings/{id}/sold` endpoint** — deletes a listing and its score; auth-required; called from new "Mark as Sold" button on dashboard
+- **"Mark as Sold" button** — red-themed button at top of expanded card detail; confirms before deleting; removes card from UI immediately
+- **Action buttons row** — toured and sold buttons now displayed together at top of card detail section (were at bottom)
 
 ### Changed
+- **Removed image management and add-URL sections** from expanded card detail; these are machine tasks, not manual ones
 - **Commute: pick shortest of two strategies** — `fetch_commute_time()` now tries both direct transit (walk to station) and drive-to-station + transit, returning whichever is shorter; previously only tried drive+transit when walk-to-transit returned no routes, causing inflated times (e.g. 152 min for Briarcliff Manor when drive+transit would be ~70 min)
 - **Station overrides** — added Briarcliff Manor → Scarborough, Ossining, Pleasantville to `_STATION_OVERRIDES`
 - **"Pass" verdict renamed to "Weak Match"** — clearer label for AI-scored listings with score 1-39; updated in scorer, poller, dashboard CSS/filter chips, tests, and docs

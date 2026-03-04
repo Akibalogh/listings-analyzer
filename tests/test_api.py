@@ -273,6 +273,30 @@ class TestTouredEndpoint:
         mock_mark.assert_called_once_with(1, True)
 
 
+class TestSoldEndpoint:
+    """Tests for POST /listings/{listing_id}/sold."""
+
+    def test_sold_requires_auth(self, client):
+        res = client.post("/listings/1/sold")
+        assert res.status_code == 401
+
+    @patch("app.main.db.get_listing_by_id", return_value=None)
+    def test_sold_404_missing_listing(self, mock_get, authed_client):
+        res = authed_client.post("/listings/999/sold")
+        assert res.status_code == 404
+
+    @patch("app.main.db.get_connection")
+    @patch("app.main.db.get_listing_by_id", return_value={"id": 1, "address": "6 Sunset Ln"})
+    def test_sold_deletes_listing(self, mock_get, mock_conn, authed_client):
+        mock_cur = mock_conn.return_value.__enter__.return_value.cursor.return_value
+        mock_cur.rowcount = 1
+        res = authed_client.post("/listings/1/sold")
+        assert res.status_code == 200
+        data = res.json()
+        assert data["listing_id"] == 1
+        assert data["deleted"] is True
+
+
 class TestManageEndpoint:
     """Tests for POST /manage/sync-criteria."""
 

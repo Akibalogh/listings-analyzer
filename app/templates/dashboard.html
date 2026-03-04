@@ -813,6 +813,28 @@
   .tour-btn.toured { background: #f0fdf4; border-color: #bbf7d0; color: #16a34a; }
   .tour-btn.toured:hover { background: #fef2f2; border-color: #fecaca; color: #dc2626; }
 
+  /* Sold button (in expanded detail) */
+  .sold-btn {
+    background: transparent;
+    border: 1.5px solid var(--border);
+    color: var(--text-muted);
+    padding: 6px 12px;
+    border-radius: 8px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s;
+    white-space: nowrap;
+  }
+  .sold-btn:hover { border-color: #dc2626; color: #dc2626; }
+
+  /* Action buttons row at top of detail */
+  .detail-actions {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 10px;
+  }
+
   /* MLS ID */
   .mls-id {
     font-size: 11px;
@@ -1442,6 +1464,22 @@ function buildCard(l) {
   /* === Expandable detail === */
   var detailInner = el('div', {className: 'card-detail-inner'});
 
+  /* Action buttons (toured + sold) at top of detail */
+  if (currentUser) {
+    var actionsRow = el('div', {className: 'detail-actions'});
+    var tourBtn = el('button', {
+      className: 'tour-btn' + (l.toured ? ' toured' : ''),
+      onclick: function(e) { e.stopPropagation(); toggleToured(l.id, l.toured, tourBtn); }
+    }, l.toured ? '\u2713 Toured — click to unmark' : 'Mark as Toured');
+    var soldBtn = el('button', {
+      className: 'sold-btn',
+      onclick: function(e) { e.stopPropagation(); markSold(l.id); }
+    }, 'Mark as Sold');
+    actionsRow.appendChild(tourBtn);
+    actionsRow.appendChild(soldBtn);
+    detailInner.appendChild(actionsRow);
+  }
+
   /* Stats row */
   var statsArr = [buildStat('Price', price), buildStat('Size', sqft + ' sqft'), buildStat('Beds', beds), buildStat('Baths', baths)];
   if (priceSqft) statsArr.push(buildStat('$/sqft', priceSqft));
@@ -1489,24 +1527,11 @@ function buildCard(l) {
       el('div', null, l.description)
     ]));
   }
-  /* Listing URL or scrape input */
+  /* Listing URL */
   if (l.listing_url) {
     var urlDiv = el('div', {className: 'listing-url'});
     urlDiv.appendChild(el('a', {href: l.listing_url, target: '_blank', rel: 'noopener'}, 'View full listing \u2192'));
     detailInner.appendChild(urlDiv);
-  } else if (currentUser) {
-    detailInner.appendChild(buildAddUrlSection(l));
-  }
-  /* Image management (auth-only) */
-  if (currentUser) detailInner.appendChild(buildImageSection(l));
-  /* Tour toggle button (auth-only) */
-  if (currentUser) {
-    var tourBtn = el('button', {
-      className: 'tour-btn' + (l.toured ? ' toured' : ''),
-      style: 'margin-top:12px',
-      onclick: function(e) { e.stopPropagation(); toggleToured(l.id, l.toured, tourBtn); }
-    }, l.toured ? '\u2713 Toured — click to unmark' : 'Mark as Toured');
-    detailInner.appendChild(tourBtn);
   }
   if (l.mls_id) detailInner.appendChild(el('div', {className: 'mls-id'}, 'MLS# ' + l.mls_id));
   card.appendChild(el('div', {className: 'card-detail'}, [detailInner]));
@@ -2016,6 +2041,26 @@ async function toggleToured(listingId, currentlyTouredVal, btn) {
       }
       updateFilterCounts();
       showToast(newVal ? 'Marked as toured' : 'Tour mark removed');
+    } else {
+      var err = await res.json();
+      showToast('Error: ' + (err.detail || 'failed'));
+    }
+  } catch (e) {
+    showToast('Network error');
+  }
+}
+
+/* ==== Mark as Sold ==== */
+async function markSold(listingId) {
+  if (!confirm('Remove this listing as sold?')) return;
+  try {
+    var res = await fetch('/listings/' + listingId + '/sold', {method: 'POST'});
+    if (res.ok) {
+      allListings = allListings.filter(function(l) { return l.id !== listingId; });
+      var card = document.getElementById('card-' + listingId);
+      if (card) card.remove();
+      updateFilterCounts();
+      showToast('Listing removed (sold)');
     } else {
       var err = await res.json();
       showToast('Error: ' + (err.detail || 'failed'));
