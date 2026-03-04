@@ -15,6 +15,9 @@ class Settings(BaseSettings):
     # Date-filtered senders: "email:days,email:days" — only fetch emails newer than N days
     sender_date_filters: str = ""
 
+    # Max email age in days (0 = no limit). Emails older than this are ignored.
+    max_email_age_days: int = 21
+
     # Anthropic
     anthropic_api_key: str = ""
 

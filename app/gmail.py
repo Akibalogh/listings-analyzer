@@ -67,10 +67,11 @@ def fetch_new_emails() -> list[dict]:
     seen_ids: set[str] = set()
     all_emails: list[dict] = []
 
-    # Query 1: Regular senders (no date filter)
+    # Query 1: Regular senders (with global max age filter if configured)
     if settings.sender_list:
         sender_query = " OR ".join(f"from:{s}" for s in settings.sender_list)
-        query = f"({sender_query}) -label:{PROCESSED_LABEL}"
+        age_filter = f" newer_than:{settings.max_email_age_days}d" if settings.max_email_age_days > 0 else ""
+        query = f"({sender_query}){age_filter} -label:{PROCESSED_LABEL}"
         all_emails.extend(_fetch_query(service, query, label_id, seen_ids))
 
     # Query 2+: Date-filtered senders (one query per sender)
