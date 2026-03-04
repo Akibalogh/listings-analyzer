@@ -32,7 +32,7 @@ _BATCH_CHUNK_SIZE = 5
 
 
 def _scheduled_poll_loop(interval_hours: int):
-    """Background thread: poll Gmail on a fixed interval."""
+    """Background thread: poll Gmail and prune sold listings on a fixed interval."""
     interval_secs = interval_hours * 3600
     logger.info(f"Scheduled poller started (every {interval_hours}h)")
     while True:
@@ -42,6 +42,19 @@ def _scheduled_poll_loop(interval_hours: int):
             logger.info(f"Scheduled poll complete: {len(results)} listing(s)")
         except Exception:
             logger.exception("Scheduled poll failed")
+
+        # Prune sold/off-market listings
+        try:
+            report = _prune_sold_listings(fix=True)
+            if report["sold_count"] > 0:
+                logger.info(
+                    f"Scheduled prune: removed {report['sold_count']} sold listing(s) "
+                    f"(checked {report['checked']}, errors {report['errors']})"
+                )
+            else:
+                logger.info(f"Scheduled prune: no sold listings found (checked {report['checked']})")
+        except Exception:
+            logger.exception("Scheduled prune-sold failed")
 
 
 @asynccontextmanager
@@ -1207,25 +1220,21 @@ def manage_enrich_status():
 # --- Data Quality ---
 
 
-@app.post("/manage/prune-sold")
-def manage_prune_sold(request: Request):
-    """Check listing URLs for sold/off-market status and remove them.
+_SOLD_INDICATORS = [
+    "sold on", "off market", "this home is no longer",
+    "no longer for sale", "status: sold", "sale-status-sold",
+    '"listingstatus":"sold"', '"listingstatus":"pending"',
+]
 
-    Default (dry-run): returns listings detected as sold/off-market.
-    With ?fix=true: deletes those listings.
 
-    Uses Jina Reader to check Redfin pages for status indicators.
-    Protected by MANAGE_KEY env var.
+def _prune_sold_listings(fix: bool = False) -> dict:
+    """Check Redfin listing URLs via Jina Reader for sold/off-market status.
+
+    Returns report dict with checked, sold_count, sold list, errors.
+    If fix=True, deletes the sold listings from DB.
     """
-    key = request.headers.get("x-manage-key", "")
-    if not settings.manage_key or key != settings.manage_key:
-        raise HTTPException(status_code=403, detail="Invalid or missing management key")
-
-    fix = request.query_params.get("fix", "").lower() == "true"
-
     import httpx
 
-    # Fetch all listings with Redfin URLs
     with db.get_connection() as conn:
         cur = conn.cursor()
         cur.execute("SELECT id, address, town, listing_url FROM listings WHERE listing_url IS NOT NULL")
@@ -1236,12 +1245,6 @@ def manage_prune_sold(request: Request):
             rows = [dict(r) for r in cur.fetchall()]
 
     redfin_listings = [r for r in rows if r.get("listing_url") and "redfin.com" in r["listing_url"]]
-
-    _SOLD_INDICATORS = [
-        "sold on", "off market", "this home is no longer",
-        "no longer for sale", "status: sold", "sale-status-sold",
-        '"listingStatus":"Sold"', '"listingStatus":"Pending"',
-    ]
 
     sold = []
     checked = 0
@@ -1269,7 +1272,7 @@ def manage_prune_sold(request: Request):
             logger.warning(f"Failed to check listing #{listing['id']} ({url}): {e}")
             errors += 1
 
-    report = {
+    report: dict = {
         "checked": checked,
         "sold_count": len(sold),
         "sold": sold,
@@ -1289,6 +1292,24 @@ def manage_prune_sold(request: Request):
         logger.info(f"Pruned {len(sold_ids)} sold/off-market listings")
 
     return report
+
+
+@app.post("/manage/prune-sold")
+def manage_prune_sold(request: Request):
+    """Check listing URLs for sold/off-market status and remove them.
+
+    Default (dry-run): returns listings detected as sold/off-market.
+    With ?fix=true: deletes those listings.
+
+    Uses Jina Reader to check Redfin pages for status indicators.
+    Protected by MANAGE_KEY env var.
+    """
+    key = request.headers.get("x-manage-key", "")
+    if not settings.manage_key or key != settings.manage_key:
+        raise HTTPException(status_code=403, detail="Invalid or missing management key")
+
+    fix = request.query_params.get("fix", "").lower() == "true"
+    return _prune_sold_listings(fix=fix)
 
 
 @app.post("/manage/data-quality")
