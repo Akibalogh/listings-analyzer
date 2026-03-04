@@ -412,6 +412,51 @@ class TestFetchCommuteTime:
         assert result["transit_minutes"] == 60
 
     @patch("app.enrichment.settings")
+    @patch("app.enrichment.httpx.Client")
+    def test_direct_transit_wins_when_shorter(self, mock_client_cls, mock_settings):
+        """When direct transit is shorter than drive+transit, pick direct."""
+        mock_settings.google_maps_api_key = "test_key"
+        mock_settings.commute_destination = "Brookfield Place, NYC"
+
+        # Strategy 1: direct transit = 55 min (close to station)
+        direct_transit = MagicMock()
+        direct_transit.json.return_value = {
+            "routes": [{"duration": "3300s", "distanceMeters": 40000}]  # 55 min
+        }
+        direct_transit.raise_for_status = MagicMock()
+
+        # Strategy 2: station transit = 50 min, drive to station = 15 min → 65 min total
+        station_transit = MagicMock()
+        station_transit.json.return_value = {
+            "routes": [{"duration": "3000s", "distanceMeters": 50000}]  # 50 min
+        }
+        station_transit.raise_for_status = MagicMock()
+
+        drive_to_station = MagicMock()
+        drive_to_station.json.return_value = {
+            "routes": [{"duration": "900s", "distanceMeters": 8000}]  # 15 min
+        }
+        drive_to_station.raise_for_status = MagicMock()
+
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.post.side_effect = [direct_transit, station_transit, drive_to_station]
+        mock_client_cls.return_value = mock_client
+
+        result = fetch_commute_time("10 Sherman Ave", "Rye", "NY", "10580")
+        assert result is not None
+        assert result["commute_minutes"] == 55  # direct transit wins
+        assert result["commute_mode"] == "transit"
+
+    def test_station_overrides_exist(self):
+        """Verify key station overrides are configured."""
+        from app.enrichment import _STATION_OVERRIDES
+        assert _STATION_OVERRIDES["briarcliff manor"] == "Scarborough"
+        assert _STATION_OVERRIDES["pound ridge"] == "Katonah"
+        assert _STATION_OVERRIDES["yorktown heights"] == "Croton-Harmon"
+
+    @patch("app.enrichment.settings")
     def test_returns_none_without_destination(self, mock_settings):
         mock_settings.google_maps_api_key = "test_key"
         mock_settings.commute_destination = ""

@@ -43,7 +43,7 @@ You want:
 
 ### Data Enrichment
 - **School data** — SchoolDigger API (free DEV tier, 20 calls/day) fetches nearby school rankings by zip code; cached in DB to avoid rate limit; displayed on cards and fed into AI scoring
-- **Transit commute times** — Google Routes API (Essentials tier, 10K free/month) calculates Metro-North + subway + walking commute to Brookfield Place NYC (next weekday 8 AM); displayed as badge on dashboard cards
+- **Transit commute times** — Google Routes API (Essentials tier, 10K free/month) calculates commute to Brookfield Place NYC (next weekday 8 AM); tries both walk-to-station transit and drive-to-station + transit, picks the shorter one; station overrides map towns to their nearest Metro-North station; displayed as badge on dashboard cards
 - **Address-based dedup** — Normalized address keys (Avenue→Ave, Street→St, etc.) prevent duplicate listings across different email parsers
 
 ## 3. User Flow
@@ -66,6 +66,7 @@ You want:
 - Supports forwarded emails (detects and unwraps)
 - Configurable sender list (env var `ALERT_SENDERS`) — supports domain-level matching (e.g., `redfin.com` catches all senders from that domain)
 - Date-filtered senders (env var `SENDER_DATE_FILTERS`, format: `email:days,email:days`) — for personal contacts where only recent emails are relevant
+- **Global email age filter** (env var `MAX_EMAIL_AGE_DAYS`, default: 21) — Gmail queries include `newer_than:{days}d` to skip stale/sold listings from old alert emails
 - Separate Gmail queries per sender group with deduplication
 - Processes each email once, marks with `ListingsAnalyzer/Processed` label
 

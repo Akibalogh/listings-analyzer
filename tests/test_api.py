@@ -669,3 +669,64 @@ class TestDateFilteredSenderConfig:
         s = Settings(alert_senders="redfin.com,alerts@mls.example.com")
         assert "redfin.com" in s.sender_list
         assert "alerts@mls.example.com" in s.sender_list
+
+
+class TestMaxEmailAgeConfig:
+    """Tests for MAX_EMAIL_AGE_DAYS config and Gmail query construction."""
+
+    def test_default_is_21_days(self):
+        from app.config import Settings
+        s = Settings()
+        assert s.max_email_age_days == 21
+
+    def test_custom_value(self):
+        from app.config import Settings
+        s = Settings(max_email_age_days=7)
+        assert s.max_email_age_days == 7
+
+    def test_zero_disables_filter(self):
+        from app.config import Settings
+        s = Settings(max_email_age_days=0)
+        assert s.max_email_age_days == 0
+
+    @patch("app.gmail._build_service")
+    @patch("app.gmail._get_or_create_label", return_value="label_123")
+    @patch("app.gmail.settings")
+    def test_query_includes_newer_than(self, mock_settings, mock_label, mock_service):
+        """Gmail query should include newer_than when max_email_age_days > 0."""
+        mock_settings.sender_list = ["redfin.com"]
+        mock_settings.date_filtered_sender_list = []
+        mock_settings.max_email_age_days = 21
+
+        mock_svc = MagicMock()
+        mock_svc.users().messages().list().execute.return_value = {"messages": []}
+        mock_service.return_value = mock_svc
+
+        from app.gmail import fetch_new_emails
+        fetch_new_emails()
+
+        # Verify the query string passed to Gmail API contains newer_than
+        call_args = mock_svc.users().messages().list.call_args
+        query = call_args[1].get("q", "") if call_args[1] else call_args[0][0] if call_args[0] else ""
+        # The query is passed via keyword arg 'q'
+        assert "newer_than:21d" in query
+
+    @patch("app.gmail._build_service")
+    @patch("app.gmail._get_or_create_label", return_value="label_123")
+    @patch("app.gmail.settings")
+    def test_query_omits_newer_than_when_zero(self, mock_settings, mock_label, mock_service):
+        """Gmail query should NOT include newer_than when max_email_age_days = 0."""
+        mock_settings.sender_list = ["redfin.com"]
+        mock_settings.date_filtered_sender_list = []
+        mock_settings.max_email_age_days = 0
+
+        mock_svc = MagicMock()
+        mock_svc.users().messages().list().execute.return_value = {"messages": []}
+        mock_service.return_value = mock_svc
+
+        from app.gmail import fetch_new_emails
+        fetch_new_emails()
+
+        call_args = mock_svc.users().messages().list.call_args
+        query = call_args[1].get("q", "") if call_args[1] else ""
+        assert "newer_than" not in query
