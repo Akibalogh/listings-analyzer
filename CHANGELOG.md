@@ -17,6 +17,8 @@ All notable changes to Listings Analyzer are documented here.
 - **Expanded address normalization** — added parkway/pkwy, highway/hwy, trail/trl, crossing/xing, turnpike/tpke, expressway/expy suffix mappings; added directional word normalization (north→n, south→s, east→e, west→w, northeast→ne, etc.)
 
 ### Changed
+- **Commute: pick shortest of two strategies** — `fetch_commute_time()` now tries both direct transit (walk to station) and drive-to-station + transit, returning whichever is shorter; previously only tried drive+transit when walk-to-transit returned no routes, causing inflated times (e.g. 152 min for Briarcliff Manor when drive+transit would be ~70 min)
+- **Station overrides** — added Briarcliff Manor → Scarborough, Ossining, Pleasantville to `_STATION_OVERRIDES`
 - **"Pass" verdict renamed to "Weak Match"** — clearer label for AI-scored listings with score 1-39; updated in scorer, poller, dashboard CSS/filter chips, tests, and docs
 - **"Pass+" filter chip renamed to "Non-Reject"** — shows all non-rejected listings regardless of score tier
 - **Data-quality fix mode** — no longer deletes no-URL listings (only no-address); no-URL listings are real but just lack a clickable link

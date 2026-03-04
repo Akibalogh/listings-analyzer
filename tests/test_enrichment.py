@@ -369,6 +369,49 @@ class TestFetchCommuteTime:
         assert result is None
 
     @patch("app.enrichment.settings")
+    @patch("app.enrichment.httpx.Client")
+    def test_picks_shorter_of_two_strategies(self, mock_client_cls, mock_settings):
+        """When both transit and drive+transit work, pick the shorter one."""
+        mock_settings.google_maps_api_key = "test_key"
+        mock_settings.commute_destination = "Brookfield Place, NYC"
+
+        # Strategy 1: direct transit = 152 min (long walk to station)
+        direct_transit = MagicMock()
+        direct_transit.json.return_value = {
+            "routes": [{"duration": "9120s", "distanceMeters": 60000}]  # 152 min
+        }
+        direct_transit.raise_for_status = MagicMock()
+
+        # Strategy 2: station transit = 60 min, drive to station = 10 min → 70 min total
+        station_transit = MagicMock()
+        station_transit.json.return_value = {
+            "routes": [{"duration": "3600s", "distanceMeters": 50000}]  # 60 min
+        }
+        station_transit.raise_for_status = MagicMock()
+
+        drive_to_station = MagicMock()
+        drive_to_station.json.return_value = {
+            "routes": [{"duration": "600s", "distanceMeters": 5000}]  # 10 min
+        }
+        drive_to_station.raise_for_status = MagicMock()
+
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        # Call 1: TRANSIT from address → 152 min
+        # Call 2: TRANSIT from station → 60 min
+        # Call 3: DRIVE to station → 10 min
+        mock_client.post.side_effect = [direct_transit, station_transit, drive_to_station]
+        mock_client_cls.return_value = mock_client
+
+        result = fetch_commute_time("471 Chappaqua Rd", "Briarcliff Manor", "NY", "10510")
+        assert result is not None
+        assert result["commute_minutes"] == 70  # drive+transit wins
+        assert result["commute_mode"] == "drive+transit"
+        assert result["drive_minutes"] == 10
+        assert result["transit_minutes"] == 60
+
+    @patch("app.enrichment.settings")
     def test_returns_none_without_destination(self, mock_settings):
         mock_settings.google_maps_api_key = "test_key"
         mock_settings.commute_destination = ""

@@ -292,6 +292,9 @@ _STATION_OVERRIDES: dict[str, str] = {
     "cortlandt": "Croton-Harmon",
     "mohegan lake": "Cortlandt",
     "somers": "Katonah",
+    "briarcliff manor": "Scarborough",
+    "ossining": "Ossining",
+    "pleasantville": "Pleasantville",
 }
 
 
@@ -303,11 +306,10 @@ def fetch_commute_time(
 ) -> dict | None:
     """Fetch commute time to configured destination via Google Routes API.
 
-    Strategy:
-    1. TRANSIT from address (works if walkable to a station)
-    2. Drive-to-station hybrid: DRIVE to "{town} train station" + TRANSIT
-       from station to destination (common for suburban Westchester addresses)
-    3. Returns None if neither works (no point showing pure drive to Manhattan)
+    Tries both strategies and returns the shorter commute:
+    1. TRANSIT from address (walking access to station)
+    2. Drive-to-station hybrid: DRIVE to nearest train station + TRANSIT
+       from station to destination (typical for suburban Westchester)
 
     Returns dict with keys: commute_minutes, commute_mode ("transit"|"drive+transit"),
     departure_time, route_duration_seconds — or None on failure/missing config.
@@ -327,23 +329,23 @@ def fetch_commute_time(
     origin = f"{address}, {town}, {state or ''} {zip_code or ''}".strip()
     departure_time = _next_weekday_8am()
 
+    candidates: list[dict] = []
+
     # Strategy 1: TRANSIT from address (walking access to station)
     route = _routes_request(origin, destination, "TRANSIT", departure_time)
     if route:
         duration_seconds = _parse_duration(route)
         commute_minutes = round(duration_seconds / 60)
         logger.info(f"Commute (transit): {origin} → {destination} = {commute_minutes} min")
-        return {
+        candidates.append({
             "commute_minutes": commute_minutes,
             "commute_mode": "transit",
             "departure_time": departure_time.isoformat(),
             "route_duration_seconds": duration_seconds,
-        }
+        })
 
     # Strategy 2: drive to station + transit from station
-    # Use station override if the town's station has a different name
     station_town = _STATION_OVERRIDES.get(town.lower(), town)
-    logger.info(f"No walk-to-transit from {origin}, trying drive to {station_town} station")
     station = f"{station_town} train station, {state or 'NY'}"
     station_transit = _routes_request(station, destination, "TRANSIT", departure_time)
     if station_transit:
@@ -357,7 +359,7 @@ def fetch_commute_time(
                 f"Commute (drive+transit): {origin} → {station} ({round(drive_secs/60)} min drive) "
                 f"→ {destination} ({round(transit_secs/60)} min transit) = {commute_minutes} min total"
             )
-            return {
+            candidates.append({
                 "commute_minutes": commute_minutes,
                 "commute_mode": "drive+transit",
                 "departure_time": departure_time.isoformat(),
@@ -365,7 +367,18 @@ def fetch_commute_time(
                 "drive_minutes": round(drive_secs / 60),
                 "transit_minutes": round(transit_secs / 60),
                 "station": station,
-            }
+            })
 
-    logger.warning(f"No transit routes found for {origin} (direct or via station)")
-    return None
+    if not candidates:
+        logger.warning(f"No transit routes found for {origin} (direct or via station)")
+        return None
+
+    # Pick the shortest commute
+    best = min(candidates, key=lambda c: c["commute_minutes"])
+    if len(candidates) > 1:
+        other = [c for c in candidates if c is not best][0]
+        logger.info(
+            f"Commute: picked {best['commute_mode']} ({best['commute_minutes']} min) "
+            f"over {other['commute_mode']} ({other['commute_minutes']} min) for {origin}"
+        )
+    return best
