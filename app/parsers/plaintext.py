@@ -81,8 +81,14 @@ class PlainTextParser(EmailParser):
     def can_parse(self, html: str | None, text: str | None) -> bool:
         if not text:
             return False
+        # Accept emails with 2+ listing indicators (price, MLS, beds)
         matches = sum(1 for pattern in LISTING_INDICATORS if pattern.search(text))
-        return matches >= 2
+        if matches >= 2:
+            return True
+        # Also accept emails with bare Redfin/listing URLs
+        if LISTING_URL_RE.search(text):
+            return True
+        return False
 
     def parse(self, html: str | None, text: str | None) -> list[ParsedListing]:
         if not text:
@@ -94,13 +100,13 @@ class PlainTextParser(EmailParser):
         listings = []
         for block in blocks:
             listing = self._parse_block(block)
-            if listing and (listing.price or listing.mls_id):
+            if listing and (listing.price or listing.mls_id or listing.address):
                 listings.append(listing)
 
         # If no blocks found, try parsing the whole text as one listing
         if not listings:
             listing = self._parse_block(text)
-            if listing and (listing.price or listing.mls_id):
+            if listing and (listing.price or listing.mls_id or listing.address):
                 listings.append(listing)
 
         return listings
@@ -125,6 +131,12 @@ class PlainTextParser(EmailParser):
         ]
         if len(listing_blocks) > 1:
             return listing_blocks
+
+        # Bare URL list: split by newline, keep lines that are just URLs
+        lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
+        url_lines = [ln for ln in lines if LISTING_URL_RE.search(ln)]
+        if len(url_lines) > 1:
+            return url_lines
 
         return [text]
 

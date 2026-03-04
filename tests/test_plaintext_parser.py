@@ -346,3 +346,39 @@ $1,200,000 4 Beds 2.5 Baths 3,034 sqft
         assert len(listings) == 1
         assert listings[0].address == "31 Lalli Dr"
         assert listings[0].town == "Katonah"
+
+    def test_can_parse_bare_redfin_urls(self):
+        """Emails with only Redfin URLs should be parseable."""
+        text = """https://www.redfin.com/NY/Croton-on-Hudson/19-Georgia-Ln-10520/home/21487005
+
+https://www.redfin.com/NY/Bedford/908-Old-Post-Rd-10506/home/20151758"""
+        assert self.parser.can_parse(None, text) is True
+
+    def test_parses_bare_redfin_urls(self):
+        """Bare Redfin URLs should produce listings with address from URL path."""
+        text = """https://www.redfin.com/NY/Croton-on-Hudson/19-Georgia-Ln-10520/home/21487005
+
+https://www.redfin.com/NY/Bedford/908-Old-Post-Rd-10506/home/20151758
+
+https://www.redfin.com/NY/Scarsdale/12-Swarthmore-Rd-10583/home/20054373
+
+https://www.redfin.com/NY/Bedford/65-Hickory-Ln-10506/home/20149806"""
+        listings = self.parser.parse(None, text)
+        assert len(listings) == 4
+        assert listings[0].address == "19 Georgia Ln"
+        assert listings[0].town == "Croton On Hudson"
+        assert listings[0].state == "NY"
+        assert listings[0].zip_code == "10520"
+        assert "redfin.com" in listings[0].listing_url
+        assert listings[1].address == "908 Old Post Rd"
+        assert listings[1].town == "Bedford"
+        assert listings[2].address == "12 Swarthmore Rd"
+        assert listings[3].address == "65 Hickory Ln"
+
+    def test_parses_single_bare_redfin_url(self):
+        """Single bare Redfin URL should produce one listing."""
+        text = "https://www.redfin.com/NY/Rye/10-Sherman-Ave-10580/home/12345"
+        listings = self.parser.parse(None, text)
+        assert len(listings) == 1
+        assert listings[0].address == "10 Sherman Ave"
+        assert listings[0].town == "Rye"
