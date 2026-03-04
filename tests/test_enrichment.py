@@ -140,6 +140,22 @@ class TestNormalizeAddress:
         # "north" is a whole-word match, so "northfield" stays intact
         assert "northfield" in key
 
+    def test_state_name_normalized_to_code(self):
+        """'New York' and 'NY' produce the same key."""
+        key1 = normalize_address("10 Sherman Ave", "Dobbs Ferry", "New York")
+        key2 = normalize_address("10 Sherman Ave", "Dobbs Ferry", "NY")
+        assert key1 == key2
+
+    def test_state_name_new_jersey(self):
+        """'New Jersey' normalizes to 'nj'."""
+        key = normalize_address("5 Main St", "Hoboken", "New Jersey")
+        assert key.endswith("|nj")
+
+    def test_state_name_connecticut(self):
+        """'Connecticut' normalizes to 'ct'."""
+        key = normalize_address("5 Main St", "Stamford", "Connecticut")
+        assert key.endswith("|ct")
+
 
 # ---------------------------------------------------------------------------
 # School data (mocked HTTP)

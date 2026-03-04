@@ -68,7 +68,10 @@ def normalize_address(
     # Lowercase, strip periods and extra whitespace
     addr = address.lower().strip().replace(".", "")
     town_norm = town.lower().strip().replace(".", "")
-    state_norm = (state or "").lower().strip().replace(".", "")
+    state_raw = (state or "").lower().strip().replace(".", "")
+
+    # Normalize state to 2-letter code ("new york" → "ny")
+    state_norm = _STATE_MAP.get(state_raw, state_raw).lower() if state_raw else ""
 
     # Compress whitespace
     addr = re.sub(r"\s+", " ", addr)
