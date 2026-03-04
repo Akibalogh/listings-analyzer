@@ -304,6 +304,7 @@ Mobile-first single-page app served at `/` (`app/templates/dashboard.html`).
 - `POST /listings/{id}/images` — attach image URLs to listing
 - `POST /listings/{id}/rescore` — re-score single listing with current criteria
 - `POST /listings/{id}/toured` — mark/unmark listing as toured
+- `POST /listings/{id}/sold` — delete listing and its score (removes from dashboard immediately)
 
 ### Status
 - `GET /health` — health check
@@ -316,6 +317,9 @@ Mobile-first single-page app served at `/` (`app/templates/dashboard.html`).
 - `POST /manage/cleanup` — delete listings by ID list (body: `{"listing_ids": [1,2,3]}`)
 - `POST /manage/reset-emails` — clear orphaned processed_emails and remove Gmail labels for re-ingestion
 - `POST /manage/data-quality` — audit listings with missing address or URL (dry-run by default); with `?fix=true`: delete bad listings, reset orphaned emails, trigger re-poll + rescore
+- `POST /manage/scrape-descriptions` — two-phase: (1) search DuckDuckGo for Redfin URLs for listings with address+town but no URL; (2) scrape descriptions + images for listings with URL but no description; triggers rescore if descriptions found
+- `POST /manage/enrich` — backfill school data + commute times; `?clear_bogus=true` to re-fetch; runs in background
+- `POST /manage/prune-sold` — check Redfin URLs via Jina Reader for sold/off-market status; dry-run by default, `?fix=true` deletes sold listings
 
 ## 9. Key Technical Decisions
 
@@ -359,6 +363,12 @@ Mobile-first single-page app served at `/` (`app/templates/dashboard.html`).
 - **Directional address suffixes** — Street addresses may end with a cardinal direction (N, S, E, W, NE, NW, SE, SW) after the street type suffix (e.g., "101 Long Hill Rd E"). Both `STREET_RE` and `INLINE_ADDR_RE` patterns handle optional directional suffixes.
 - **Address-less listings** — Listings without an extractable address fall back to Redfin URL parsing, then zip-code-only. Address-less listings can be cleaned up via `/manage/data-quality?fix=true` (or manually via `/manage/cleanup`) and re-ingested via reset + poll.
 - **DB connection timeouts** — `psycopg2` connections use `connect_timeout=5` (5s TCP connect) and `statement_timeout=30000` (30s query); SQLite uses `timeout=5` (5s lock wait). Prevents indefinite hangs when Postgres is temporarily unreachable.
+- **Listings without clickable links** — Some listings ingested from Redfin daily alert emails have address/price data but no listing URL. This happens when the plaintext email body contains inline addresses without accompanying Redfin links (URLs were only in the HTML portion, which the plaintext parser doesn't process). `/manage/scrape-descriptions` attempts to find Redfin URLs via DuckDuckGo search; remaining no-URL listings are typically off-market, have unusual address formats DDG can't match, or are in areas Redfin doesn't cover. As of 2026-03-04, 35 listings have no URL:
+  - **Parsing artifacts (1):** id=498 "44 S. Broadway, Suite 100| White Plains" — pipe-delimited town field indicates a parsing bug; MLS #3030
+  - **New Jersey listings (3):** ids 506-508 — Basking Ridge, Bernardsville area; likely from a forwarded NJ search; DDG couldn't find Redfin pages
+  - **Westchester NY (28):** ids 510-544, 720-723 — Chappaqua, Briarcliff Manor, Ossining, Pleasantville, Sleepy Hollow, Scarsdale, Ardsley; many are likely off-market or have addresses DDG couldn't match to Redfin listings
+  - **Connecticut (1):** id=725 "332 Riversville Rd, Greenwich" — DDG didn't find a Redfin page
+  - **Future mitigation:** Parsing the HTML portion of Redfin emails would capture URLs directly; alternatively, constructing Redfin URLs from address slugs (address-town-state-zip format) could bypass DDG search
 
 ## 11. Phase Plan
 
@@ -380,9 +390,13 @@ Mobile-first single-page app served at `/` (`app/templates/dashboard.html`).
 - Soft warnings for high sqft (4,500+), many bedrooms (6+), above-target price ($1.5M+)
 - Public read-only dashboard (auth only for write actions)
 - Toured listing tracking (badge, filter chip, toggle)
+- Mark as Sold button (deletes listing from dashboard)
 - AI-generated property summary (structured factor analysis per listing)
 - Removed deterministic scoring path — AI-only evaluation
 - No hardcoded default criteria — user configures via dashboard
+- URL backfill via DuckDuckGo search for listings without links
+- Automatic sold-listing pruning via Jina Reader (runs hourly in scheduler)
+- Address dedup: state name normalization, startup key recomputation, automatic duplicate merging
 
 ### Phase 3 (Future)
 - Comps engine
