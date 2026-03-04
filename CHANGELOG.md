@@ -16,6 +16,8 @@ All notable changes to Listings Analyzer are documented here.
 - **Address key backfill on startup** — `init_db()` now backfills `address_key` for any listing with address+town but NULL key; prevents Ave/Avenue-style duplicates from bypassing dedup
 - **Expanded address normalization** — added parkway/pkwy, highway/hwy, trail/trl, crossing/xing, turnpike/tpke, expressway/expy suffix mappings; added directional word normalization (north→n, south→s, east→e, west→w, northeast→ne, etc.)
 - **Global email age filter** — `MAX_EMAIL_AGE_DAYS` env var (default: 21); Gmail queries now include `newer_than:{days}d` to skip stale emails; prevents ingesting sold/expired listings from months-old alerts
+- **`POST /manage/prune-sold` endpoint** — checks Redfin listing URLs via Jina Reader for sold/off-market status; dry-run by default, `?fix=true` deletes sold listings; protected by MANAGE_KEY
+- **Bare Redfin URL parsing** — plaintext parser now handles emails with only Redfin URLs (no price/beds data); extracts address/town/state/zip from URL path; enables ingesting listings forwarded by personal contacts
 
 ### Changed
 - **Commute: pick shortest of two strategies** — `fetch_commute_time()` now tries both direct transit (walk to station) and drive-to-station + transit, returning whichever is shorter; previously only tried drive+transit when walk-to-transit returned no routes, causing inflated times (e.g. 152 min for Briarcliff Manor when drive+transit would be ~70 min)

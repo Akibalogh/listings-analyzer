@@ -1207,6 +1207,90 @@ def manage_enrich_status():
 # --- Data Quality ---
 
 
+@app.post("/manage/prune-sold")
+def manage_prune_sold(request: Request):
+    """Check listing URLs for sold/off-market status and remove them.
+
+    Default (dry-run): returns listings detected as sold/off-market.
+    With ?fix=true: deletes those listings.
+
+    Uses Jina Reader to check Redfin pages for status indicators.
+    Protected by MANAGE_KEY env var.
+    """
+    key = request.headers.get("x-manage-key", "")
+    if not settings.manage_key or key != settings.manage_key:
+        raise HTTPException(status_code=403, detail="Invalid or missing management key")
+
+    fix = request.query_params.get("fix", "").lower() == "true"
+
+    import httpx
+
+    # Fetch all listings with Redfin URLs
+    with db.get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT id, address, town, listing_url FROM listings WHERE listing_url IS NOT NULL")
+        if settings.is_postgres:
+            columns = [desc[0] for desc in cur.description]
+            rows = [dict(zip(columns, r)) for r in cur.fetchall()]
+        else:
+            rows = [dict(r) for r in cur.fetchall()]
+
+    redfin_listings = [r for r in rows if r.get("listing_url") and "redfin.com" in r["listing_url"]]
+
+    _SOLD_INDICATORS = [
+        "sold on", "off market", "this home is no longer",
+        "no longer for sale", "status: sold", "sale-status-sold",
+        '"listingStatus":"Sold"', '"listingStatus":"Pending"',
+    ]
+
+    sold = []
+    checked = 0
+    errors = 0
+
+    for listing in redfin_listings:
+        url = listing["listing_url"]
+        try:
+            with httpx.Client(timeout=15.0, follow_redirects=True) as client:
+                resp = client.get(
+                    f"https://r.jina.ai/{url}",
+                    headers={"Accept": "text/plain", "X-Return-Format": "text"},
+                )
+                text = resp.text.lower()[:5000]  # Only check first 5KB
+
+            if any(indicator in text for indicator in _SOLD_INDICATORS):
+                sold.append({
+                    "id": listing["id"],
+                    "address": listing.get("address"),
+                    "town": listing.get("town"),
+                    "url": url,
+                })
+            checked += 1
+        except Exception as e:
+            logger.warning(f"Failed to check listing #{listing['id']} ({url}): {e}")
+            errors += 1
+
+    report = {
+        "checked": checked,
+        "sold_count": len(sold),
+        "sold": sold,
+        "errors": errors,
+        "fix": fix,
+    }
+
+    if fix and sold:
+        sold_ids = [s["id"] for s in sold]
+        ph = db._placeholder()
+        with db.get_connection() as conn:
+            cur = conn.cursor()
+            for lid in sold_ids:
+                cur.execute(f"DELETE FROM scores WHERE listing_id = {ph}", (lid,))
+                cur.execute(f"DELETE FROM listings WHERE id = {ph}", (lid,))
+        report["deleted"] = len(sold_ids)
+        logger.info(f"Pruned {len(sold_ids)} sold/off-market listings")
+
+    return report
+
+
 @app.post("/manage/data-quality")
 def manage_data_quality(request: Request):
     """Audit and optionally fix listings with missing address or URL.

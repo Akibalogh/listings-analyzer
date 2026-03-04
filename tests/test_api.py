@@ -564,6 +564,50 @@ class TestManageDataQuality:
         mock_poll.assert_called_once()
 
 
+class TestPruneSold:
+    """Tests for POST /manage/prune-sold endpoint."""
+
+    @patch("app.main.settings")
+    def test_dry_run_returns_sold_listings(self, mock_settings, client):
+        mock_settings.manage_key = "test-key"
+        mock_settings.is_postgres = False
+
+        # Mock DB to return one listing with Redfin URL
+        with patch("app.main.db.get_connection") as mock_conn:
+            mock_cursor = MagicMock()
+            mock_cursor.fetchall.return_value = [
+                {"id": 1, "address": "123 Main St", "town": "Rye", "listing_url": "https://www.redfin.com/NY/Rye/123-Main-St-10580/home/123"},
+            ]
+            mock_connection = MagicMock()
+            mock_connection.cursor.return_value = mock_cursor
+            mock_conn.return_value.__enter__ = MagicMock(return_value=mock_connection)
+            mock_conn.return_value.__exit__ = MagicMock(return_value=False)
+
+            # Mock Jina Reader returning "sold" page
+            with patch("httpx.Client") as mock_httpx:
+                mock_response = MagicMock()
+                mock_response.text = "This home sold on February 15, 2026 for $1,500,000"
+                mock_client = MagicMock()
+                mock_client.__enter__ = MagicMock(return_value=mock_client)
+                mock_client.__exit__ = MagicMock(return_value=False)
+                mock_client.get.return_value = mock_response
+                mock_httpx.return_value = mock_client
+
+                res = client.post("/manage/prune-sold", headers={"x-manage-key": "test-key"})
+                assert res.status_code == 200
+                data = res.json()
+                assert data["sold_count"] == 1
+                assert data["sold"][0]["id"] == 1
+                assert data["fix"] is False
+                assert "deleted" not in data
+
+    @patch("app.main.settings")
+    def test_rejects_without_key(self, mock_settings, client):
+        mock_settings.manage_key = "test-key"
+        res = client.post("/manage/prune-sold", headers={"x-manage-key": "wrong"})
+        assert res.status_code == 403
+
+
 class TestAddressKeyBackfill:
     """Tests for address_key backfill on init and dedup prevention."""
 
