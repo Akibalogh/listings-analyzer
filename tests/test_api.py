@@ -381,13 +381,40 @@ class TestManageScrapeDescriptions:
     })
     @patch("app.main.db.get_all_listing_ids", return_value=[2])
     @patch("app.main.settings")
-    def test_scrape_descriptions_skips_no_url(self, mock_settings, mock_ids, mock_get, client):
+    def test_scrape_descriptions_skips_no_url_no_town(self, mock_settings, mock_ids, mock_get, client):
+        """No URL and no town — can't search DDG, so skipped."""
         mock_settings.manage_key = "test-key"
         res = client.post("/manage/scrape-descriptions", headers={"x-manage-key": "test-key"})
         assert res.status_code == 200
         data = res.json()
         assert data["skipped"] == 1
         assert data["descriptions_scraped"] == 0
+
+    @patch("app.parsers.onehome._search_redfin_url", return_value="https://www.redfin.com/NY/Scarsdale/196-Old-Army-Rd-10583/home/123")
+    @patch("app.main.db.get_connection")
+    @patch("app.main.db._placeholder", return_value="?")
+    @patch("app.parsers.onehome.scrape_listing_description", return_value=("Nice house", ["img1.jpg"]))
+    @patch("app.main.db.update_listing_description")
+    @patch("app.main.db.add_listing_images")
+    @patch("app.main.db.get_listing_by_id", return_value={
+        "id": 5, "address": "196 Old Army Rd", "town": "Scarsdale",
+        "state": "NY", "zip_code": "10583", "mls_id": None,
+        "listing_url": None, "description": None,
+    })
+    @patch("app.main.db.get_all_listing_ids", return_value=[5])
+    @patch("app.main.settings")
+    def test_scrape_descriptions_finds_url_via_ddg(
+        self, mock_settings, mock_ids, mock_get, mock_add_imgs,
+        mock_update, mock_scrape, mock_ph, mock_conn, mock_ddg, client
+    ):
+        """Listings without URL get one via DDG search, then get scraped."""
+        mock_settings.manage_key = "test-key"
+        mock_cur = mock_conn.return_value.__enter__.return_value.cursor.return_value
+        res = client.post("/manage/scrape-descriptions", headers={"x-manage-key": "test-key"})
+        assert res.status_code == 200
+        data = res.json()
+        assert data["urls_found"] == 1
+        assert data["descriptions_scraped"] == 1
 
     @patch("app.main.db.get_listing_by_id", return_value={
         "id": 3, "address": "30 Test", "listing_url": "https://example.com",

@@ -987,18 +987,20 @@ def manage_reprocess(request: Request):
 
 @app.post("/manage/scrape-descriptions")
 def manage_scrape_descriptions(request: Request):
-    """Scrape descriptions + images for listings that have URLs but no description.
+    """Find URLs and scrape descriptions for listings.
 
-    Iterates existing listings in the DB directly — does NOT re-parse emails.
+    Phase 1: For listings WITHOUT a URL, search DuckDuckGo for a Redfin URL.
+    Phase 2: For listings WITH a URL but no description, scrape the listing page.
     Protected by MANAGE_KEY env var.
     """
-    from app.parsers.onehome import scrape_listing_description
+    from app.parsers.onehome import _search_redfin_url, scrape_listing_description
 
     key = request.headers.get("x-manage-key", "")
     if not settings.manage_key or key != settings.manage_key:
         raise HTTPException(status_code=403, detail="Invalid or missing management key")
 
     listing_ids = db.get_all_listing_ids()
+    urls_found = 0
     scraped = 0
     images_found = 0
     skipped = 0
@@ -1010,13 +1012,36 @@ def manage_scrape_descriptions(request: Request):
             continue
 
         url = listing.get("listing_url")
-        existing_desc = listing.get("description")
 
-        # Skip if no URL or already has description
-        if not url:
-            skipped += 1
-            continue
-        if existing_desc:
+        # Phase 1: find URL via DDG search if missing
+        if not url and listing.get("address") and listing.get("town"):
+            try:
+                found_url = _search_redfin_url(
+                    address=listing["address"],
+                    town=listing["town"],
+                    state=listing.get("state"),
+                    zip_code=listing.get("zip_code"),
+                    mls_id=listing.get("mls_id"),
+                )
+                if found_url:
+                    # Update URL only, preserve existing description
+                    ph = db._placeholder()
+                    with db.get_connection() as conn:
+                        cur = conn.cursor()
+                        cur.execute(
+                            f"UPDATE listings SET listing_url = {ph} WHERE id = {ph}",
+                            (found_url, lid),
+                        )
+                    url = found_url
+                    urls_found += 1
+                    logger.info(f"Found URL for listing #{lid}: {found_url}")
+            except Exception as e:
+                logger.error(f"URL search failed for listing #{lid}: {e}")
+                errors.append(f"#{lid} URL search: {e}")
+
+        # Phase 2: scrape description if we have URL but no description
+        existing_desc = listing.get("description")
+        if not url or existing_desc:
             skipped += 1
             continue
 
@@ -1053,6 +1078,7 @@ def manage_scrape_descriptions(request: Request):
 
     return {
         "listings_checked": len(listing_ids),
+        "urls_found": urls_found,
         "descriptions_scraped": scraped,
         "images_found": images_found,
         "skipped": skipped,
