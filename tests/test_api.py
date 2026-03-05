@@ -349,6 +349,63 @@ class TestAddListingFromUrl:
         res = authed_client.post("/listings/add", json={"url": "https://redf.in/xyz"})
         assert res.status_code == 409
 
+    def test_rejects_invalid_url(self, authed_client):
+        res = authed_client.post("/listings/add", json={"url": "not-a-url"})
+        assert res.status_code == 400
+
+    @patch("app.main.db.get_active_criteria", return_value=None)
+    @patch("app.main.db.save_listing", return_value=55)
+    @patch("app.main.db.save_processed_email", return_value=1)
+    @patch("app.main.db.is_listing_duplicate_by_address", return_value=False)
+    @patch("httpx.Client")
+    def test_extracts_town_and_state(
+        self, mock_client_cls, mock_dedup, mock_save_email, mock_save_listing,
+        mock_criteria, authed_client
+    ):
+        """Redfin URL path yields correct town and state."""
+        mock_response = MagicMock()
+        mock_response.url = "https://www.redfin.com/NY/Chappaqua/19-Georgia-Ln-10514/home/456"
+        mock_response.status_code = 200
+        mock_response.text = "<html></html>"
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.head.return_value = mock_response
+        mock_client.get.return_value = mock_response
+        mock_client_cls.return_value = mock_client
+
+        res = authed_client.post("/listings/add", json={"url": "https://redf.in/abc123"})
+        assert res.status_code == 200
+        data = res.json()
+        assert data["town"] == "Chappaqua"
+        assert data["listing_id"] == 55
+
+    @patch("app.main.db.get_active_criteria", return_value=None)
+    @patch("app.main.db.save_listing", return_value=60)
+    @patch("app.main.db.save_processed_email", return_value=1)
+    @patch("httpx.Client")
+    def test_non_redfin_url_no_address(
+        self, mock_client_cls, mock_save_email, mock_save_listing,
+        mock_criteria, authed_client
+    ):
+        """Non-Redfin URL without parseable address still creates a listing."""
+        mock_response = MagicMock()
+        mock_response.url = "https://www.zillow.com/homedetails/123"
+        mock_response.status_code = 200
+        mock_response.text = "<html></html>"
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.head.return_value = mock_response
+        mock_client.get.return_value = mock_response
+        mock_client_cls.return_value = mock_client
+
+        res = authed_client.post("/listings/add", json={"url": "https://www.zillow.com/homedetails/123"})
+        assert res.status_code == 200
+        data = res.json()
+        assert data["listing_id"] == 60
+        assert data["address"] is None
+
 
 class TestTourRequest:
     """Tests for POST /listings/{listing_id}/tour-request."""
@@ -377,6 +434,15 @@ class TestTourRequest:
     def test_404_for_missing(self, mock_get, authed_client):
         res = authed_client.post("/listings/999/tour-request", json={"tour_requested": True})
         assert res.status_code == 404
+
+    @patch("app.main.db.mark_listing_tour_requested")
+    @patch("app.main.db.get_listing_by_id", return_value={"id": 5, "address": "Test"})
+    def test_defaults_to_true(self, mock_get, mock_mark, authed_client):
+        """Omitting 'tour_requested' key defaults to True."""
+        res = authed_client.post("/listings/5/tour-request", json={})
+        assert res.status_code == 200
+        assert res.json()["tour_requested"] is True
+        mock_mark.assert_called_once_with(5, True)
 
 
 class TestManageEndpoint:

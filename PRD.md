@@ -35,6 +35,8 @@ You want:
 - Editable evaluation criteria with versioning
 - Description scraping from listing pages for deeper AI evaluation
 - Mark listings as toured
+- Flag listings as "Want to Go" for realtor tour requests
+- Add listings manually from a URL (paste Redfin link → auto-scrape + score)
 
 ### Non-goals
 - Agent messaging
@@ -58,6 +60,8 @@ You want:
 8. User can edit AI criteria → all listings auto-re-scored.
 9. User can reprocess old emails to backfill URLs/descriptions after parser updates.
 10. User can mark listings as toured to track which properties have been visited.
+11. User can flag listings as "Want to Go" to signal tour interest to their realtor.
+12. User can paste a listing URL to manually add a new listing (auto-scrapes, enriches, and scores).
 
 ## 4. System Architecture
 
@@ -209,7 +213,7 @@ Mobile-first single-page app served at `/` (`app/templates/dashboard.html`).
 
 ### Auth Model
 - **Public (no login required):** view listings, scores, filter/sort, expand card details, view AI criteria (read-only)
-- **Auth-required (Google sign-in):** Check Email, edit AI Criteria, Reprocess, Mark as Toured, Scrape & Score
+- **Auth-required (Google sign-in):** Check Email, edit AI Criteria, Reprocess, Mark as Toured, Want to Go, Mark as Sold, Add Listing, Scrape & Score
 - Unauthenticated users see a "Sign in" button in the header; action buttons are hidden
 - AI Criteria panel: always accessible (read-only for anonymous, editable for authed); "Save & Re-score All" and Maintenance section hidden when not logged in
 
@@ -226,14 +230,17 @@ Mobile-first single-page app served at `/` (`app/templates/dashboard.html`).
 - Verdict badge + evaluation method (AI vN)
 - Listing status tag (New Listing, Price Increased, etc.)
 - Toured badge (if marked as toured)
+- "Want to Go" badge (blue pill, if flagged for tour request)
 
 ### Listing Cards (Expanded)
 - AI-generated **property summary** (structured factor analysis with ✅/⚠️/❓ indicators)
 - Falls back to hard results checklist + concerns + AI reasoning for older listings without property_summary
+- "Want to Go" / "✓ Want to Go — click to cancel" toggle *(auth-only)*
 - "Mark as Toured" / "Unmark as Toured" toggle *(auth-only)*
+- "Mark as Sold" button *(auth-only)*
 
 ### Filters & Sorting
-- Filter chips: All, Non-Reject, Strong Match, Worth Touring, Reject, **Toured**
+- Filter chips: All, Non-Reject, Strong Match, Worth Touring, Reject, **Toured**, **Want to Go**
 - Sort: Score (high→low), Price (low→high), $/sqft (low→high)
 - Filter counts shown on chips
 
@@ -244,6 +251,13 @@ Mobile-first single-page app served at `/` (`app/templates/dashboard.html`).
 - Re-score progress bar (polls `GET /rescore/status` every 2s)
 - **Version history** — lists all past versions with date and preview; click any row to load into textarea; "Current" badge on active version; one-click restore before saving
 - Maintenance section: "Reprocess Emails" button
+
+### Add Listing from URL
+- "**+ Add Listing**" bar at top of dashboard *(auth-only)* — paste any listing URL (Redfin, short redf.in links, etc.)
+- Resolves short URLs, extracts address from Redfin URL path, scrapes description/images, extracts structured data (price/beds/baths/sqft), enriches with schools + commute, scores with AI
+- Duplicate detection by normalized address key — rejects if listing already exists
+- Loading state: button shows "Adding…", input disables during scrape; Enter key submits
+- Source format stored as `"manual"` to distinguish from email-ingested listings
 
 ### URL/Description Management
 - Listings without URLs show input field + "Scrape & Score" button *(auth-only)*
@@ -264,6 +278,7 @@ Mobile-first single-page app served at `/` (`app/templates/dashboard.html`).
 - description (TEXT, nullable — scraped from listing page)
 - image_urls_json (TEXT, nullable — JSON array)
 - **toured (BOOLEAN DEFAULT FALSE)**
+- **tour_requested (BOOLEAN DEFAULT FALSE)** — "Want to Go" flag
 - created_at
 
 ### Table: scores
@@ -304,7 +319,9 @@ Mobile-first single-page app served at `/` (`app/templates/dashboard.html`).
 - `POST /listings/{id}/images` — attach image URLs to listing
 - `POST /listings/{id}/rescore` — re-score single listing with current criteria
 - `POST /listings/{id}/toured` — mark/unmark listing as toured
+- `POST /listings/{id}/tour-request` — flag/unflag listing as "Want to Go" (body: `{"tour_requested": bool}`)
 - `POST /listings/{id}/sold` — delete listing and its score (removes from dashboard immediately)
+- `POST /listings/add` — create new listing from URL; resolves short links, scrapes, enriches, scores (body: `{"url": "https://..."}`); returns 409 if duplicate
 
 ### Status
 - `GET /health` — health check
@@ -397,6 +414,12 @@ Mobile-first single-page app served at `/` (`app/templates/dashboard.html`).
 - URL backfill via DuckDuckGo search for listings without links
 - Automatic sold-listing pruning via Jina Reader (runs hourly in scheduler)
 - Address dedup: state name normalization, startup key recomputation, automatic duplicate merging
+- "Want to Go" tour request flag (blue badge, filter chip, toggle button)
+- Manual listing add from URL (paste Redfin link → scrape + enrich + score)
+- Duplicate status updates on re-encounter (status change + URL backfill)
+- OneKey MLS DDG address search, listing status extraction, structured data extraction
+- HTML URL backfill in plaintext parser (matches Redfin URLs from HTML to text-parsed listings)
+- Structured data backfill for bare-URL listings (OneKey MLS) before scoring
 
 ### Phase 3 (Future)
 - Comps engine
