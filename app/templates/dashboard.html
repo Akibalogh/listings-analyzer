@@ -1580,6 +1580,8 @@ function buildCard(l) {
     var urlDiv = el('div', {className: 'listing-url'});
     urlDiv.appendChild(el('a', {href: l.listing_url, target: '_blank', rel: 'noopener'}, 'View full listing \u2192'));
     detailInner.appendChild(urlDiv);
+  } else if (currentUser) {
+    detailInner.appendChild(buildAddUrlSection(l));
   }
   if (l.mls_id) detailInner.appendChild(el('div', {className: 'mls-id'}, 'MLS# ' + l.mls_id));
   card.appendChild(el('div', {className: 'card-detail'}, [detailInner]));
