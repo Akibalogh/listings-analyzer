@@ -7,6 +7,21 @@ All notable changes to Listings Analyzer are documented here.
 ## [Unreleased]
 
 ### Added
+- **"Want to Go" flag** — `tour_requested` boolean column on listings; `POST /listings/{id}/tour-request` toggle endpoint (auth-required); blue "Want to Go" badge in compact card row; "Want to Go" / "✓ Want to Go — click to cancel" button in detail actions; "Want to Go" filter chip with count; mirrors the existing Toured pattern
+
+### Changed
+- **Auto-update listing status on duplicate detection** — when poller encounters a duplicate listing (by MLS ID or address key), it now updates the existing listing's `listing_status` if changed (e.g., "New Listing" → "Pending") and backfills `listing_url` if the existing record has none; previously duplicates were silently skipped
+- **Improved sold/pending detection via OneKey MLS** — `_prune_sold_listings()` now has two passes: (1) Redfin URLs via Jina Reader (existing), (2) OneKey MLS status check via DDG search for all remaining listings; OneKey MLS pages include structured `SaleStatus`/`MlsStatus` JSON fields accessible from cloud IPs (unlike Redfin which blocks Jina from Fly.io)
+- **Pending listings preserved** — listings detected as "Pending" or "Under Contract" now get `listing_status` updated to "Pending" instead of being deleted; sold indicators and pending indicators are now separate lists
+
+### Added
+- **`check_listing_status()` in `onehome.py`** — searches DDG for OneKey MLS page and extracts `SaleStatus`/`MlsStatus` from page JSON; returns status string ("Active", "Sold", "Pending", "Closed") or None; reuses existing DDG rate limiting
+- **`_extract_listing_status()` in `onehome.py`** — regex extraction of listing status from OneKey MLS HTML embedded JSON
+- **OneKey MLS address search fallback** — when Redfin scraping fails and no MLS ID is available (bare Redfin URLs from a contact), DDG searches for the address on OneKey MLS; wired into the Redfin scraping chain after existing fallbacks
+- **Structured data extraction from scraped pages** — `_extract_property_stats()` regex-extracts price/beds/baths/sqft from any listing page HTML; `scrape_listing_structured_data()` combines DDG search + fetch + extraction
+- **Structured data backfill in poller** — before scoring, bare-URL listings missing price/beds/baths/sqft get data backfilled from OneKey MLS; prevents "missing data" rejections
+- **Phase 3 in `/manage/scrape-descriptions`** — after URL search and description scraping, backfills structured property data for listings missing all of price/beds/baths/sqft; triggers rescore if data found
+- **HTML URL backfill in PlainTextParser** — `parse()` now extracts Redfin listing URLs from the HTML portion of emails and matches them to text-parsed listings by address; fills in `listing_url` for listings that had no URL in the plain text body
 - **DB connection timeouts** — `psycopg2.connect()` now uses `connect_timeout=5` and `statement_timeout=30000` (30s); `sqlite3.connect()` uses `timeout=5`; prevents indefinite hangs when Postgres is unreachable
 - **Chunked batch rescore** — `_rescore_all()` now processes listings in chunks of 5 (`_BATCH_CHUNK_SIZE`) instead of building all batch requests in memory at once; peak memory drops from ~193MB to ~33MB; Batch API 50% discount preserved
 - **`POST /manage/data-quality` endpoint** — audits listings with missing address, URL, or town (dry-run by default); with `?fix=true`: deletes no-address listings, backfills missing towns from Redfin URLs, resets orphaned emails, triggers re-poll + rescore; protected by MANAGE_KEY

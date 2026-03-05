@@ -813,6 +813,41 @@
   .tour-btn.toured { background: #f0fdf4; border-color: #bbf7d0; color: #16a34a; }
   .tour-btn.toured:hover { background: #fef2f2; border-color: #fecaca; color: #dc2626; }
 
+  /* Want to Go badge */
+  .want-to-go-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 4px 10px;
+    border-radius: 100px;
+    font-size: 10px;
+    font-weight: 700;
+    white-space: nowrap;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    background: #eff6ff;
+    color: #2563eb;
+    border: 1px solid #bfdbfe;
+    flex-shrink: 0;
+  }
+
+  /* Want to Go button (in expanded detail) */
+  .tour-request-btn {
+    background: transparent;
+    border: 1.5px solid var(--border);
+    color: var(--text-muted);
+    padding: 6px 12px;
+    border-radius: 8px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s;
+    white-space: nowrap;
+  }
+  .tour-request-btn:hover { border-color: #2563eb; color: #2563eb; }
+  .tour-request-btn.requested { background: #eff6ff; border-color: #bfdbfe; color: #2563eb; }
+  .tour-request-btn.requested:hover { background: #fef2f2; border-color: #fecaca; color: #dc2626; }
+
   /* Sold button (in expanded detail) */
   .sold-btn {
     background: transparent;
@@ -1097,6 +1132,7 @@
     <button class="filter-chip" data-filter="Worth Touring">Worth Touring</button>
     <button class="filter-chip" data-filter="Reject">Reject</button>
     <button class="filter-chip" data-filter="Toured">Toured</button>
+    <button class="filter-chip" data-filter="Want to Go">Want to Go</button>
     <select class="sort-select" id="sortSelect" onchange="applySort()">
       <option value="score-desc">Score (high-low)</option>
       <option value="score-asc">Score (low-high)</option>
@@ -1342,11 +1378,12 @@ document.getElementById('controls').addEventListener('click', function(e) {
 });
 
 function updateFilterCounts() {
-  var counts = { all: allListings.length, 'not-reject': 0, 'Strong Match': 0, 'Worth Touring': 0, 'Reject': 0, 'Toured': 0 };
+  var counts = { all: allListings.length, 'not-reject': 0, 'Strong Match': 0, 'Worth Touring': 0, 'Reject': 0, 'Toured': 0, 'Want to Go': 0 };
   allListings.forEach(function(l) {
     if (l.verdict !== 'Reject') counts['not-reject']++;
     if (counts[l.verdict] !== undefined) counts[l.verdict]++;
     if (l.toured) counts['Toured']++;
+    if (l.tour_requested) counts['Want to Go']++;
   });
   document.querySelectorAll('.filter-chip').forEach(function(chip) {
     var f = chip.dataset.filter;
@@ -1366,6 +1403,8 @@ function render() {
     items = items.filter(function(l) { return l.verdict !== 'Reject'; });
   } else if (activeFilter === 'Toured') {
     items = items.filter(function(l) { return l.toured; });
+  } else if (activeFilter === 'Want to Go') {
+    items = items.filter(function(l) { return l.tour_requested; });
   } else if (activeFilter !== 'all') {
     items = items.filter(function(l) { return l.verdict === activeFilter; });
   }
@@ -1457,6 +1496,10 @@ function buildCard(l) {
   if (l.toured) {
     summary.appendChild(el('span', {className: 'toured-badge'}, '\u2713 Toured'));
   }
+  /* Want to Go badge (visible in compact row) */
+  if (l.tour_requested) {
+    summary.appendChild(el('span', {className: 'want-to-go-badge'}, 'Want to Go'));
+  }
   /* Expand arrow */
   summary.appendChild(el('span', {className: 'card-expand-arrow'}, '\u25BC'));
   card.appendChild(summary);
@@ -1471,10 +1514,15 @@ function buildCard(l) {
       className: 'tour-btn' + (l.toured ? ' toured' : ''),
       onclick: function(e) { e.stopPropagation(); toggleToured(l.id, l.toured, tourBtn); }
     }, l.toured ? '\u2713 Toured — click to unmark' : 'Mark as Toured');
+    var tourReqBtn = el('button', {
+      className: 'tour-request-btn' + (l.tour_requested ? ' requested' : ''),
+      onclick: function(e) { e.stopPropagation(); toggleTourRequest(l.id, l.tour_requested, tourReqBtn); }
+    }, l.tour_requested ? '\u2713 Want to Go \u2014 click to cancel' : 'Want to Go');
     var soldBtn = el('button', {
       className: 'sold-btn',
       onclick: function(e) { e.stopPropagation(); markSold(l.id); }
     }, 'Mark as Sold');
+    actionsRow.appendChild(tourReqBtn);
     actionsRow.appendChild(tourBtn);
     actionsRow.appendChild(soldBtn);
     detailInner.appendChild(actionsRow);
@@ -2041,6 +2089,43 @@ async function toggleToured(listingId, currentlyTouredVal, btn) {
       }
       updateFilterCounts();
       showToast(newVal ? 'Marked as toured' : 'Tour mark removed');
+    } else {
+      var err = await res.json();
+      showToast('Error: ' + (err.detail || 'failed'));
+    }
+  } catch (e) {
+    showToast('Network error');
+  }
+}
+
+/* ==== Tour Request ==== */
+async function toggleTourRequest(listingId, currentVal, btn) {
+  var newVal = !currentVal;
+  try {
+    var res = await fetch('/listings/' + listingId + '/tour-request', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({tour_requested: newVal})
+    });
+    if (res.ok) {
+      var listing = allListings.find(function(l) { return l.id === listingId; });
+      if (listing) listing.tour_requested = newVal;
+      btn.textContent = newVal ? '\u2713 Want to Go \u2014 click to cancel' : 'Want to Go';
+      btn.className = 'tour-request-btn' + (newVal ? ' requested' : '');
+      var card = document.getElementById('card-' + listingId);
+      if (card) {
+        var summary = card.querySelector('.card-summary');
+        var existingBadge = summary ? summary.querySelector('.want-to-go-badge') : null;
+        if (newVal && !existingBadge && summary) {
+          var arrow = summary.querySelector('.card-expand-arrow');
+          var badge = el('span', {className: 'want-to-go-badge'}, 'Want to Go');
+          summary.insertBefore(badge, arrow);
+        } else if (!newVal && existingBadge) {
+          existingBadge.remove();
+        }
+      }
+      updateFilterCounts();
+      showToast(newVal ? 'Marked as Want to Go' : 'Want to Go removed');
     } else {
       var err = await res.json();
       showToast('Error: ' + (err.detail || 'failed'));

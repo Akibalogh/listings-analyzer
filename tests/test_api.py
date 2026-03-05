@@ -297,6 +297,35 @@ class TestSoldEndpoint:
         assert data["deleted"] is True
 
 
+class TestTourRequest:
+    """Tests for POST /listings/{listing_id}/tour-request."""
+
+    def test_requires_auth(self, client):
+        res = client.post("/listings/1/tour-request", json={"tour_requested": True})
+        assert res.status_code == 401
+
+    @patch("app.main.db.mark_listing_tour_requested")
+    @patch("app.main.db.get_listing_by_id", return_value={"id": 1, "address": "6 Sunset Lane"})
+    def test_toggles_flag(self, mock_get, mock_mark, authed_client):
+        res = authed_client.post("/listings/1/tour-request", json={"tour_requested": True})
+        assert res.status_code == 200
+        data = res.json()
+        assert data["listing_id"] == 1
+        assert data["tour_requested"] is True
+        mock_mark.assert_called_once_with(1, True)
+
+        mock_mark.reset_mock()
+        res = authed_client.post("/listings/1/tour-request", json={"tour_requested": False})
+        assert res.status_code == 200
+        assert res.json()["tour_requested"] is False
+        mock_mark.assert_called_once_with(1, False)
+
+    @patch("app.main.db.get_listing_by_id", return_value=None)
+    def test_404_for_missing(self, mock_get, authed_client):
+        res = authed_client.post("/listings/999/tour-request", json={"tour_requested": True})
+        assert res.status_code == 404
+
+
 class TestManageEndpoint:
     """Tests for POST /manage/sync-criteria."""
 
@@ -469,6 +498,36 @@ class TestManageScrapeDescriptions:
         assert data["descriptions_scraped"] == 0
         assert len(data["errors"]) == 1
         assert "#1" in data["errors"][0]
+
+    @patch("app.main.db.get_active_criteria", return_value=None)
+    @patch("app.main.db.update_listing_fields_by_id")
+    @patch("app.parsers.onehome.scrape_listing_structured_data", return_value={
+        "price": 1499000, "bedrooms": 4, "bathrooms": 3, "sqft": 2800,
+    })
+    @patch("app.main.db.get_listing_by_id")
+    @patch("app.main.db.get_all_listing_ids", return_value=[10])
+    @patch("app.main.settings")
+    def test_scrape_descriptions_phase3_backfills_data(
+        self, mock_settings, mock_ids, mock_get, mock_structured, mock_update_fields,
+        mock_criteria, client,
+    ):
+        """Phase 3 backfills structured data for listings missing price/beds/baths/sqft."""
+        mock_settings.manage_key = "test-key"
+        # Listing has URL and description but no price/beds/baths/sqft
+        mock_get.return_value = {
+            "id": 10, "address": "19 Georgia Ln", "town": "Chappaqua",
+            "state": "NY", "zip_code": "10514", "mls_id": None,
+            "listing_url": "https://www.redfin.com/NY/Chappaqua/19-Georgia-Ln/home/123",
+            "description": "Nice house", "price": None, "bedrooms": None,
+            "bathrooms": None, "sqft": None,
+        }
+        res = client.post("/manage/scrape-descriptions", headers={"x-manage-key": "test-key"})
+        assert res.status_code == 200
+        data = res.json()
+        assert data["data_backfilled"] == 1
+        mock_update_fields.assert_called_once_with(
+            10, price=1499000, bedrooms=4, bathrooms=3, sqft=2800,
+        )
 
 
 class TestManageEnrichEndpoint:
@@ -657,6 +716,78 @@ class TestPruneSold:
         mock_settings.manage_key = "test-key"
         res = client.post("/manage/prune-sold", headers={"x-manage-key": "wrong"})
         assert res.status_code == 403
+
+    @patch("app.main.settings")
+    def test_pending_updates_status_not_delete(self, mock_settings, client):
+        """Pending listings get status updated, not deleted."""
+        mock_settings.manage_key = "test-key"
+        mock_settings.is_postgres = False
+
+        with patch("app.main.db.get_connection") as mock_conn:
+            mock_cursor = MagicMock()
+            mock_cursor.fetchall.return_value = [
+                {"id": 1, "address": "10 Test St", "town": "Rye", "state": "NY",
+                 "zip_code": "10580",
+                 "listing_url": "https://www.redfin.com/NY/Rye/10-Test-St-10580/home/111"},
+            ]
+            mock_connection = MagicMock()
+            mock_connection.cursor.return_value = mock_cursor
+            mock_conn.return_value.__enter__ = MagicMock(return_value=mock_connection)
+            mock_conn.return_value.__exit__ = MagicMock(return_value=False)
+
+            # Jina returns a pending page
+            with patch("httpx.Client") as mock_httpx:
+                mock_response = MagicMock()
+                mock_response.text = '{"listingStatus":"pending"} This home is pending sale.'
+                mock_client_inst = MagicMock()
+                mock_client_inst.__enter__ = MagicMock(return_value=mock_client_inst)
+                mock_client_inst.__exit__ = MagicMock(return_value=False)
+                mock_client_inst.get.return_value = mock_response
+                mock_httpx.return_value = mock_client_inst
+
+                with patch("app.parsers.onehome.check_listing_status"), \
+                     patch("app.main.db.update_listing_status") as mock_update:
+                    res = client.post(
+                        "/manage/prune-sold?fix=true",
+                        headers={"x-manage-key": "test-key"},
+                    )
+                    assert res.status_code == 200
+                    data = res.json()
+                    assert data["sold_count"] == 0
+                    assert data["pending_count"] == 1
+                    assert data["pending_updated"] == 1
+                    assert "deleted" not in data
+                    mock_update.assert_called_once_with(1, "Pending")
+
+    @patch("app.main.settings")
+    def test_onekeymls_fallback_finds_sold(self, mock_settings, client):
+        """OneKeyMLS pass detects sold listing when Redfin pass can't check it."""
+        mock_settings.manage_key = "test-key"
+        mock_settings.is_postgres = False
+
+        with patch("app.main.db.get_connection") as mock_conn:
+            mock_cursor = MagicMock()
+            # Listing with no Redfin URL — only address
+            mock_cursor.fetchall.return_value = [
+                {"id": 2, "address": "55 Oak Ave", "town": "Scarsdale", "state": "NY",
+                 "zip_code": "10583", "listing_url": None},
+            ]
+            mock_connection = MagicMock()
+            mock_connection.cursor.return_value = mock_cursor
+            mock_conn.return_value.__enter__ = MagicMock(return_value=mock_connection)
+            mock_conn.return_value.__exit__ = MagicMock(return_value=False)
+
+            with patch("app.parsers.onehome.check_listing_status", return_value="Sold") as mock_check:
+                res = client.post(
+                    "/manage/prune-sold",
+                    headers={"x-manage-key": "test-key"},
+                )
+                assert res.status_code == 200
+                data = res.json()
+                assert data["sold_count"] == 1
+                assert data["sold"][0]["id"] == 2
+                assert data["sold"][0]["mls_status"] == "Sold"
+                mock_check.assert_called_once_with("55 Oak Ave", "Scarsdale", "NY", "10583")
 
 
 class TestAddressKeyBackfill:
@@ -853,6 +984,107 @@ class TestAddressKeyBackfill:
             data = res.json()
             assert data["no_town_count"] == 1
             assert data["no_town"][0]["id"] == 1
+
+
+class TestPollDuplicateStatusUpdate:
+    """Tests for status/URL update on duplicate detection during poll."""
+
+    @patch("app.poller.mark_processed")
+    @patch("app.poller.fetch_new_emails")
+    @patch("app.poller.ai_score_listing")
+    @patch("app.poller.scrape_listing_description", return_value=(None, []))
+    @patch("app.poller.db")
+    def test_poll_updates_status_on_mls_duplicate(
+        self, mock_db, mock_scrape, mock_ai, mock_fetch, mock_mark
+    ):
+        """When a duplicate MLS is found with a new status, update the existing listing."""
+        from app.models import ParsedListing
+        from app.poller import poll_once
+
+        mock_db.init_db = MagicMock()
+        mock_db.is_email_processed.return_value = False
+        mock_db.save_processed_email.return_value = 1
+
+        # First listing is a duplicate by MLS
+        mock_db.is_listing_duplicate.return_value = True
+        mock_db.get_listing_id_and_status_by_mls.return_value = (42, "New Listing")
+
+        mock_fetch.return_value = [{
+            "gmail_id": "abc123",
+            "subject": "Price change",
+            "sender": "noreply@redfin.com",
+            "html": "",
+            "text": "",
+            "message_id": "msg1",
+            "label_id": "lbl1",
+        }]
+
+        # The parser will return a listing with status "Pending"
+        pending_listing = ParsedListing(
+            address="182 Broadway",
+            town="Dobbs Ferry",
+            state="NY",
+            mls_id="6304978",
+            listing_status="Pending",
+            source_format="plaintext",
+        )
+
+        with patch("app.poller.parser_chain") as mock_parser:
+            mock_parser.parse.return_value = [pending_listing]
+            poll_once()
+
+        # Should have updated the status
+        mock_db.update_listing_status.assert_called_once_with(42, "Pending")
+
+    @patch("app.poller.mark_processed")
+    @patch("app.poller.fetch_new_emails")
+    @patch("app.poller.ai_score_listing")
+    @patch("app.poller.scrape_listing_description", return_value=(None, []))
+    @patch("app.poller.db")
+    def test_poll_backfills_url_on_duplicate(
+        self, mock_db, mock_scrape, mock_ai, mock_fetch, mock_mark
+    ):
+        """When a duplicate is found and the existing has no URL, backfill it."""
+        from app.models import ParsedListing
+        from app.poller import poll_once
+
+        mock_db.init_db = MagicMock()
+        mock_db.is_email_processed.return_value = False
+        mock_db.save_processed_email.return_value = 1
+
+        # Duplicate by MLS, existing has no URL
+        mock_db.is_listing_duplicate.return_value = True
+        mock_db.get_listing_id_and_status_by_mls.return_value = (7, "New Listing")
+
+        mock_fetch.return_value = [{
+            "gmail_id": "def456",
+            "subject": "Listing update",
+            "sender": "noreply@redfin.com",
+            "html": "",
+            "text": "",
+            "message_id": "msg2",
+            "label_id": "lbl2",
+        }]
+
+        listing_with_url = ParsedListing(
+            address="10 Sherman Ave",
+            town="Dobbs Ferry",
+            state="NY",
+            mls_id="923146",
+            listing_status="New Listing",
+            listing_url="https://www.redfin.com/NY/Dobbs-Ferry/10-Sherman-Ave-10522/home/123",
+            source_format="plaintext",
+        )
+
+        with patch("app.poller.parser_chain") as mock_parser:
+            mock_parser.parse.return_value = [listing_with_url]
+            poll_once()
+
+        # Status unchanged, but URL should be backfilled
+        mock_db.update_listing_status.assert_not_called()
+        mock_db.update_listing_fields_by_id.assert_called_once_with(
+            7, listing_url="https://www.redfin.com/NY/Dobbs-Ferry/10-Sherman-Ave-10522/home/123"
+        )
 
 
 class TestDateFilteredSenderConfig:

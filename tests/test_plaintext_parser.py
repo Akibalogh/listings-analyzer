@@ -382,3 +382,58 @@ https://www.redfin.com/NY/Bedford/65-Hickory-Ln-10506/home/20149806"""
         assert len(listings) == 1
         assert listings[0].address == "10 Sherman Ave"
         assert listings[0].town == "Rye"
+
+    # --- HTML URL backfill ---
+
+    def test_extracts_url_from_html_when_missing_in_text(self):
+        """Listing parsed from text gets its URL backfilled from HTML."""
+        text = """
+New Listing
+$1,295,000 4 Beds 3 Baths 2,437 sqft
+11 Jennifer Ln, Rye Brook, NY 10573
+        """
+        html = '<a href="https://www.redfin.com/NY/Rye-Brook/11-Jennifer-Ln-10573/home/22583423">View</a>'
+        listings = self.parser.parse(html, text)
+        assert len(listings) == 1
+        assert listings[0].listing_url == "https://www.redfin.com/NY/Rye-Brook/11-Jennifer-Ln-10573/home/22583423"
+
+    def test_html_url_does_not_override_text_url(self):
+        """Listing with URL from text body keeps it, ignoring HTML."""
+        text = """
+$1,295,000 4 Beds 3 Baths 2,437 sqft
+11 Jennifer Ln, Rye Brook, NY 10573
+https://www.redfin.com/NY/Rye-Brook/11-Jennifer-Ln-10573/home/22583423
+        """
+        html = '<a href="https://www.redfin.com/NY/Rye-Brook/11-Jennifer-Ln-10573/home/99999">Other</a>'
+        listings = self.parser.parse(html, text)
+        assert len(listings) == 1
+        assert listings[0].listing_url == "https://www.redfin.com/NY/Rye-Brook/11-Jennifer-Ln-10573/home/22583423"
+
+    def test_multiple_listings_matched_to_html_urls(self):
+        """Two text listings matched to two HTML URLs by address."""
+        text = """
+$1,200,000 4 Beds 2.5 Baths 3,034 sqft
+31 Lalli Dr, Katonah, NY 10536
+
+$1,695,000 5 Beds 3.5 Baths 3,274 sqft
+7 Dickson Ln, Bedford Corners, NY 10549
+        """
+        html = """
+<a href="https://www.redfin.com/NY/Katonah/31-Lalli-Dr-10536/home/111">View</a>
+<a href="https://www.redfin.com/NY/Bedford-Corners/7-Dickson-Ln-10549/home/222">View</a>
+        """
+        listings = self.parser.parse(html, text)
+        assert len(listings) == 2
+        assert "31-Lalli-Dr" in listings[0].listing_url
+        assert "7-Dickson-Ln" in listings[1].listing_url
+
+    def test_html_url_no_match_ignored(self):
+        """HTML URL that doesn't match any listing is not used."""
+        text = """
+$1,200,000 4 Beds 2.5 Baths 3,034 sqft
+31 Lalli Dr, Katonah, NY 10536
+        """
+        html = '<a href="https://www.redfin.com/NY/Rye/999-Unrelated-St-10580/home/333">View</a>'
+        listings = self.parser.parse(html, text)
+        assert len(listings) == 1
+        assert listings[0].listing_url is None

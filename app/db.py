@@ -285,6 +285,9 @@ def backfill_listing_address(
         )
 
 
+_INTEGER_COLUMNS = {"price", "sqft", "bedrooms", "bathrooms", "commute_minutes"}
+
+
 def update_listing_fields_by_id(listing_id: int, **fields):
     """Update arbitrary listing columns by listing ID.
 
@@ -297,9 +300,15 @@ def update_listing_fields_by_id(listing_id: int, **fields):
     ph = _placeholder()
     for col, val in fields.items():
         if val is not None:
-            updates.append(
-                f"{col} = CASE WHEN {col} IS NULL OR {col} = '' THEN {ph} ELSE {col} END"
-            )
+            # Integer columns: only check IS NULL (comparing to '' fails in Postgres)
+            if col in _INTEGER_COLUMNS:
+                updates.append(
+                    f"{col} = CASE WHEN {col} IS NULL THEN {ph} ELSE {col} END"
+                )
+            else:
+                updates.append(
+                    f"{col} = CASE WHEN {col} IS NULL OR {col} = '' THEN {ph} ELSE {col} END"
+                )
             values.append(val)
     if not updates:
         return
@@ -332,6 +341,55 @@ def is_listing_duplicate_by_address(address_key: str) -> bool:
         cur = conn.cursor()
         cur.execute(f"SELECT 1 FROM listings WHERE address_key = {ph}", (address_key,))
         return cur.fetchone() is not None
+
+
+def get_listing_id_and_status_by_mls(mls_id: str) -> tuple[int, str | None] | None:
+    """Return (id, listing_status) for a listing with this MLS ID, or None."""
+    if not mls_id:
+        return None
+    ph = _placeholder()
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            f"SELECT id, listing_status FROM listings WHERE mls_id = {ph}",
+            (mls_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        if settings.is_postgres:
+            return (row[0], row[1])
+        return (row["id"], row["listing_status"])
+
+
+def get_listing_id_and_status_by_address_key(address_key: str) -> tuple[int, str | None] | None:
+    """Return (id, listing_status) for a listing with this address key, or None."""
+    if not address_key:
+        return None
+    ph = _placeholder()
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            f"SELECT id, listing_status FROM listings WHERE address_key = {ph}",
+            (address_key,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        if settings.is_postgres:
+            return (row[0], row[1])
+        return (row["id"], row["listing_status"])
+
+
+def update_listing_status(listing_id: int, status: str):
+    """Unconditionally update listing_status for a listing."""
+    ph = _placeholder()
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            f"UPDATE listings SET listing_status = {ph} WHERE id = {ph}",
+            (status, listing_id),
+        )
 
 
 def get_school_data_by_zip(zip_code: str) -> str | None:
@@ -478,6 +536,7 @@ def _migrate_add_columns():
         ("listings", "commute_minutes", "INTEGER"),
         ("listings", "commute_data_json", "TEXT"),
         ("listings", "enriched_at", "TEXT"),
+        ("listings", "tour_requested", "BOOLEAN DEFAULT FALSE"),
         ("scores", "evaluation_method", "TEXT DEFAULT 'deterministic'"),
         ("scores", "criteria_version", "INTEGER"),
         ("scores", "ai_reasoning", "TEXT"),
@@ -755,6 +814,17 @@ def mark_listing_toured(listing_id: int, toured: bool):
         cur.execute(
             f"UPDATE listings SET toured = {ph} WHERE id = {ph}",
             (toured, listing_id),
+        )
+
+
+def mark_listing_tour_requested(listing_id: int, tour_requested: bool):
+    """Mark (or un-mark) a listing as tour requested."""
+    ph = _placeholder()
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            f"UPDATE listings SET tour_requested = {ph} WHERE id = {ph}",
+            (tour_requested, listing_id),
         )
 
 

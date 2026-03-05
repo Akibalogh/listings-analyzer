@@ -6,14 +6,19 @@ from unittest.mock import MagicMock, patch
 from app.parsers.onehome import (
     OneHomeParser,
     scrape_listing_description,
+    scrape_listing_structured_data,
+    check_listing_status,
     _has_useful_content,
     _is_spa_url,
     _try_redfin_fallback,
     _try_onekeymls,
     _scrape_static,
     _search_redfin_url,
+    _search_onekeymls_url,
     _extract_description_from_html,
     _extract_image_urls,
+    _extract_property_stats,
+    _extract_listing_status,
 )
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
@@ -568,3 +573,167 @@ class TestOneKeyMLS:
         mock_onekeymls.assert_called_once_with(
             "34 Lakeshore Drive", "Eastchester", "NY", "10709", "928190"
         )
+
+
+class TestSearchOneKeyMLSUrl:
+    """Tests for DDG-based OneKey MLS URL search."""
+
+    @patch("app.parsers.onehome.httpx.Client")
+    def test_search_onekeymls_url_finds_listing(self, mock_client_cls):
+        """DDG returns a OneKey MLS URL matching the street number."""
+        ddg_html = """<html><body>
+        <a href="https://www.onekeymls.com/address/19-Georgia-Ln-Chappaqua-NY-10514/970123">
+            19 Georgia Ln, Chappaqua
+        </a>
+        </body></html>"""
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.text = ddg_html
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.post.return_value = mock_response
+        mock_client_cls.return_value = mock_client
+
+        url = _search_onekeymls_url("19 Georgia Ln", "Chappaqua", "NY", "10514")
+        assert url is not None
+        assert "onekeymls.com" in url
+        assert "19-Georgia" in url
+
+    @patch("app.parsers.onehome.httpx.Client")
+    def test_search_onekeymls_url_no_results(self, mock_client_cls):
+        """Returns None when DDG has no OneKey MLS URLs."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.text = "<html><body>No results</body></html>"
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.post.return_value = mock_response
+        mock_client_cls.return_value = mock_client
+
+        url = _search_onekeymls_url("999 Fake St", "Nowhere", "NY")
+        assert url is None
+
+
+class TestExtractPropertyStats:
+    """Tests for _extract_property_stats — regex-based stat extraction from HTML."""
+
+    def test_extracts_all_stats(self):
+        html = """<html><body>
+        <div class="price">$1,499,000</div>
+        <div class="specs">4 Bedrooms | 3 Bathrooms | 2,800 Sq Ft</div>
+        </body></html>"""
+        stats = _extract_property_stats(html)
+        assert stats is not None
+        assert stats["price"] == 1499000
+        assert stats["bedrooms"] == 4
+        assert stats["bathrooms"] == 3
+        assert stats["sqft"] == 2800
+
+    def test_extracts_partial_stats(self):
+        html = """<html><body>
+        <div>$1,250,000</div>
+        <div>3 bd</div>
+        </body></html>"""
+        stats = _extract_property_stats(html)
+        assert stats is not None
+        assert stats["price"] == 1250000
+        assert stats["bedrooms"] == 3
+        assert "bathrooms" not in stats
+        assert "sqft" not in stats
+
+    def test_returns_none_for_empty_page(self):
+        html = "<html><body><p>Login to continue</p></body></html>"
+        stats = _extract_property_stats(html)
+        assert stats is None
+
+    def test_ignores_stats_in_scripts(self):
+        """Script content should be stripped before regex matching."""
+        html = """<html><body>
+        <script>var price = "$999,000"; var beds = "5 Beds";</script>
+        <p>Welcome to our site</p>
+        </body></html>"""
+        stats = _extract_property_stats(html)
+        assert stats is None
+
+
+class TestRedinFallsBackToOneKeyMLSSearch:
+    """Tests for Redfin URLs falling back to OneKey MLS DDG search when no MLS ID."""
+
+    @patch("app.parsers.onehome._search_onekeymls_url",
+           return_value="https://www.onekeymls.com/address/19-Georgia-Ln-Chappaqua-NY/970123")
+    @patch("app.parsers.onehome._scrape_static")
+    @patch("app.parsers.onehome._scrape_with_jina", return_value=(None, []))
+    def test_redfin_falls_back_to_onekeymls_search(self, mock_jina_outer, mock_static, mock_onekeymls_search):
+        """Redfin URL with no MLS ID falls back to OneKeyMLS DDG address search."""
+        # First static call (Redfin) fails, Jina fails, no MLS ID so _try_onekeymls skipped,
+        # then DDG search finds OneKeyMLS URL, second static call succeeds
+        mock_static.side_effect = [
+            None,  # Redfin static fails
+            ("Charming colonial with finished basement and pool", []),  # OneKeyMLS static succeeds
+        ]
+        url = "https://www.redfin.com/NY/Chappaqua/19-Georgia-Ln-10514/home/123456"
+
+        desc, images = scrape_listing_description(
+            url, address="19 Georgia Ln", town="Chappaqua", state="NY", zip_code="10514"
+        )
+
+        assert desc is not None
+        assert "basement" in desc.lower()
+        mock_onekeymls_search.assert_called_once_with("19 Georgia Ln", "Chappaqua", "NY", "10514")
+
+
+class TestExtractListingStatus:
+    """Tests for _extract_listing_status — regex extraction of SaleStatus/MlsStatus."""
+
+    def test_extract_listing_status_sold(self):
+        html = '<script>{"SaleStatus":"Sold","ListPrice":1200000}</script>'
+        assert _extract_listing_status(html) == "Sold"
+
+    def test_extract_listing_status_active(self):
+        html = '<div data-props=\'{"MlsStatus":"Active","beds":4}\'></div>'
+        assert _extract_listing_status(html) == "Active"
+
+    def test_extract_listing_status_missing(self):
+        html = "<html><body><p>No structured data here</p></body></html>"
+        assert _extract_listing_status(html) is None
+
+    def test_extract_listing_status_pending(self):
+        html = '{"SaleStatus":"Pending","MlsStatus":"Pending"}'
+        assert _extract_listing_status(html) == "Pending"
+
+    def test_extract_listing_status_closed(self):
+        html = '{"SaleStatus":"Closed"}'
+        assert _extract_listing_status(html) == "Closed"
+
+
+class TestCheckListingStatus:
+    """Tests for check_listing_status — DDG search + status extraction."""
+
+    @patch("app.parsers.onehome.httpx.Client")
+    @patch("app.parsers.onehome._search_onekeymls_url",
+           return_value="https://www.onekeymls.com/address/123-Main-St-Rye-NY-10580/999999")
+    def test_returns_sold_status(self, mock_search, mock_client_cls):
+        mock_response = MagicMock()
+        mock_response.text = '<script>{"SaleStatus":"Sold","ListPrice":1500000}</script>'
+        mock_response.raise_for_status = MagicMock()
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.get.return_value = mock_response
+        mock_client_cls.return_value = mock_client
+
+        status = check_listing_status("123 Main St", "Rye", "NY", "10580")
+        assert status == "Sold"
+        mock_search.assert_called_once()
+
+    @patch("app.parsers.onehome._search_onekeymls_url", return_value=None)
+    def test_returns_none_when_no_mls_page(self, mock_search):
+        status = check_listing_status("999 Fake St", "Nowhere", "NY")
+        assert status is None
+
+    def test_returns_none_for_missing_address(self):
+        assert check_listing_status(None, None) is None
+        assert check_listing_status("", "") is None

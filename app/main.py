@@ -46,13 +46,14 @@ def _scheduled_poll_loop(interval_hours: int):
         # Prune sold/off-market listings
         try:
             report = _prune_sold_listings(fix=True)
-            if report["sold_count"] > 0:
+            if report["sold_count"] > 0 or report.get("pending_count", 0) > 0:
                 logger.info(
-                    f"Scheduled prune: removed {report['sold_count']} sold listing(s) "
+                    f"Scheduled prune: removed {report['sold_count']} sold, "
+                    f"updated {report.get('pending_count', 0)} pending "
                     f"(checked {report['checked']}, errors {report['errors']})"
                 )
             else:
-                logger.info(f"Scheduled prune: no sold listings found (checked {report['checked']})")
+                logger.info(f"Scheduled prune: no sold/pending found (checked {report['checked']})")
         except Exception:
             logger.exception("Scheduled prune-sold failed")
 
@@ -379,6 +380,23 @@ async def mark_toured(request: Request, listing_id: int):
     toured = bool(body.get("toured", True))
     db.mark_listing_toured(listing_id, toured)
     return {"listing_id": listing_id, "toured": toured}
+
+
+# --- Tour request ---
+
+
+@app.post("/listings/{listing_id}/tour-request")
+async def toggle_tour_request(request: Request, listing_id: int):
+    """Flag or un-flag a listing for tour request. Requires auth."""
+    _require_auth(request)
+    listing = db.get_listing_by_id(listing_id)
+    if not listing:
+        raise HTTPException(status_code=404, detail=f"Listing #{listing_id} not found")
+
+    body = await request.json()
+    tour_requested = bool(body.get("tour_requested", True))
+    db.mark_listing_tour_requested(listing_id, tour_requested)
+    return {"listing_id": listing_id, "tour_requested": tour_requested}
 
 
 # --- Mark as sold (delete) ---
@@ -993,7 +1011,7 @@ def manage_scrape_descriptions(request: Request):
     Phase 2: For listings WITH a URL but no description, scrape the listing page.
     Protected by MANAGE_KEY env var.
     """
-    from app.parsers.onehome import _search_redfin_url, scrape_listing_description
+    from app.parsers.onehome import _search_redfin_url, scrape_listing_description, scrape_listing_structured_data
 
     key = request.headers.get("x-manage-key", "")
     if not settings.manage_key or key != settings.manage_key:
@@ -1068,9 +1086,42 @@ def manage_scrape_descriptions(request: Request):
             logger.error(f"Failed to scrape listing #{lid} ({url}): {e}")
             errors.append(f"#{lid}: {e}")
 
-    # Trigger rescore if we scraped anything
+    # Phase 3: backfill structured data for listings missing price/beds/baths/sqft
+    data_backfilled = 0
+    for lid in listing_ids:
+        listing = db.get_listing_by_id(lid)
+        if not listing:
+            continue
+        # Check if all structured fields are missing
+        has_data = any([
+            listing.get("price"),
+            listing.get("bedrooms"),
+            listing.get("bathrooms"),
+            listing.get("sqft"),
+        ])
+        if has_data:
+            continue
+        if not listing.get("address") or not listing.get("town"):
+            continue
+
+        try:
+            structured = scrape_listing_structured_data(
+                address=listing["address"],
+                town=listing["town"],
+                state=listing.get("state"),
+                zip_code=listing.get("zip_code"),
+            )
+            if structured:
+                db.update_listing_fields_by_id(lid, **structured)
+                data_backfilled += 1
+                logger.info(f"Backfilled structured data for listing #{lid}: {structured}")
+        except Exception as e:
+            logger.error(f"Structured data backfill failed for listing #{lid}: {e}")
+            errors.append(f"#{lid} structured data: {e}")
+
+    # Trigger rescore if we scraped descriptions or backfilled data
     rescore_started = False
-    if scraped > 0:
+    if scraped > 0 or data_backfilled > 0:
         criteria = db.get_active_criteria()
         if criteria:
             _start_rescore(criteria["version"], criteria["instructions"])
@@ -1081,6 +1132,7 @@ def manage_scrape_descriptions(request: Request):
         "urls_found": urls_found,
         "descriptions_scraped": scraped,
         "images_found": images_found,
+        "data_backfilled": data_backfilled,
         "skipped": skipped,
         "errors": errors,
         "rescore_started": rescore_started,
@@ -1271,32 +1323,52 @@ def manage_enrich_status():
 _SOLD_INDICATORS = [
     "sold on", "off market", "this home is no longer",
     "no longer for sale", "status: sold", "sale-status-sold",
-    '"listingstatus":"sold"', '"listingstatus":"pending"',
+    '"listingstatus":"sold"',
+]
+
+_PENDING_INDICATORS = [
+    '"listingstatus":"pending"',
+    "pending sale", "sale pending", "under contract",
 ]
 
 
 def _prune_sold_listings(fix: bool = False) -> dict:
-    """Check Redfin listing URLs via Jina Reader for sold/off-market status.
+    """Check listings for sold/off-market/pending status.
 
-    Returns report dict with checked, sold_count, sold list, errors.
-    If fix=True, deletes the sold listings from DB.
+    Two passes:
+    1. Redfin pass — check Redfin URLs via Jina Reader (existing)
+    2. OneKey MLS pass — for remaining listings, search DDG for OneKeyMLS page
+       and extract SaleStatus/MlsStatus from the page JSON
+
+    Sold/Closed → delete listing.  Pending/Under Contract → update status only.
+
+    Returns report dict with checked, sold_count, pending_count, etc.
+    If fix=True, deletes sold listings and updates pending status in DB.
     """
     import httpx
 
+    from app.parsers.onehome import check_listing_status
+
     with db.get_connection() as conn:
         cur = conn.cursor()
-        cur.execute("SELECT id, address, town, listing_url FROM listings WHERE listing_url IS NOT NULL")
+        cur.execute(
+            "SELECT id, address, town, state, zip_code, listing_url "
+            "FROM listings WHERE listing_url IS NOT NULL OR address IS NOT NULL"
+        )
         if settings.is_postgres:
             columns = [desc[0] for desc in cur.description]
             rows = [dict(zip(columns, r)) for r in cur.fetchall()]
         else:
             rows = [dict(r) for r in cur.fetchall()]
 
-    redfin_listings = [r for r in rows if r.get("listing_url") and "redfin.com" in r["listing_url"]]
-
     sold = []
+    pending = []
     checked = 0
     errors = 0
+    detected_ids: set[int] = set()  # IDs already classified by Redfin pass
+
+    # --- Pass 1: Redfin URLs via Jina Reader ---
+    redfin_listings = [r for r in rows if r.get("listing_url") and "redfin.com" in r["listing_url"]]
 
     for listing in redfin_listings:
         url = listing["listing_url"]
@@ -1306,38 +1378,96 @@ def _prune_sold_listings(fix: bool = False) -> dict:
                     f"https://r.jina.ai/{url}",
                     headers={"Accept": "text/plain", "X-Return-Format": "text"},
                 )
-                text = resp.text.lower()[:5000]  # Only check first 5KB
+                text = resp.text.lower()[:5000]
+
+            entry = {
+                "id": listing["id"],
+                "address": listing.get("address"),
+                "town": listing.get("town"),
+                "url": url,
+            }
 
             if any(indicator in text for indicator in _SOLD_INDICATORS):
-                sold.append({
-                    "id": listing["id"],
-                    "address": listing.get("address"),
-                    "town": listing.get("town"),
-                    "url": url,
-                })
+                sold.append(entry)
+                detected_ids.add(listing["id"])
+            elif any(indicator in text for indicator in _PENDING_INDICATORS):
+                pending.append(entry)
+                detected_ids.add(listing["id"])
+
             checked += 1
         except Exception as e:
             logger.warning(f"Failed to check listing #{listing['id']} ({url}): {e}")
+            errors += 1
+
+    # --- Pass 2: OneKey MLS status check (for listings not already detected) ---
+    remaining = [
+        r for r in rows
+        if r["id"] not in detected_ids
+        and r.get("address")
+        and r.get("town")
+    ]
+
+    for listing in remaining:
+        try:
+            status = check_listing_status(
+                listing["address"],
+                listing["town"],
+                listing.get("state"),
+                listing.get("zip_code"),
+            )
+            if not status:
+                checked += 1
+                continue
+
+            entry = {
+                "id": listing["id"],
+                "address": listing.get("address"),
+                "town": listing.get("town"),
+                "url": listing.get("listing_url", ""),
+                "mls_status": status,
+            }
+            status_lower = status.lower()
+
+            if status_lower in ("sold", "closed"):
+                sold.append(entry)
+            elif status_lower in ("pending", "under contract"):
+                pending.append(entry)
+
+            checked += 1
+        except Exception as e:
+            logger.warning(f"OneKeyMLS status check failed for listing #{listing['id']}: {e}")
             errors += 1
 
     report: dict = {
         "checked": checked,
         "sold_count": len(sold),
         "sold": sold,
+        "pending_count": len(pending),
+        "pending": pending,
         "errors": errors,
         "fix": fix,
     }
 
-    if fix and sold:
-        sold_ids = [s["id"] for s in sold]
+    if fix:
         ph = db._placeholder()
-        with db.get_connection() as conn:
-            cur = conn.cursor()
-            for lid in sold_ids:
-                cur.execute(f"DELETE FROM scores WHERE listing_id = {ph}", (lid,))
-                cur.execute(f"DELETE FROM listings WHERE id = {ph}", (lid,))
-        report["deleted"] = len(sold_ids)
-        logger.info(f"Pruned {len(sold_ids)} sold/off-market listings")
+
+        # Delete sold listings
+        if sold:
+            sold_ids = [s["id"] for s in sold]
+            with db.get_connection() as conn:
+                cur = conn.cursor()
+                for lid in sold_ids:
+                    cur.execute(f"DELETE FROM scores WHERE listing_id = {ph}", (lid,))
+                    cur.execute(f"DELETE FROM listings WHERE id = {ph}", (lid,))
+            report["deleted"] = len(sold_ids)
+            logger.info(f"Pruned {len(sold_ids)} sold/off-market listings")
+
+        # Update pending listings status (don't delete)
+        if pending:
+            for p in pending:
+                db.update_listing_status(p["id"], "Pending")
+            report["pending_updated"] = len(pending)
+            logger.info(f"Updated {len(pending)} listing(s) to Pending status")
 
     return report
 

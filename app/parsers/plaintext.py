@@ -109,7 +109,32 @@ class PlainTextParser(EmailParser):
             if listing and (listing.price or listing.mls_id or listing.address):
                 listings.append(listing)
 
+        # Backfill missing listing URLs from HTML
+        if html:
+            available = self._extract_urls_from_html(html)
+            for listing in listings:
+                if listing.listing_url or not listing.address or not available:
+                    continue
+                addr_slug = listing.address.strip().replace(".", "").replace(" ", "-")
+                for url in available:
+                    if addr_slug.lower() in url.lower():
+                        listing.listing_url = url
+                        available.remove(url)
+                        break
+
         return listings
+
+    @staticmethod
+    def _extract_urls_from_html(html: str) -> list[str]:
+        """Extract unique listing URLs from HTML content."""
+        seen: set[str] = set()
+        result: list[str] = []
+        for m in LISTING_URL_RE.finditer(html):
+            clean = m.group(0).split('"')[0].split("'")[0].split(">")[0].rstrip(".,;:)")
+            if clean not in seen:
+                seen.add(clean)
+                result.append(clean)
+        return result
 
     def _split_into_blocks(self, text: str) -> list[str]:
         """Split text into potential listing blocks."""

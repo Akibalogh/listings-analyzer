@@ -13,7 +13,7 @@ from app.enrichment import fetch_commute_time, fetch_school_data, normalize_addr
 from app.gmail import fetch_new_emails, mark_processed
 from app.models import ParsedListing, ScoringResult
 from app.parsers import parser_chain
-from app.parsers.onehome import scrape_listing_description
+from app.parsers.onehome import scrape_listing_description, scrape_listing_structured_data
 from app.scorer import ai_score_listing
 
 logging.basicConfig(
@@ -83,12 +83,18 @@ def poll_once() -> list[dict]:
 
             # Dedup: check MLS ID first
             if db.is_listing_duplicate(listing.mls_id):
+                existing = db.get_listing_id_and_status_by_mls(listing.mls_id)
+                if existing:
+                    _update_duplicate(existing, listing)
                 logger.info(f"Duplicate listing MLS #{listing.mls_id}, skipping")
                 continue
 
             # Dedup: check normalized address
             address_key = normalize_address(listing.address, listing.town, listing.state)
             if address_key and db.is_listing_duplicate_by_address(address_key):
+                existing = db.get_listing_id_and_status_by_address_key(address_key)
+                if existing:
+                    _update_duplicate(existing, listing)
                 logger.info(f"Duplicate listing by address: {listing.address}, {listing.town}")
                 continue
 
@@ -104,6 +110,18 @@ def poll_once() -> list[dict]:
                     zip_code=listing.zip_code,
                     mls_id=listing.mls_id,
                 )
+
+            # --- Backfill structured data from OneKey MLS if missing ---
+            if listing.listing_url and _is_missing_structured_data(listing):
+                structured = scrape_listing_structured_data(
+                    listing.address, listing.town, listing.state, listing.zip_code
+                )
+                if structured:
+                    logger.info(f"Backfilled structured data for {listing.address}: {structured}")
+                    listing.price = listing.price or structured.get("price")
+                    listing.bedrooms = listing.bedrooms or structured.get("bedrooms")
+                    listing.bathrooms = listing.bathrooms or structured.get("bathrooms")
+                    listing.sqft = listing.sqft or structured.get("sqft")
 
             # --- Enrichment ---
             enrichment = _enrich_listing(listing, address_key)
@@ -142,6 +160,27 @@ def poll_once() -> list[dict]:
             logger.error(f"Failed to mark email as processed: {e}")
 
     return results
+
+
+def _update_duplicate(existing: tuple[int, str | None], listing: ParsedListing):
+    """Update an existing duplicate listing's status and backfill URL if missing."""
+    existing_id, existing_status = existing
+
+    # Update status if changed
+    if listing.listing_status and listing.listing_status != existing_status:
+        db.update_listing_status(existing_id, listing.listing_status)
+        logger.info(
+            f"Updated listing #{existing_id} status: {existing_status!r} → {listing.listing_status!r}"
+        )
+
+    # Backfill URL if the existing listing has none
+    if listing.listing_url:
+        db.update_listing_fields_by_id(existing_id, listing_url=listing.listing_url)
+
+
+def _is_missing_structured_data(listing: ParsedListing) -> bool:
+    """Return True if a listing has no price, beds, baths, or sqft."""
+    return not any([listing.price, listing.bedrooms, listing.bathrooms, listing.sqft])
 
 
 def _enrich_listing(listing: ParsedListing, address_key: str | None) -> dict:

@@ -242,6 +242,17 @@ def scrape_listing_description(
             result = _try_onekeymls(address, town, state, zip_code, mls_id)
             if result and result[0]:
                 return result
+        # No MLS ID — search OneKey MLS by address via DDG
+        if address and town:
+            logger.info(f"Trying OneKeyMLS address search for: {address}, {town}")
+            onekeymls_url = _search_onekeymls_url(address, town, state, zip_code)
+            if onekeymls_url:
+                result = _scrape_static(onekeymls_url)
+                if result and result[0]:
+                    return result
+                result = _scrape_with_jina(onekeymls_url)
+                if result and result[0]:
+                    return result
         return None, []
 
     # --- Other URLs: try full chain ---
@@ -400,12 +411,38 @@ def _scrape_with_jina(url: str) -> tuple[str | None, list[str]]:
 
 
 # ---------------------------------------------------------------------------
-# DuckDuckGo Redfin URL search — fallback when primary URL scrape fails
+# DuckDuckGo URL search — fallback when primary URL scrape fails
 # ---------------------------------------------------------------------------
 
+import time as _time
+
 _DDG_URL = "https://lite.duckduckgo.com/lite/"
+_DDG_HTML_URL = "https://html.duckduckgo.com/html/"
+_DDG_LAST_CALL: float = 0.0  # monotonic timestamp of last DDG request
+_DDG_MIN_INTERVAL: float = 3.0  # seconds between DDG requests to avoid rate limiting
+
+
+def _ddg_rate_limit():
+    """Enforce minimum interval between DuckDuckGo requests to avoid 202/403."""
+    global _DDG_LAST_CALL
+    now = _time.monotonic()
+    elapsed = now - _DDG_LAST_CALL
+    if elapsed < _DDG_MIN_INTERVAL:
+        _time.sleep(_DDG_MIN_INTERVAL - elapsed)
+    _DDG_LAST_CALL = _time.monotonic()
 _DDG_TIMEOUT = 10.0
 _REDFIN_URL_RE = re.compile(r"https?://www\.redfin\.com/[^\s\"<>&]+/home/\d+")
+_ONEKEYMLS_URL_RE = re.compile(
+    r"https?://(?:www\.)?onekeymls\.com/[^\s\"<>&]+"
+)
+
+# Regex patterns for extracting property stats from visible page text
+# Price: allow optional space after $, require 6+ digit/comma chars (matches $1,275,000 and $ 1,275,000)
+_PRICE_RE = re.compile(r"\$\s?[\d,]{6,}", re.IGNORECASE)
+_STATS_BEDS_RE = re.compile(r"(\d+)\s*(?:bed(?:room)?s?|bd)", re.IGNORECASE)
+_STATS_BATHS_RE = re.compile(r"(\d+)\s*(?:bath(?:room)?s?|ba)", re.IGNORECASE)
+_STATS_SQFT_RE = re.compile(r"([\d,]+)\s*(?:sq\.?\s*ft|sqft|square\s*feet)", re.IGNORECASE)
+_MIN_HOME_PRICE = 50_000  # ignore prices below this (taxes, fees, etc.)
 
 
 def _search_redfin_url(
@@ -441,6 +478,7 @@ def _search_redfin_url(
                 ),
             },
         ) as client:
+            _ddg_rate_limit()
             response = client.post(_DDG_URL, data={"q": query})
 
         if response.status_code != 200:
@@ -472,6 +510,176 @@ def _search_redfin_url(
 
     except Exception as e:
         logger.warning(f"DuckDuckGo search failed for {address}: {e}")
+        return None
+
+
+def _search_onekeymls_url(
+    address: str,
+    town: str,
+    state: str | None = None,
+    zip_code: str | None = None,
+) -> str | None:
+    """Search DuckDuckGo for a OneKey MLS listing page matching the given address.
+
+    Returns the OneKey MLS URL if found, None otherwise. Mirrors _search_redfin_url().
+    Validates that the street number matches to avoid false positives.
+    """
+    parts = [address, town]
+    if state:
+        parts.append(state)
+    parts.append("onekeymls")
+    query = " ".join(parts)
+
+    try:
+        with httpx.Client(
+            timeout=_DDG_TIMEOUT,
+            follow_redirects=True,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36"
+                ),
+            },
+        ) as client:
+            _ddg_rate_limit()
+            # Use DDG HTML endpoint (Lite returns 202 from cloud IPs)
+            response = client.post(_DDG_HTML_URL, data={"q": query})
+
+        if response.status_code != 200:
+            logger.warning(f"DDG HTML returned {response.status_code} for OneKeyMLS: {query}")
+            return None
+
+        matches = _ONEKEYMLS_URL_RE.findall(response.text)
+        if not matches:
+            logger.info(f"No OneKeyMLS URLs found in DDG results for: {query}")
+            return None
+
+        # Validate street number match
+        street_parts = address.split() if address else []
+        for url in matches:
+            url_lower = url.lower()
+            if street_parts and street_parts[0].isdigit():
+                if f"/{street_parts[0]}-" in url_lower or f"/{street_parts[0]}." in url_lower:
+                    return url
+            # Fallback: check street name
+            for part in street_parts[1:]:
+                if len(part) > 2 and part.lower() in url_lower:
+                    return url
+
+        logger.info(f"OneKeyMLS URLs found but none matched address: {address}")
+        return None
+
+    except Exception as e:
+        logger.warning(f"DuckDuckGo OneKeyMLS search failed for {address}: {e}")
+        return None
+
+
+# Compact listing stats line: "$1,275,000 3 beds 2 bath 2,167 sqft" or similar
+_COMPACT_STATS_RE = re.compile(
+    r"\$\s?([\d,]{6,})\s+(\d+)\s*beds?\s+(\d+)\s*(?:bath|ba)\w*\s+([\d,]+)\s*(?:sq\.?\s*ft|sqft)",
+    re.IGNORECASE,
+)
+
+
+def _extract_property_stats(html: str) -> dict | None:
+    """Extract price/beds/baths/sqft from page HTML text.
+
+    Returns dict with integer values for found fields, or None if nothing found.
+    First tries a compact stats pattern (e.g. "$1,275,000 3 beds 2 bath 2,167 sqft")
+    which avoids false matches from search filter dropdowns.
+    Falls back to individual regex patterns with filtering.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    # Strip form elements to avoid search filter dropdowns polluting matches
+    for tag in soup.find_all(["script", "style", "nav", "footer", "header", "form"]):
+        tag.decompose()
+    text = soup.get_text(separator=" ", strip=True)
+
+    # Try compact stats pattern first (most reliable)
+    compact = _COMPACT_STATS_RE.search(text)
+    if compact:
+        price = int(compact.group(1).replace(",", ""))
+        if price >= _MIN_HOME_PRICE:
+            return {
+                "price": price,
+                "bedrooms": int(compact.group(2)),
+                "bathrooms": int(compact.group(3)),
+                "sqft": int(compact.group(4).replace(",", "")),
+            }
+
+    # Fallback: individual field extraction with filtering
+    result = {}
+
+    for price_match in _PRICE_RE.finditer(text):
+        price_str = price_match.group(0).replace("$", "").replace(",", "").strip()
+        try:
+            price = int(price_str)
+            if price >= _MIN_HOME_PRICE:
+                result["price"] = price
+                break
+        except ValueError:
+            pass
+
+    beds_match = _STATS_BEDS_RE.search(text)
+    if beds_match:
+        result["bedrooms"] = int(beds_match.group(1))
+
+    baths_match = _STATS_BATHS_RE.search(text)
+    if baths_match:
+        result["bathrooms"] = int(baths_match.group(1))
+
+    # SqFt: skip round filter values
+    for sqft_match in _STATS_SQFT_RE.finditer(text):
+        sqft = int(sqft_match.group(1).replace(",", ""))
+        if sqft % 500 != 0:
+            result["sqft"] = sqft
+            break
+
+    return result if result else None
+
+
+def scrape_listing_structured_data(
+    address: str | None,
+    town: str | None,
+    state: str | None = None,
+    zip_code: str | None = None,
+) -> dict | None:
+    """Search for a listing on OneKey MLS and extract structured property data.
+
+    Returns dict with keys like price, bedrooms, bathrooms, sqft — or None.
+    """
+    if not address or not town:
+        return None
+
+    onekeymls_url = _search_onekeymls_url(address, town, state, zip_code)
+    if not onekeymls_url:
+        return None
+
+    logger.info(f"Fetching structured data from OneKeyMLS: {onekeymls_url}")
+    try:
+        with httpx.Client(
+            timeout=_SCRAPE_TIMEOUT,
+            follow_redirects=True,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/121.0.0.0 Safari/537.36"
+                ),
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.5",
+            },
+        ) as client:
+            response = client.get(onekeymls_url)
+            response.raise_for_status()
+
+        stats = _extract_property_stats(response.text)
+        if stats:
+            logger.info(f"Extracted structured data from OneKeyMLS: {stats}")
+        return stats
+
+    except Exception as e:
+        logger.warning(f"Failed to fetch OneKeyMLS page {onekeymls_url}: {e}")
         return None
 
 
@@ -575,3 +783,75 @@ def _has_useful_content(text: str) -> bool:
     """Check if text contains real estate description keywords."""
     text_lower = text.lower()
     return any(kw in text_lower for kw in _DESCRIPTION_KEYWORDS)
+
+
+# ---------------------------------------------------------------------------
+# OneKey MLS listing status extraction
+# ---------------------------------------------------------------------------
+
+_MLS_STATUS_RE = re.compile(
+    r'"(?:SaleStatus|MlsStatus)"\s*:\s*"([^"]+)"',
+    re.IGNORECASE,
+)
+
+
+def _extract_listing_status(html: str) -> str | None:
+    """Extract listing status from OneKey MLS page HTML.
+
+    OneKey MLS pages embed structured JSON with SaleStatus/MlsStatus fields
+    (e.g. "Active", "Sold", "Pending", "Closed", "Under Contract").
+    Returns the first match or None.
+    """
+    match = _MLS_STATUS_RE.search(html)
+    if match:
+        return match.group(1)
+    return None
+
+
+def check_listing_status(
+    address: str,
+    town: str,
+    state: str | None = None,
+    zip_code: str | None = None,
+) -> str | None:
+    """Search OneKey MLS for a listing and return its status string.
+
+    Uses DDG to find the OneKey MLS page, fetches it via static HTTP,
+    and extracts the SaleStatus/MlsStatus field.
+    Returns status string (e.g. "Active", "Sold", "Pending") or None.
+    """
+    if not address or not town:
+        return None
+
+    onekeymls_url = _search_onekeymls_url(address, town, state, zip_code)
+    if not onekeymls_url:
+        return None
+
+    logger.info(f"Checking listing status from OneKeyMLS: {onekeymls_url}")
+    try:
+        with httpx.Client(
+            timeout=_SCRAPE_TIMEOUT,
+            follow_redirects=True,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/121.0.0.0 Safari/537.36"
+                ),
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.5",
+            },
+        ) as client:
+            response = client.get(onekeymls_url)
+            response.raise_for_status()
+
+        status = _extract_listing_status(response.text)
+        if status:
+            logger.info(f"OneKeyMLS status for {address}, {town}: {status}")
+        else:
+            logger.info(f"No status found on OneKeyMLS page for {address}, {town}")
+        return status
+
+    except Exception as e:
+        logger.warning(f"Failed to check OneKeyMLS status for {address}, {town}: {e}")
+        return None
