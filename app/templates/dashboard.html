@@ -863,12 +863,25 @@
   }
   .sold-btn:hover { border-color: #dc2626; color: #dc2626; }
 
-  /* Add listing row */
+  /* Add listing bar */
   .add-listing-row {
     display: flex;
-    gap: 8px;
-    padding: 0 16px;
-    margin-bottom: 8px;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 16px;
+    margin: 0 16px 10px;
+    background: var(--card-bg);
+    border: 1.5px solid var(--border);
+    border-radius: 12px;
+    box-shadow: var(--shadow);
+  }
+  .add-listing-label {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--blue);
+    white-space: nowrap;
   }
   .add-listing-input {
     flex: 1;
@@ -876,11 +889,15 @@
     border: 1.5px solid var(--border);
     border-radius: 8px;
     font-size: 14px;
+    background: var(--bg);
+    color: var(--text);
     outline: none;
+    min-width: 0;
   }
-  .add-listing-input:focus { border-color: var(--blue); }
+  .add-listing-input::placeholder { color: var(--text-faint); }
+  .add-listing-input:focus { border-color: var(--blue); background: #fff; }
   .add-listing-btn {
-    padding: 8px 16px;
+    padding: 8px 18px;
     background: var(--blue);
     color: #fff;
     border: none;
@@ -889,8 +906,10 @@
     font-weight: 600;
     cursor: pointer;
     white-space: nowrap;
+    transition: opacity 0.15s;
   }
-  .add-listing-btn:hover { opacity: 0.9; }
+  .add-listing-btn:hover { opacity: 0.85; }
+  .add-listing-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
   /* Action buttons row at top of detail */
   .detail-actions {
@@ -1155,8 +1174,10 @@
   </div>
 
   <div class="add-listing-row" id="addListingRow" style="display:none">
-    <input type="text" id="addListingUrl" placeholder="Paste listing URL (Redfin, etc.)" class="add-listing-input">
-    <button onclick="addListingFromUrl()" class="add-listing-btn">Add</button>
+    <span class="add-listing-label">+ Add Listing</span>
+    <input type="text" id="addListingUrl" placeholder="Paste a Redfin or listing URL..." class="add-listing-input"
+           onkeydown="if(event.key==='Enter')addListingFromUrl()">
+    <button onclick="addListingFromUrl()" class="add-listing-btn" id="addListingBtn">Add</button>
   </div>
 
   <div class="controls" id="controls">
@@ -2197,12 +2218,16 @@ async function markSold(listingId) {
 /* ==== Add Listing from URL ==== */
 async function addListingFromUrl() {
   var inp = document.getElementById('addListingUrl');
+  var btn = document.getElementById('addListingBtn');
   var url = inp.value.trim();
   if (!url) return;
   if (!url.startsWith('http://') && !url.startsWith('https://')) {
     url = 'https://' + url;
   }
-  showToast('Adding listing...');
+  btn.disabled = true;
+  btn.textContent = 'Adding\u2026';
+  inp.disabled = true;
+  showToast('Scraping and scoring\u2026');
   try {
     var res = await fetch('/listings/add', {
       method: 'POST',
@@ -2222,6 +2247,11 @@ async function addListingFromUrl() {
     }
   } catch (e) {
     showToast('Network error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Add';
+    inp.disabled = false;
+    inp.focus();
   }
 }
 
