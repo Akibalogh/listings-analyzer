@@ -863,6 +863,35 @@
   }
   .sold-btn:hover { border-color: #dc2626; color: #dc2626; }
 
+  /* Add listing row */
+  .add-listing-row {
+    display: flex;
+    gap: 8px;
+    padding: 0 16px;
+    margin-bottom: 8px;
+  }
+  .add-listing-input {
+    flex: 1;
+    padding: 8px 12px;
+    border: 1.5px solid var(--border);
+    border-radius: 8px;
+    font-size: 14px;
+    outline: none;
+  }
+  .add-listing-input:focus { border-color: var(--blue); }
+  .add-listing-btn {
+    padding: 8px 16px;
+    background: var(--blue);
+    color: #fff;
+    border: none;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .add-listing-btn:hover { opacity: 0.9; }
+
   /* Action buttons row at top of detail */
   .detail-actions {
     display: flex;
@@ -1125,6 +1154,11 @@
     </div>
   </div>
 
+  <div class="add-listing-row" id="addListingRow" style="display:none">
+    <input type="text" id="addListingUrl" placeholder="Paste listing URL (Redfin, etc.)" class="add-listing-input">
+    <button onclick="addListingFromUrl()" class="add-listing-btn">Add</button>
+  </div>
+
   <div class="controls" id="controls">
     <button class="filter-chip active" data-filter="all">All</button>
     <button class="filter-chip" data-filter="not-reject">Non-Reject</button>
@@ -1205,14 +1239,17 @@ async function checkAuth() {
 function setAuthUI(loggedIn) {
   var main = document.getElementById('mainContent');
   var signinBtn = document.getElementById('signinBtn');
+  var addRow = document.getElementById('addListingRow');
   if (loggedIn) {
     main.classList.add('authed');
     signinBtn.style.display = 'none';
     document.getElementById('userEmail').textContent = currentUser || '';
+    if (addRow) addRow.style.display = 'flex';
   } else {
     main.classList.remove('authed');
     signinBtn.style.display = '';
     document.getElementById('userEmail').textContent = '';
+    if (addRow) addRow.style.display = 'none';
   }
   /* Always close login overlay when dashboard is ready */
   document.getElementById('loginOverlay').classList.add('hidden');
@@ -2148,6 +2185,37 @@ async function markSold(listingId) {
       if (card) card.remove();
       updateFilterCounts();
       showToast('Listing removed (sold)');
+    } else {
+      var err = await res.json();
+      showToast('Error: ' + (err.detail || 'failed'));
+    }
+  } catch (e) {
+    showToast('Network error');
+  }
+}
+
+/* ==== Add Listing from URL ==== */
+async function addListingFromUrl() {
+  var inp = document.getElementById('addListingUrl');
+  var url = inp.value.trim();
+  if (!url) return;
+  if (!url.startsWith('http://') && !url.startsWith('https://')) {
+    url = 'https://' + url;
+  }
+  showToast('Adding listing...');
+  try {
+    var res = await fetch('/listings/add', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({url: url})
+    });
+    if (res.ok) {
+      var data = await res.json();
+      var msg = (data.address || 'Listing') + ' added';
+      if (data.verdict) msg += ' \u2014 ' + data.verdict + ' (' + data.score + ')';
+      showToast(msg);
+      inp.value = '';
+      loadListings();
     } else {
       var err = await res.json();
       showToast('Error: ' + (err.detail || 'failed'));

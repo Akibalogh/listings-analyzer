@@ -476,6 +476,142 @@ async def scrape_listing(request: Request, listing_id: int):
     return result_info
 
 
+# --- Add listing from URL ---
+
+
+@app.post("/listings/add")
+async def add_listing_from_url(request: Request):
+    """Create a new listing from a URL. Scrapes, extracts data, and scores."""
+    import re
+    import httpx
+    from app.parsers.onehome import scrape_listing_description, _extract_property_stats
+    from app.parsers.plaintext import REDFIN_URL_ADDR_RE
+    from app.enrichment import normalize_address, fetch_commute_time, fetch_school_data
+    from app.models import ParsedListing, ScoringResult
+
+    _require_auth(request)
+    body = await request.json()
+    url = (body.get("url") or "").strip()
+    if not url or not url.startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="Invalid URL")
+
+    # Resolve short URLs (e.g. redf.in)
+    try:
+        with httpx.Client(timeout=10, follow_redirects=True) as client:
+            resp = client.head(url)
+            resolved_url = str(resp.url)
+    except Exception:
+        resolved_url = url
+
+    # Extract address from Redfin URL path
+    address = town = state = zip_code = None
+    redfin_match = REDFIN_URL_ADDR_RE.search(resolved_url)
+    if redfin_match:
+        state = redfin_match.group(1).upper()
+        town = redfin_match.group(2).replace("-", " ").title()
+        addr_slug = redfin_match.group(3).replace("-", " ")
+        if redfin_match.group(4):
+            zip_code = redfin_match.group(4)
+        address = addr_slug.title()
+
+    # Check for duplicates by address
+    if address and town:
+        address_key = normalize_address(address, town, state)
+        if address_key and db.is_listing_duplicate_by_address(address_key):
+            raise HTTPException(status_code=409, detail=f"Listing already exists: {address}, {town}")
+    else:
+        address_key = None
+
+    # Scrape the page for description + images + structured data
+    description, image_urls = scrape_listing_description(
+        resolved_url, address=address, town=town, state=state, zip_code=zip_code,
+    )
+
+    # Try to extract structured data from the page
+    price = beds = baths = sqft = None
+    try:
+        with httpx.Client(timeout=10, follow_redirects=True, headers={
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+        }) as client:
+            page_resp = client.get(resolved_url)
+            if page_resp.status_code == 200:
+                stats = _extract_property_stats(page_resp.text)
+                if stats:
+                    price = stats.get("price")
+                    beds = stats.get("bedrooms")
+                    baths = stats.get("bathrooms")
+                    sqft = stats.get("sqft")
+    except Exception:
+        pass
+
+    # Create the listing
+    listing = ParsedListing(
+        source_format="manual",
+        address=address,
+        town=town,
+        state=state,
+        zip_code=zip_code,
+        price=price,
+        bedrooms=beds,
+        bathrooms=baths,
+        sqft=sqft,
+        listing_url=resolved_url,
+        description=description,
+    )
+
+    # Placeholder score — will rescore below
+    placeholder_score = ScoringResult(
+        score=0, verdict="Reject", hard_results=[], soft_points={},
+        concerns=["Pending scoring"], confidence="low",
+    )
+
+    # Enrichment
+    enrichment = {}
+    if address_key:
+        enrichment["address_key"] = address_key
+    if zip_code:
+        school_json = fetch_school_data(zip_code, state)
+        if school_json:
+            enrichment["school_data_json"] = school_json
+    if address and town:
+        commute = fetch_commute_time(address, town, state, zip_code)
+        if commute:
+            enrichment["commute_minutes"] = commute.get("commute_minutes")
+            enrichment["commute_data_json"] = commute.get("commute_data_json")
+
+    # Save a dummy email record
+    email_id = db.save_processed_email(
+        gmail_id=f"manual-{resolved_url}",
+        message_id="",
+        sender="manual",
+        subject=f"Manual add: {address or resolved_url}",
+        parser_used="manual",
+        listings_found=1,
+    )
+
+    listing_id = db.save_listing(listing, placeholder_score, email_id, enrichment)
+    if image_urls:
+        db.add_listing_images(listing_id, image_urls)
+
+    # Score with AI
+    result_info = {
+        "listing_id": listing_id,
+        "address": address,
+        "town": town,
+        "url": resolved_url,
+        "description_found": description is not None,
+    }
+
+    criteria = db.get_active_criteria()
+    if criteria:
+        saved = db.get_listing_by_id(listing_id)
+        score = _rescore_one_listing(saved, criteria)
+        result_info["score"] = score.score
+        result_info["verdict"] = score.verdict
+
+    return result_info
+
+
 # --- Re-scoring ---
 
 

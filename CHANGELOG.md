@@ -8,6 +8,7 @@ All notable changes to Listings Analyzer are documented here.
 
 ### Added
 - **"Want to Go" flag** — `tour_requested` boolean column on listings; `POST /listings/{id}/tour-request` toggle endpoint (auth-required); blue "Want to Go" badge in compact card row; "Want to Go" / "✓ Want to Go — click to cancel" button in detail actions; "Want to Go" filter chip with count; mirrors the existing Toured pattern
+- **Add listing from URL** — `POST /listings/add` endpoint creates a new listing from a pasted URL; resolves short URLs (redf.in), extracts address from Redfin URL path, scrapes description/images, extracts structured data (price/beds/baths/sqft), enriches (schools/commute), scores with AI; dashboard shows URL input bar when signed in; duplicate detection by address key
 
 ### Changed
 - **Auto-update listing status on duplicate detection** — when poller encounters a duplicate listing (by MLS ID or address key), it now updates the existing listing's `listing_status` if changed (e.g., "New Listing" → "Pending") and backfills `listing_url` if the existing record has none; previously duplicates were silently skipped

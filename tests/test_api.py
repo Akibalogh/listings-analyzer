@@ -297,6 +297,59 @@ class TestSoldEndpoint:
         assert data["deleted"] is True
 
 
+class TestAddListingFromUrl:
+    """Tests for POST /listings/add."""
+
+    def test_requires_auth(self, client):
+        res = client.post("/listings/add", json={"url": "https://redf.in/abc"})
+        assert res.status_code == 401
+
+    def test_rejects_empty_url(self, authed_client):
+        res = authed_client.post("/listings/add", json={"url": ""})
+        assert res.status_code == 400
+
+    @patch("app.main.db.get_active_criteria", return_value=None)
+    @patch("app.main.db.save_listing", return_value=42)
+    @patch("app.main.db.save_processed_email", return_value=1)
+    @patch("app.main.db.is_listing_duplicate_by_address", return_value=False)
+    @patch("httpx.Client")
+    def test_adds_listing_from_redfin_url(
+        self, mock_client_cls, mock_dedup, mock_save_email, mock_save_listing,
+        mock_criteria, authed_client
+    ):
+        mock_response = MagicMock()
+        mock_response.url = "https://www.redfin.com/NY/Croton-On-Hudson/101-Upper-North-Highland-Pl-10520/home/123"
+        mock_response.status_code = 200
+        mock_response.text = "<html></html>"
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.head.return_value = mock_response
+        mock_client.get.return_value = mock_response
+        mock_client_cls.return_value = mock_client
+
+        res = authed_client.post("/listings/add", json={"url": "https://redf.in/qDdarb"})
+        assert res.status_code == 200
+        data = res.json()
+        assert data["listing_id"] == 42
+        assert data["address"] is not None
+        assert "Upper North Highland" in data["address"]
+
+    @patch("app.main.db.is_listing_duplicate_by_address", return_value=True)
+    @patch("httpx.Client")
+    def test_rejects_duplicate(self, mock_client_cls, mock_dedup, authed_client):
+        mock_response = MagicMock()
+        mock_response.url = "https://www.redfin.com/NY/Rye/10-Sherman-Ave-10580/home/123"
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.head.return_value = mock_response
+        mock_client_cls.return_value = mock_client
+
+        res = authed_client.post("/listings/add", json={"url": "https://redf.in/xyz"})
+        assert res.status_code == 409
+
+
 class TestTourRequest:
     """Tests for POST /listings/{listing_id}/tour-request."""
 
