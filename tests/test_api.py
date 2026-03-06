@@ -675,7 +675,7 @@ class TestManageScrapeDescriptions:
     @patch("app.main.db.get_listing_by_id", return_value={
         "id": 1, "address": "10 Test", "listing_url": "https://example.com",
         "description": None, "town": "Rye", "state": "NY", "zip_code": "10573", "mls_id": "111",
-        "price": 1000000,
+        "price": 1000000, "year_built": 2000,
     })
     @patch("app.main.db.get_all_listing_ids", return_value=[1])
     @patch("app.main.settings")

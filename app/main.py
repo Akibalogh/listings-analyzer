@@ -1319,6 +1319,38 @@ def manage_scrape_descriptions(request: Request):
             logger.error(f"Structured data backfill failed for listing #{lid}: {e}")
             errors.append(f"#{lid} structured data: {e}")
 
+    # Phase 4: backfill year_built/list_date for listings with URL but missing these fields
+    import httpx
+    from app.parsers.onehome import _extract_property_stats as extract_stats
+
+    year_built_backfilled = 0
+    for lid in listing_ids:
+        listing = db.get_listing_by_id(lid)
+        if not listing or not listing.get("listing_url"):
+            continue
+        if listing.get("year_built"):
+            continue
+        try:
+            with httpx.Client(timeout=10, follow_redirects=True, headers={
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+            }) as client:
+                resp = client.get(listing["listing_url"])
+                if resp.status_code == 200:
+                    stats = extract_stats(resp.text)
+                    if stats:
+                        updates = {}
+                        if stats.get("year_built"):
+                            updates["year_built"] = stats["year_built"]
+                        if stats.get("list_date"):
+                            updates["list_date"] = stats["list_date"]
+                        if updates:
+                            db.update_listing_fields_by_id(lid, **updates)
+                            year_built_backfilled += 1
+                            logger.info(f"Backfilled year_built/list_date for listing #{lid}: {updates}")
+        except Exception as e:
+            logger.error(f"Year built backfill failed for listing #{lid}: {e}")
+            errors.append(f"#{lid} year_built: {e}")
+
     # Trigger rescore if we scraped descriptions or backfilled data
     rescore_started = False
     if scraped > 0 or data_backfilled > 0:
@@ -1334,6 +1366,7 @@ def manage_scrape_descriptions(request: Request):
         "images_found": images_found,
         "images_expanded": images_expanded,
         "data_backfilled": data_backfilled,
+        "year_built_backfilled": year_built_backfilled,
         "skipped": skipped,
         "errors": errors,
         "rescore_started": rescore_started,
