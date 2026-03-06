@@ -274,10 +274,8 @@ def reprocess_emails(request: Request):
 
 @app.get("/want-to-go", response_class=HTMLResponse)
 @app.get("/toured", response_class=HTMLResponse)
+@app.get("/passed", response_class=HTMLResponse)
 @app.get("/non-reject", response_class=HTMLResponse)
-@app.get("/strong-match", response_class=HTMLResponse)
-@app.get("/worth-touring", response_class=HTMLResponse)
-@app.get("/reject", response_class=HTMLResponse)
 def filtered_dashboard():
     """Serve the dashboard — JS reads the URL path to set the initial filter."""
     html_path = TEMPLATES_DIR / "dashboard.html"
@@ -409,6 +407,23 @@ async def toggle_tour_request(request: Request, listing_id: int):
     tour_requested = bool(body.get("tour_requested", True))
     db.mark_listing_tour_requested(listing_id, tour_requested)
     return {"listing_id": listing_id, "tour_requested": tour_requested}
+
+
+# --- Passed status ---
+
+
+@app.post("/listings/{listing_id}/passed")
+async def toggle_passed(request: Request, listing_id: int):
+    """Flag or un-flag a listing as passed (chose not to pursue). Requires auth."""
+    _require_auth(request)
+    listing = db.get_listing_by_id(listing_id)
+    if not listing:
+        raise HTTPException(status_code=404, detail=f"Listing #{listing_id} not found")
+
+    body = await request.json()
+    passed = bool(body.get("passed", True))
+    db.mark_listing_passed(listing_id, passed)
+    return {"listing_id": listing_id, "passed": passed}
 
 
 # --- Mark as sold (delete) ---
@@ -1236,6 +1251,35 @@ def manage_scrape_descriptions(request: Request):
             logger.error(f"Failed to scrape listing #{lid} ({url}): {e}")
             errors.append(f"#{lid}: {e}")
 
+    # Phase 2.5: re-enumerate Redfin CDN images for listings with few images
+    from app.parsers.onehome import enumerate_redfin_images
+
+    images_expanded = 0
+    for lid in listing_ids:
+        listing = db.get_listing_by_id(lid)
+        if not listing:
+            continue
+        raw_images = listing.get("image_urls_json")
+        if not raw_images:
+            continue
+        try:
+            current_images = json.loads(raw_images)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(current_images, list) or len(current_images) >= 10:
+            continue
+        if not any("ssl.cdn-redfin.com" in u for u in current_images):
+            continue
+        try:
+            enumerated = enumerate_redfin_images(current_images)
+            if len(enumerated) > len(current_images):
+                db.add_listing_images(lid, enumerated)
+                images_expanded += 1
+                logger.info(f"Re-enumerated images for listing #{lid}: {len(current_images)} → {len(enumerated)}")
+        except Exception as e:
+            logger.error(f"Image re-enumeration failed for listing #{lid}: {e}")
+            errors.append(f"#{lid} image enum: {e}")
+
     # Phase 3: backfill structured data for listings missing price/beds/baths/sqft
     data_backfilled = 0
     for lid in listing_ids:
@@ -1282,6 +1326,7 @@ def manage_scrape_descriptions(request: Request):
         "urls_found": urls_found,
         "descriptions_scraped": scraped,
         "images_found": images_found,
+        "images_expanded": images_expanded,
         "data_backfilled": data_backfilled,
         "skipped": skipped,
         "errors": errors,

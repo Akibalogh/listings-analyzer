@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 from app.scorer import (
     _build_system_prompt,
     _build_user_message,
+    _select_scoring_images,
     _validate_ai_response,
     build_batch_request,
     parse_batch_result,
@@ -318,3 +319,44 @@ class TestSkipUnchanged:
         listing = {}  # no enriched_at
         meta = {"criteria_version": 3, "scored_at": "2025-01-02T00:00:00"}
         assert _should_skip(listing, meta, 3)  # no enrichment → skip
+
+
+class TestSelectScoringImages:
+    """Tests for _select_scoring_images() — smart image blend for AI scoring."""
+
+    def test_returns_all_when_under_limit(self):
+        urls = [f"img_{i}.jpg" for i in range(5)]
+        assert _select_scoring_images(urls) == urls
+
+    def test_returns_all_when_at_limit(self):
+        urls = [f"img_{i}.jpg" for i in range(8)]
+        assert _select_scoring_images(urls) == urls
+
+    def test_selects_blend_from_large_set(self):
+        """Picks 3 head + 2 middle + 3 tail from 40 images."""
+        urls = [f"img_{i}.jpg" for i in range(40)]
+        selected = _select_scoring_images(urls)
+        assert len(selected) == 8
+        # Head images (first 3)
+        assert selected[0] == "img_0.jpg"
+        assert selected[1] == "img_1.jpg"
+        assert selected[2] == "img_2.jpg"
+        # Tail images (last 3)
+        assert selected[-1] == "img_39.jpg"
+        assert selected[-2] == "img_38.jpg"
+        assert selected[-3] == "img_37.jpg"
+        # Middle images are somewhere in between
+        for img in selected[3:5]:
+            idx = int(img.split("_")[1].split(".")[0])
+            assert 3 <= idx <= 36
+
+    def test_preserves_order(self):
+        urls = [f"img_{i}.jpg" for i in range(20)]
+        selected = _select_scoring_images(urls)
+        indices = [int(u.split("_")[1].split(".")[0]) for u in selected]
+        assert indices == sorted(indices)
+
+    def test_custom_max_images(self):
+        urls = [f"img_{i}.jpg" for i in range(30)]
+        selected = _select_scoring_images(urls, max_images=4)
+        assert len(selected) <= 4

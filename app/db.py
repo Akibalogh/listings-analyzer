@@ -537,6 +537,7 @@ def _migrate_add_columns():
         ("listings", "commute_data_json", "TEXT"),
         ("listings", "enriched_at", "TEXT"),
         ("listings", "tour_requested", "BOOLEAN DEFAULT FALSE"),
+        ("listings", "passed", "BOOLEAN DEFAULT FALSE"),
         ("scores", "evaluation_method", "TEXT DEFAULT 'deterministic'"),
         ("scores", "criteria_version", "INTEGER"),
         ("scores", "ai_reasoning", "TEXT"),
@@ -825,6 +826,17 @@ def mark_listing_tour_requested(listing_id: int, tour_requested: bool):
         cur.execute(
             f"UPDATE listings SET tour_requested = {ph} WHERE id = {ph}",
             (tour_requested, listing_id),
+        )
+
+
+def mark_listing_passed(listing_id: int, passed: bool):
+    """Mark (or un-mark) a listing as passed (chose not to pursue)."""
+    ph = _placeholder()
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            f"UPDATE listings SET passed = {ph} WHERE id = {ph}",
+            (passed, listing_id),
         )
 
 

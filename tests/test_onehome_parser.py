@@ -1,5 +1,6 @@
 """Tests for OneHome/Matrix MLS email parser."""
 
+import re
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -8,6 +9,7 @@ from app.parsers.onehome import (
     scrape_listing_description,
     scrape_listing_structured_data,
     check_listing_status,
+    enumerate_redfin_images,
     _has_useful_content,
     _is_spa_url,
     _try_redfin_fallback,
@@ -737,3 +739,85 @@ class TestCheckListingStatus:
     def test_returns_none_for_missing_address(self):
         assert check_listing_status(None, None) is None
         assert check_listing_status("", "") is None
+
+
+class TestEnumerateRedfinImages:
+    """Tests for enumerate_redfin_images() — CDN image enumeration via HEAD requests."""
+
+    def test_returns_seeds_when_no_redfin_pattern(self):
+        """Non-Redfin URLs are returned unchanged."""
+        seeds = ["https://photos.onehome.com/photo1.jpg", "https://example.com/photo2.jpg"]
+        assert enumerate_redfin_images(seeds) == seeds
+
+    def test_returns_seeds_for_empty_list(self):
+        assert enumerate_redfin_images([]) == []
+
+    @patch("app.parsers.onehome.httpx.Client")
+    def test_enumerates_sequential_images(self, mock_client_cls):
+        """Finds additional images by probing sequential indices."""
+        seeds = [
+            "https://ssl.cdn-redfin.com/photo/42/genMid.12345_3_z.jpg",
+        ]
+
+        def head_side_effect(url):
+            # Images exist at indices 0-9, 404 after that
+            m = re.search(r"genMid\.12345_(\d+)_z\.jpg", url)
+            resp = MagicMock()
+            if m and int(m.group(1)) <= 9:
+                resp.status_code = 200
+            else:
+                resp.status_code = 404
+            return resp
+
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.head.side_effect = head_side_effect
+        mock_client_cls.return_value = mock_client
+
+        result = enumerate_redfin_images(seeds)
+        assert len(result) == 10  # indices 0-9
+        assert result[0] == "https://ssl.cdn-redfin.com/photo/42/genMid.12345_0_z.jpg"
+        assert result[9] == "https://ssl.cdn-redfin.com/photo/42/genMid.12345_9_z.jpg"
+
+    @patch("app.parsers.onehome.httpx.Client")
+    def test_stops_after_consecutive_misses(self, mock_client_cls):
+        """Stops probing after 3 consecutive 404s."""
+        seeds = [
+            "https://ssl.cdn-redfin.com/photo/42/genMid.99999_0_z.jpg",
+        ]
+
+        call_count = 0
+
+        def head_side_effect(url):
+            nonlocal call_count
+            call_count += 1
+            resp = MagicMock()
+            # Only index 0 exists
+            if "_0_z.jpg" in url:
+                resp.status_code = 200
+            else:
+                resp.status_code = 404
+            return resp
+
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.head.side_effect = head_side_effect
+        mock_client_cls.return_value = mock_client
+
+        result = enumerate_redfin_images(seeds)
+        assert len(result) == 1
+        # Should have stopped at index 3 (0=hit, 1=miss, 2=miss, 3=miss → stop)
+        assert call_count == 4
+
+    @patch("app.parsers.onehome.httpx.Client")
+    def test_returns_seeds_on_network_error(self, mock_client_cls):
+        """Falls back to seeds if network fails entirely."""
+        seeds = [
+            "https://ssl.cdn-redfin.com/photo/42/genMid.12345_3_z.jpg",
+        ]
+        mock_client_cls.side_effect = Exception("Connection refused")
+
+        result = enumerate_redfin_images(seeds)
+        assert result == seeds

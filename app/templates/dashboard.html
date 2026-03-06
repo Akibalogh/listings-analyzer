@@ -848,6 +848,41 @@
   .tour-request-btn.requested { background: var(--purple-bg); border-color: #ddd6fe; color: var(--purple); }
   .tour-request-btn.requested:hover { background: #fef2f2; border-color: #fecaca; color: #dc2626; }
 
+  /* Passed badge */
+  .passed-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 4px 10px;
+    border-radius: 100px;
+    font-size: 10px;
+    font-weight: 700;
+    white-space: nowrap;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    background: var(--yellow-bg);
+    color: var(--yellow);
+    border: 1px solid #fde68a;
+    flex-shrink: 0;
+  }
+
+  /* Passed button (in expanded detail) */
+  .passed-btn {
+    background: transparent;
+    border: 1.5px solid var(--border);
+    color: var(--text-muted);
+    padding: 6px 12px;
+    border-radius: 8px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s;
+    white-space: nowrap;
+  }
+  .passed-btn:hover { border-color: var(--yellow); color: var(--yellow); }
+  .passed-btn.passed { background: var(--yellow-bg); border-color: #fde68a; color: var(--yellow); }
+  .passed-btn.passed:hover { background: #fef2f2; border-color: #fecaca; color: #dc2626; }
+
   /* Sold button (in expanded detail) */
   .sold-btn {
     background: transparent;
@@ -1183,11 +1218,9 @@
   <div class="controls" id="controls">
     <button class="filter-chip active" data-filter="all">All</button>
     <button class="filter-chip" data-filter="not-reject">Non-Reject</button>
-    <button class="filter-chip" data-filter="Strong Match">Strong Match</button>
-    <button class="filter-chip" data-filter="Worth Touring">Worth Touring</button>
-    <button class="filter-chip" data-filter="Reject">Reject</button>
     <button class="filter-chip" data-filter="Toured">Toured</button>
     <button class="filter-chip" data-filter="Want to Go">Want to Go</button>
+    <button class="filter-chip" data-filter="Passed">Passed</button>
     <select class="sort-select" id="sortSelect" onchange="applySort()">
       <option value="score-desc">Score (high-low)</option>
       <option value="score-asc">Score (low-high)</option>
@@ -1239,10 +1272,8 @@ var allListings = [];
 var _filterRoutes = {
   '/want-to-go': 'Want to Go',
   '/toured': 'Toured',
+  '/passed': 'Passed',
   '/non-reject': 'not-reject',
-  '/strong-match': 'Strong Match',
-  '/worth-touring': 'Worth Touring',
-  '/reject': 'Reject',
 };
 var _routeByFilter = {};
 Object.keys(_filterRoutes).forEach(function(k) { _routeByFilter[_filterRoutes[k]] = k; });
@@ -1465,12 +1496,12 @@ window.addEventListener('popstate', function() {
 });
 
 function updateFilterCounts() {
-  var counts = { all: allListings.length, 'not-reject': 0, 'Strong Match': 0, 'Worth Touring': 0, 'Reject': 0, 'Toured': 0, 'Want to Go': 0 };
+  var counts = { all: allListings.length, 'not-reject': 0, 'Toured': 0, 'Want to Go': 0, 'Passed': 0 };
   allListings.forEach(function(l) {
     if (l.verdict !== 'Reject') counts['not-reject']++;
-    if (counts[l.verdict] !== undefined) counts[l.verdict]++;
     if (l.toured) counts['Toured']++;
     if (l.tour_requested) counts['Want to Go']++;
+    if (l.passed) counts['Passed']++;
   });
   document.querySelectorAll('.filter-chip').forEach(function(chip) {
     var f = chip.dataset.filter;
@@ -1492,8 +1523,8 @@ function render() {
     items = items.filter(function(l) { return l.toured; });
   } else if (activeFilter === 'Want to Go') {
     items = items.filter(function(l) { return l.tour_requested; });
-  } else if (activeFilter !== 'all') {
-    items = items.filter(function(l) { return l.verdict === activeFilter; });
+  } else if (activeFilter === 'Passed') {
+    items = items.filter(function(l) { return l.passed; });
   }
 
   var sortVal = document.getElementById('sortSelect').value;
@@ -1577,8 +1608,6 @@ function buildCard(l) {
   }
   summary.appendChild(info);
 
-  /* Verdict badge */
-  summary.appendChild(el('span', {className: verdictClass}, displayVerdict || '?'));
   /* Toured badge (visible in compact row) */
   if (l.toured) {
     summary.appendChild(el('span', {className: 'toured-badge'}, '\u2713 Toured'));
@@ -1586,6 +1615,10 @@ function buildCard(l) {
   /* Want to Go badge (visible in compact row) */
   if (l.tour_requested) {
     summary.appendChild(el('span', {className: 'want-to-go-badge'}, 'Want to Go'));
+  }
+  /* Passed badge (visible in compact row) */
+  if (l.passed) {
+    summary.appendChild(el('span', {className: 'passed-badge'}, 'Passed'));
   }
   /* Expand arrow */
   summary.appendChild(el('span', {className: 'card-expand-arrow'}, '\u25BC'));
@@ -1605,12 +1638,17 @@ function buildCard(l) {
       className: 'tour-request-btn' + (l.tour_requested ? ' requested' : ''),
       onclick: function(e) { e.stopPropagation(); toggleTourRequest(l.id, l.tour_requested, tourReqBtn); }
     }, l.tour_requested ? '\u2713 Want to Go \u2014 click to cancel' : 'Want to Go');
+    var passedBtn = el('button', {
+      className: 'passed-btn' + (l.passed ? ' passed' : ''),
+      onclick: function(e) { e.stopPropagation(); togglePassed(l.id, l.passed, passedBtn); }
+    }, l.passed ? '\u2713 Passed \u2014 click to undo' : 'Pass');
     var soldBtn = el('button', {
       className: 'sold-btn',
       onclick: function(e) { e.stopPropagation(); markSold(l.id); }
     }, 'Mark as Sold');
     actionsRow.appendChild(tourReqBtn);
     actionsRow.appendChild(tourBtn);
+    actionsRow.appendChild(passedBtn);
     actionsRow.appendChild(soldBtn);
     detailInner.appendChild(actionsRow);
   }
@@ -2215,6 +2253,43 @@ async function toggleTourRequest(listingId, currentVal, btn) {
       }
       updateFilterCounts();
       showToast(newVal ? 'Marked as Want to Go' : 'Want to Go removed');
+    } else {
+      var err = await res.json();
+      showToast('Error: ' + (err.detail || 'failed'));
+    }
+  } catch (e) {
+    showToast('Network error');
+  }
+}
+
+/* ==== Toggle Passed ==== */
+async function togglePassed(listingId, currentVal, btn) {
+  var newVal = !currentVal;
+  try {
+    var res = await fetch('/listings/' + listingId + '/passed', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({passed: newVal})
+    });
+    if (res.ok) {
+      var listing = allListings.find(function(l) { return l.id === listingId; });
+      if (listing) listing.passed = newVal;
+      btn.textContent = newVal ? '\u2713 Passed \u2014 click to undo' : 'Pass';
+      btn.className = 'passed-btn' + (newVal ? ' passed' : '');
+      var card = document.getElementById('card-' + listingId);
+      if (card) {
+        var summary = card.querySelector('.card-summary');
+        var existingBadge = summary ? summary.querySelector('.passed-badge') : null;
+        if (newVal && !existingBadge && summary) {
+          var arrow = summary.querySelector('.card-expand-arrow');
+          var badge = el('span', {className: 'passed-badge'}, 'Passed');
+          summary.insertBefore(badge, arrow);
+        } else if (!newVal && existingBadge) {
+          existingBadge.remove();
+        }
+      }
+      updateFilterCounts();
+      showToast(newVal ? 'Marked as Passed' : 'Passed removed');
     } else {
       var err = await res.json();
       showToast('Error: ' + (err.detail || 'failed'));

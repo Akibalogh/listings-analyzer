@@ -298,7 +298,7 @@ class TestSoldEndpoint:
 
 
 class TestFilteredRoutes:
-    """Tests for GET /want-to-go and GET /toured — serve dashboard with pre-set filter."""
+    """Tests for filter URL routes — serve dashboard with pre-set filter."""
 
     def test_want_to_go_returns_dashboard(self, client):
         res = client.get("/want-to-go")
@@ -311,16 +311,21 @@ class TestFilteredRoutes:
         assert res.status_code == 200
         assert "Listings Analyzer" in res.text
 
+    def test_passed_returns_dashboard(self, client):
+        res = client.get("/passed")
+        assert res.status_code == 200
+        assert "Listings Analyzer" in res.text
+
     def test_no_auth_required(self, client):
         """All filter routes are public — no auth needed."""
         assert client.get("/want-to-go").status_code == 200
         assert client.get("/toured").status_code == 200
+        assert client.get("/passed").status_code == 200
 
-    def test_all_filter_routes_serve_dashboard(self, client):
-        for route in ["/non-reject", "/strong-match", "/worth-touring", "/reject"]:
-            res = client.get(route)
-            assert res.status_code == 200, f"{route} returned {res.status_code}"
-            assert "Listings Analyzer" in res.text
+    def test_non_reject_route_serves_dashboard(self, client):
+        res = client.get("/non-reject")
+        assert res.status_code == 200
+        assert "Listings Analyzer" in res.text
 
 
 class TestAddListingFromUrl:
@@ -468,6 +473,46 @@ class TestTourRequest:
         res = authed_client.post("/listings/5/tour-request", json={})
         assert res.status_code == 200
         assert res.json()["tour_requested"] is True
+        mock_mark.assert_called_once_with(5, True)
+
+
+class TestPassedEndpoint:
+    """Tests for POST /listings/{listing_id}/passed."""
+
+    def test_requires_auth(self, client):
+        res = client.post("/listings/1/passed", json={"passed": True})
+        assert res.status_code == 401
+
+    @patch("app.main.db.get_listing_by_id", return_value=None)
+    def test_404_for_missing(self, mock_get, authed_client):
+        res = authed_client.post("/listings/999/passed", json={"passed": True})
+        assert res.status_code == 404
+
+    @patch("app.main.db.mark_listing_passed")
+    @patch("app.main.db.get_listing_by_id", return_value={"id": 1, "address": "10 Main St"})
+    def test_marks_passed(self, mock_get, mock_mark, authed_client):
+        res = authed_client.post("/listings/1/passed", json={"passed": True})
+        assert res.status_code == 200
+        data = res.json()
+        assert data["listing_id"] == 1
+        assert data["passed"] is True
+        mock_mark.assert_called_once_with(1, True)
+
+    @patch("app.main.db.mark_listing_passed")
+    @patch("app.main.db.get_listing_by_id", return_value={"id": 1, "address": "10 Main St"})
+    def test_unmarks_passed(self, mock_get, mock_mark, authed_client):
+        res = authed_client.post("/listings/1/passed", json={"passed": False})
+        assert res.status_code == 200
+        assert res.json()["passed"] is False
+        mock_mark.assert_called_once_with(1, False)
+
+    @patch("app.main.db.mark_listing_passed")
+    @patch("app.main.db.get_listing_by_id", return_value={"id": 5, "address": "Test"})
+    def test_defaults_to_true(self, mock_get, mock_mark, authed_client):
+        """Omitting 'passed' key defaults to True."""
+        res = authed_client.post("/listings/5/passed", json={})
+        assert res.status_code == 200
+        assert res.json()["passed"] is True
         mock_mark.assert_called_once_with(5, True)
 
 

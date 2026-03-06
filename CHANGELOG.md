@@ -7,6 +7,17 @@ All notable changes to Listings Analyzer are documented here.
 ## [Unreleased]
 
 ### Added
+- **"Passed" status** — `passed` boolean column on listings; `POST /listings/{id}/passed` toggle endpoint (auth-required); orange "Passed" badge in compact card row; "Pass" / "Passed — click to undo" button in detail actions; "Passed" filter chip with count; `/passed` URL route
+- **Redfin CDN image enumeration** — `enumerate_redfin_images()` in `onehome.py` probes sequential Redfin CDN photo indices (HEAD requests, 0–80) to discover all listing photos; static HTML scraping captures ~7 but listings often have 30–50+; called automatically from `_extract_image_urls()` when Redfin CDN URLs detected
+- **Smart image selection for scoring** — `_select_scoring_images()` in `scorer.py` picks a representative blend of 8 images: 3 from start (hero/kitchen), 2 from middle, 3 from end (floor plans/basement); ensures floor plans (typically last images) are always seen by the AI scorer
+- **Phase 2.5 in `/manage/scrape-descriptions`** — re-enumerates Redfin CDN images for existing listings with fewer than 10 images; fills in the full photo set without re-scraping
+
+### Changed
+- **Removed verdict tags from compact cards** — "Strong Match", "Worth Touring", etc. pills removed from compact card row (score number + color already conveys the tier); removed `Strong Match`, `Worth Touring`, `Reject` filter chips and their `/strong-match`, `/worth-touring`, `/reject` URL routes; kept `Non-Reject` filter and verdict CSS for detail view
+- **`_MAX_IMAGES` bumped from 5 → 8** — peak memory ~52MB per 5-listing chunk, safe on 1024MB Fly.io
+- **Scorer image hint updated** — now mentions floor plans, office/den, and room layout in the image examination prompt
+
+### Added
 - **"Want to Go" flag** — `tour_requested` boolean column on listings; `POST /listings/{id}/tour-request` toggle endpoint (auth-required); blue "Want to Go" badge in compact card row; "Want to Go" / "✓ Want to Go — click to cancel" button in detail actions; "Want to Go" filter chip with count; mirrors the existing Toured pattern
 - **Add listing from URL** — `POST /listings/add` endpoint creates a new listing from a pasted URL; resolves short URLs (redf.in), extracts address from Redfin URL path, scrapes description/images, extracts structured data (price/beds/baths/sqft), enriches (schools/commute), scores with AI; dashboard shows URL input bar when signed in; duplicate detection by address key
 - **Filter chip routes** — each filter has its own URL: `/non-reject`, `/strong-match`, `/worth-touring`, `/reject`, `/toured`, `/want-to-go`; shareable links that pre-filter the dashboard; browser back/forward supported via `pushState`

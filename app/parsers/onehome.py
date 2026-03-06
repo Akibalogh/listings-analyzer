@@ -182,6 +182,73 @@ _IMAGE_SELECTORS = [
 
 _MIN_IMAGE_WIDTH = 200  # Skip tiny icons/thumbnails
 
+# Redfin CDN image enumeration
+_REDFIN_CDN_RE = re.compile(
+    r"(https://ssl\.cdn-redfin\.com/photo/\d+/genMid\.\d+_)(\d+)(_\w+\.jpg)",
+    re.IGNORECASE,
+)
+_REDFIN_ENUM_MAX = 80  # Max photo index to try
+_REDFIN_ENUM_STOP_AFTER = 3  # Stop after N consecutive 404s
+_REDFIN_HEAD_TIMEOUT = 5.0
+
+
+def enumerate_redfin_images(seed_urls: list[str]) -> list[str]:
+    """Enumerate all Redfin CDN images by probing sequential photo indices.
+
+    Redfin CDN URLs follow the pattern:
+        https://ssl.cdn-redfin.com/photo/{id}/genMid.{mls_id}_{n}_{variant}.jpg
+    where n is the photo index (0-based). Static HTML scraping only captures ~7
+    images, but listings often have 30-50+. Floor plans are typically the last
+    images and contain critical layout info.
+
+    Args:
+        seed_urls: Image URLs extracted from HTML (may include non-Redfin URLs).
+
+    Returns:
+        Full list of enumerated URLs if Redfin pattern found and more images
+        discovered, otherwise the original seed_urls unchanged.
+    """
+    # Find a seed URL matching the Redfin CDN pattern
+    prefix = suffix = None
+    seen_indices: set[int] = set()
+    for url in seed_urls:
+        m = _REDFIN_CDN_RE.match(url)
+        if m:
+            prefix = m.group(1)
+            suffix = m.group(3)
+            seen_indices.add(int(m.group(2)))
+
+    if not prefix or not suffix:
+        return seed_urls
+
+    # Probe indices 0.._REDFIN_ENUM_MAX, collecting valid URLs
+    found: list[str] = []
+    consecutive_misses = 0
+    try:
+        with httpx.Client(timeout=_REDFIN_HEAD_TIMEOUT, follow_redirects=True) as client:
+            for n in range(_REDFIN_ENUM_MAX + 1):
+                url = f"{prefix}{n}{suffix}"
+                try:
+                    resp = client.head(url)
+                    if resp.status_code < 400:
+                        found.append(url)
+                        consecutive_misses = 0
+                    else:
+                        consecutive_misses += 1
+                except Exception:
+                    consecutive_misses += 1
+
+                if consecutive_misses >= _REDFIN_ENUM_STOP_AFTER:
+                    break
+    except Exception as e:
+        logger.warning(f"Redfin image enumeration failed: {e}")
+        return seed_urls
+
+    if found:
+        logger.info(f"Redfin CDN enumeration: {len(seed_urls)} seed → {len(found)} total images")
+        return found
+    return seed_urls
+
 # Keywords that indicate useful description text (vs. boilerplate)
 _DESCRIPTION_KEYWORDS = [
     "basement", "finish", "unfin", "ground floor", "ground level",
@@ -775,6 +842,12 @@ def _extract_image_urls(html: str, page_url: str) -> list[str]:
             if src not in seen:
                 seen.add(src)
                 images.append(src)
+
+    # Enumerate full Redfin CDN image set if seed images are from Redfin
+    if images and any("ssl.cdn-redfin.com" in u for u in images):
+        enumerated = enumerate_redfin_images(images)
+        if len(enumerated) > len(images):
+            images = enumerated
 
     if images:
         logger.info(f"Extracted {len(images)} image URLs from {page_url}")
