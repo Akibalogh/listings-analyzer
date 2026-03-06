@@ -516,6 +516,16 @@ _LIST_DATE_RE = re.compile(
     r"(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\w+\s+\d{1,2},?\s+\d{4}|\d{4}-\d{2}-\d{2})",
     re.IGNORECASE,
 )
+# JSON-LD / structured data patterns for on-market date (OneKeyMLS embeds these)
+_JSON_ON_MARKET_RE = re.compile(
+    r'"[Oo]n[Mm]arket[Dd]ate"\s*:\s*"(\d{4}-\d{2}-\d{2})',
+)
+_JSON_LIST_DATE_RE = re.compile(
+    r'"(?:[Ll]ist(?:ing)?[Dd]ate|[Dd]ate[Ll]isted)"\s*:\s*"(\d{4}-\d{2}-\d{2})',
+)
+_JSON_YEAR_BUILT_RE = re.compile(
+    r'"[Yy]ear[Bb]uilt"\s*:\s*"?(\d{4})',
+)
 
 
 def _search_redfin_url(
@@ -669,11 +679,12 @@ def _extract_property_stats(html: str) -> dict | None:
     text = soup.get_text(separator=" ", strip=True)
 
     # Try compact stats pattern first (most reliable)
+    result = {}
     compact = _COMPACT_STATS_RE.search(text)
     if compact:
         price = int(compact.group(1).replace(",", ""))
         if price >= _MIN_HOME_PRICE:
-            return {
+            result = {
                 "price": price,
                 "bedrooms": int(compact.group(2)),
                 "bathrooms": int(compact.group(3)),
@@ -681,7 +692,6 @@ def _extract_property_stats(html: str) -> dict | None:
             }
 
     # Fallback: individual field extraction with filtering
-    result = {}
 
     for price_match in _PRICE_RE.finditer(text):
         price_str = price_match.group(0).replace("$", "").replace(",", "").strip()
@@ -708,17 +718,27 @@ def _extract_property_stats(html: str) -> dict | None:
             result["sqft"] = sqft
             break
 
-    # Year built
+    # Year built — try visible text first, then JSON-LD in raw HTML
     year_match = _YEAR_BUILT_RE.search(text)
     if year_match:
         year = int(year_match.group(1))
         if 1700 <= year <= 2030:
             result["year_built"] = year
+    if "year_built" not in result:
+        json_yb = _JSON_YEAR_BUILT_RE.search(html)
+        if json_yb:
+            year = int(json_yb.group(1))
+            if 1700 <= year <= 2030:
+                result["year_built"] = year
 
-    # List date
+    # List date — try visible text first, then JSON-LD in raw HTML
     list_date_match = _LIST_DATE_RE.search(text)
     if list_date_match:
         result["list_date"] = list_date_match.group(1).strip()
+    if "list_date" not in result:
+        json_ld = _JSON_ON_MARKET_RE.search(html) or _JSON_LIST_DATE_RE.search(html)
+        if json_ld:
+            result["list_date"] = json_ld.group(1)
 
     return result if result else None
 

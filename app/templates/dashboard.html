@@ -1656,9 +1656,8 @@ function buildCard(l) {
   /* Stats row */
   var statsArr = [buildStat('Price', price), buildStat('Size', sqft + ' sqft'), buildStat('Beds', beds), buildStat('Baths', baths)];
   if (l.year_built) statsArr.push(buildStat('Built', String(l.year_built)));
-  var domSource = l.list_date || l.created_at;
-  if (domSource) {
-    var listedDate = new Date(domSource);
+  if (l.list_date) {
+    var listedDate = new Date(l.list_date);
     var dom = Math.floor((Date.now() - listedDate.getTime()) / 86400000);
     if (dom >= 0) statsArr.push(buildStat('DOM', dom + 'd'));
   }
