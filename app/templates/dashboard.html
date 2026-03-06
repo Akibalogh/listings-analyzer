@@ -1236,7 +1236,13 @@
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <script>
 var allListings = [];
-var activeFilter = 'all';
+var _filterRoutes = {
+  '/want-to-go': 'Want to Go',
+  '/toured': 'Toured',
+};
+var _routeByFilter = {};
+Object.keys(_filterRoutes).forEach(function(k) { _routeByFilter[_filterRoutes[k]] = k; });
+var activeFilter = _filterRoutes[location.pathname] || 'all';
 var currentUser = null;
 var googleClientId = null;
 
@@ -1432,6 +1438,25 @@ document.getElementById('controls').addEventListener('click', function(e) {
   document.querySelectorAll('.filter-chip').forEach(function(c) { c.classList.remove('active'); });
   e.target.classList.add('active');
   activeFilter = e.target.dataset.filter;
+  var route = _routeByFilter[activeFilter] || '/';
+  history.pushState(null, '', route);
+  render();
+});
+/* Set active chip from URL on load */
+(function() {
+  if (activeFilter !== 'all') {
+    document.querySelectorAll('.filter-chip').forEach(function(c) {
+      c.classList.remove('active');
+      if (c.dataset.filter === activeFilter) c.classList.add('active');
+    });
+  }
+})();
+window.addEventListener('popstate', function() {
+  activeFilter = _filterRoutes[location.pathname] || 'all';
+  document.querySelectorAll('.filter-chip').forEach(function(c) {
+    c.classList.remove('active');
+    if (c.dataset.filter === activeFilter) c.classList.add('active');
+  });
   render();
 });
 

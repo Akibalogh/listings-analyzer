@@ -297,6 +297,26 @@ class TestSoldEndpoint:
         assert data["deleted"] is True
 
 
+class TestFilteredRoutes:
+    """Tests for GET /want-to-go and GET /toured — serve dashboard with pre-set filter."""
+
+    def test_want_to_go_returns_dashboard(self, client):
+        res = client.get("/want-to-go")
+        assert res.status_code == 200
+        assert "Listings Analyzer" in res.text
+        assert "want-to-go" in res.text  # route is in _filterRoutes JS
+
+    def test_toured_returns_dashboard(self, client):
+        res = client.get("/toured")
+        assert res.status_code == 200
+        assert "Listings Analyzer" in res.text
+
+    def test_no_auth_required(self, client):
+        """Both routes are public — no auth needed."""
+        assert client.get("/want-to-go").status_code == 200
+        assert client.get("/toured").status_code == 200
+
+
 class TestAddListingFromUrl:
     """Tests for POST /listings/add."""
 

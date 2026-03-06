@@ -272,6 +272,14 @@ def reprocess_emails(request: Request):
     }
 
 
+@app.get("/want-to-go", response_class=HTMLResponse)
+@app.get("/toured", response_class=HTMLResponse)
+def filtered_dashboard():
+    """Serve the dashboard — JS reads the URL path to set the initial filter."""
+    html_path = TEMPLATES_DIR / "dashboard.html"
+    return HTMLResponse(content=html_path.read_text())
+
+
 @app.get("/listings")
 def list_listings():
     """Get all scored listings. Public — no auth required."""
