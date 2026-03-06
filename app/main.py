@@ -630,7 +630,9 @@ async def add_listing_from_url(request: Request):
 @app.post("/listings/{listing_id}/rescore")
 def rescore_single(request: Request, listing_id: int):
     """Re-score a single listing with current criteria."""
-    _require_auth(request)
+    key = request.headers.get("x-manage-key", "")
+    if not (settings.manage_key and key == settings.manage_key):
+        _require_auth(request)
     listing = db.get_listing_by_id(listing_id)
     if not listing:
         raise HTTPException(status_code=404, detail=f"Listing #{listing_id} not found")

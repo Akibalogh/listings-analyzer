@@ -767,6 +767,8 @@ def _extract_image_urls(html: str, page_url: str) -> list[str]:
             if any(skip in src_lower for skip in [
                 "icon", "logo", "avatar", "sprite", "placeholder",
                 "1x1", "pixel", "spacer", "blank",
+                "badge", "flag", "footer", "app-download",
+                "equal-housing",
             ]):
                 continue
 
