@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     gmail_refresh_token: str = ""
 
     # Alert senders (supports domains like "redfin.com" for all senders from that domain)
-    alert_senders: str = "redfin.com,alerts@mls.example.com"
+    alert_senders: str = ""
 
     # Date-filtered senders: "email:days,email:days" — only fetch emails newer than N days
     sender_date_filters: str = ""
@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///listings.db"
 
     # Auth
-    allowed_emails: str = "you@example.com,friend@example.com,alt@example.com"
+    allowed_emails: str = ""
     session_secret: str = ""
 
     # Scheduled polling (hours between auto-polls; 0 = disabled)

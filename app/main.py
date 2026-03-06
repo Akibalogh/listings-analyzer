@@ -274,6 +274,10 @@ def reprocess_emails(request: Request):
 
 @app.get("/want-to-go", response_class=HTMLResponse)
 @app.get("/toured", response_class=HTMLResponse)
+@app.get("/non-reject", response_class=HTMLResponse)
+@app.get("/strong-match", response_class=HTMLResponse)
+@app.get("/worth-touring", response_class=HTMLResponse)
+@app.get("/reject", response_class=HTMLResponse)
 def filtered_dashboard():
     """Serve the dashboard — JS reads the URL path to set the initial filter."""
     html_path = TEMPLATES_DIR / "dashboard.html"

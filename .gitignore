@@ -8,3 +8,5 @@ credentials.json
 .uv/
 dist/
 *.egg-info/
+.pytest_cache/
+.claude/

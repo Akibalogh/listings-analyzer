@@ -9,6 +9,8 @@ All notable changes to Listings Analyzer are documented here.
 ### Added
 - **"Want to Go" flag** — `tour_requested` boolean column on listings; `POST /listings/{id}/tour-request` toggle endpoint (auth-required); blue "Want to Go" badge in compact card row; "Want to Go" / "✓ Want to Go — click to cancel" button in detail actions; "Want to Go" filter chip with count; mirrors the existing Toured pattern
 - **Add listing from URL** — `POST /listings/add` endpoint creates a new listing from a pasted URL; resolves short URLs (redf.in), extracts address from Redfin URL path, scrapes description/images, extracts structured data (price/beds/baths/sqft), enriches (schools/commute), scores with AI; dashboard shows URL input bar when signed in; duplicate detection by address key
+- **Filter chip routes** — each filter has its own URL: `/non-reject`, `/strong-match`, `/worth-touring`, `/reject`, `/toured`, `/want-to-go`; shareable links that pre-filter the dashboard; browser back/forward supported via `pushState`
+- **Public repo hardening** — removed hardcoded personal emails from config defaults and `.env.example`; all personal config now env-var-only
 
 ### Changed
 - **Auto-update listing status on duplicate detection** — when poller encounters a duplicate listing (by MLS ID or address key), it now updates the existing listing's `listing_status` if changed (e.g., "New Listing" → "Pending") and backfills `listing_url` if the existing record has none; previously duplicates were silently skipped
@@ -18,7 +20,7 @@ All notable changes to Listings Analyzer are documented here.
 ### Added
 - **`check_listing_status()` in `onehome.py`** — searches DDG for OneKey MLS page and extracts `SaleStatus`/`MlsStatus` from page JSON; returns status string ("Active", "Sold", "Pending", "Closed") or None; reuses existing DDG rate limiting
 - **`_extract_listing_status()` in `onehome.py`** — regex extraction of listing status from OneKey MLS HTML embedded JSON
-- **OneKey MLS address search fallback** — when Redfin scraping fails and no MLS ID is available (bare Redfin URLs from a contact), DDG searches for the address on OneKey MLS; wired into the Redfin scraping chain after existing fallbacks
+- **OneKey MLS address search fallback** — when Redfin scraping fails and no MLS ID is available (bare Redfin URLs), DDG searches for the address on OneKey MLS; wired into the Redfin scraping chain after existing fallbacks
 - **Structured data extraction from scraped pages** — `_extract_property_stats()` regex-extracts price/beds/baths/sqft from any listing page HTML; `scrape_listing_structured_data()` combines DDG search + fetch + extraction
 - **Structured data backfill in poller** — before scoring, bare-URL listings missing price/beds/baths/sqft get data backfilled from OneKey MLS; prevents "missing data" rejections
 - **Phase 3 in `/manage/scrape-descriptions`** — after URL search and description scraping, backfills structured property data for listings missing all of price/beds/baths/sqft; triggers rescore if data found
@@ -106,7 +108,7 @@ All notable changes to Listings Analyzer are documented here.
 - **Background enrichment** — `/manage/enrich` now runs in a daemon thread (returns immediately); two-phase bogus clearing (clears ALL bogus data first, then re-fetches) prevents zip cache from serving stale obfuscated data
 - **Dynamic `update_listing_enrichment()`** — only updates columns present in the enrichment dict (was always setting all 4 columns, nulling out existing data on partial updates)
 - **Email fetching refactored** — `fetch_new_emails()` now runs multiple query groups (regular senders + date-filtered senders) with deduplication via `_fetch_query()` helper; replaces single-query approach
-- **ALERT_SENDERS default** updated from individual Redfin addresses to `redfin.com,alerts@mls.example.com` (domain-level matching)
+- **ALERT_SENDERS default** updated from individual Redfin addresses to domain-level matching (e.g. `redfin.com`)
 - **Serialized bulk re-scoring** — `_RESCORE_WORKERS` reduced from 5 to 1; image-heavy listings (18-46 images each) exceed Anthropic's 10k tokens/minute org limit when run concurrently; serial execution avoids rate limiting
 - **Verdict/score consistency enforcement** in `_validate_ai_response()` — "Reject" always forces score=0; non-Reject verdicts always re-derived from score (80+=Strong Match, 60+=Worth Touring, 40+=Low Priority, >0=Weak Match); prevents filter chip mismatches
 - **Selector-first description extraction** — site-specific CSS selectors (`section#overview` for OneKey MLS, `div#house-info`/`.remarksContainer` for Redfin) tried before keyword-based fallback; prevents navigation/UI boilerplate from beating real descriptions

@@ -312,9 +312,15 @@ class TestFilteredRoutes:
         assert "Listings Analyzer" in res.text
 
     def test_no_auth_required(self, client):
-        """Both routes are public — no auth needed."""
+        """All filter routes are public — no auth needed."""
         assert client.get("/want-to-go").status_code == 200
         assert client.get("/toured").status_code == 200
+
+    def test_all_filter_routes_serve_dashboard(self, client):
+        for route in ["/non-reject", "/strong-match", "/worth-touring", "/reject"]:
+            res = client.get(route)
+            assert res.status_code == 200, f"{route} returned {res.status_code}"
+            assert "Listings Analyzer" in res.text
 
 
 class TestAddListingFromUrl:
