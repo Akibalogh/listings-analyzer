@@ -579,6 +579,7 @@ class TestManageScrapeDescriptions:
         "id": 1, "address": "10 Test St", "town": "Rye", "state": "NY",
         "zip_code": "10573", "mls_id": "123456",
         "listing_url": "https://example.com/listing", "description": None,
+        "year_built": 2000,
     })
     @patch("app.main.db.get_all_listing_ids", return_value=[1])
     @patch("app.main.settings")
@@ -597,6 +598,7 @@ class TestManageScrapeDescriptions:
 
     @patch("app.main.db.get_listing_by_id", return_value={
         "id": 2, "address": "20 Test", "listing_url": None, "description": None,
+        "year_built": 2000,
     })
     @patch("app.main.db.get_all_listing_ids", return_value=[2])
     @patch("app.main.settings")
@@ -619,6 +621,7 @@ class TestManageScrapeDescriptions:
         "id": 5, "address": "196 Old Army Rd", "town": "Scarsdale",
         "state": "NY", "zip_code": "10583", "mls_id": None,
         "listing_url": None, "description": None,
+        "year_built": 2000,
     })
     @patch("app.main.db.get_all_listing_ids", return_value=[5])
     @patch("app.main.settings")
@@ -638,6 +641,7 @@ class TestManageScrapeDescriptions:
     @patch("app.main.db.get_listing_by_id", return_value={
         "id": 3, "address": "30 Test", "listing_url": "https://example.com",
         "description": "Already has a description",
+        "year_built": 2000,
     })
     @patch("app.main.db.get_all_listing_ids", return_value=[3])
     @patch("app.main.settings")
@@ -656,6 +660,7 @@ class TestManageScrapeDescriptions:
     @patch("app.main.db.get_listing_by_id", return_value={
         "id": 1, "address": "10 Test", "listing_url": "https://example.com",
         "description": None, "town": "Rye", "state": "NY", "zip_code": "10573", "mls_id": "999",
+        "year_built": 2000,
     })
     @patch("app.main.db.get_all_listing_ids", return_value=[1])
     @patch("app.main.settings")
@@ -710,7 +715,7 @@ class TestManageScrapeDescriptions:
             "state": "NY", "zip_code": "10514", "mls_id": None,
             "listing_url": "https://www.redfin.com/NY/Chappaqua/19-Georgia-Ln/home/123",
             "description": "Nice house", "price": None, "bedrooms": None,
-            "bathrooms": None, "sqft": None,
+            "bathrooms": None, "sqft": None, "year_built": 2000,
         }
         res = client.post("/manage/scrape-descriptions", headers={"x-manage-key": "test-key"})
         assert res.status_code == 200
