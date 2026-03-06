@@ -285,7 +285,7 @@ def backfill_listing_address(
         )
 
 
-_INTEGER_COLUMNS = {"price", "sqft", "bedrooms", "bathrooms", "commute_minutes"}
+_INTEGER_COLUMNS = {"price", "sqft", "bedrooms", "bathrooms", "commute_minutes", "year_built"}
 
 
 def update_listing_fields_by_id(listing_id: int, **fields):
@@ -423,9 +423,9 @@ def save_listing(listing: ParsedListing, score: ScoringResult, email_id: int, en
             f"""INSERT INTO listings
             (source_email_id, address, town, state, zip_code, mls_id, price, sqft,
              bedrooms, bathrooms, property_type, listing_status, source_format,
-             listing_url, description,
+             listing_url, description, year_built, list_date,
              address_key, school_data_json, commute_minutes, commute_data_json)
-            VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})""",
+            VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})""",
             (
                 email_id,
                 listing.address,
@@ -442,6 +442,8 @@ def save_listing(listing: ParsedListing, score: ScoringResult, email_id: int, en
                 listing.source_format,
                 listing.listing_url,
                 listing.description,
+                listing.year_built,
+                listing.list_date,
                 enr.get("address_key"),
                 enr.get("school_data_json"),
                 enr.get("commute_minutes"),
@@ -538,6 +540,8 @@ def _migrate_add_columns():
         ("listings", "enriched_at", "TEXT"),
         ("listings", "tour_requested", "BOOLEAN DEFAULT FALSE"),
         ("listings", "passed", "BOOLEAN DEFAULT FALSE"),
+        ("listings", "year_built", "INTEGER"),
+        ("listings", "list_date", "TEXT"),
         ("scores", "evaluation_method", "TEXT DEFAULT 'deterministic'"),
         ("scores", "criteria_version", "INTEGER"),
         ("scores", "ai_reasoning", "TEXT"),

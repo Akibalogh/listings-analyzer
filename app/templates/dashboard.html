@@ -1656,6 +1656,8 @@ function buildCard(l) {
   /* Stats row */
   var statsArr = [buildStat('Price', price), buildStat('Size', sqft + ' sqft'), buildStat('Beds', beds), buildStat('Baths', baths)];
   if (priceSqft) statsArr.push(buildStat('$/sqft', priceSqft));
+  if (l.year_built) statsArr.push(buildStat('Built', String(l.year_built)));
+  if (l.list_date) statsArr.push(buildStat('Listed', l.list_date));
   detailInner.appendChild(el('div', {className: 'card-stats'}, statsArr));
 
   /* Score bar */

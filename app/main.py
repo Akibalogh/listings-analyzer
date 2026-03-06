@@ -555,7 +555,7 @@ async def add_listing_from_url(request: Request):
     )
 
     # Try to extract structured data from the page
-    price = beds = baths = sqft = None
+    price = beds = baths = sqft = year_built = list_date = None
     try:
         with httpx.Client(timeout=10, follow_redirects=True, headers={
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
@@ -568,6 +568,8 @@ async def add_listing_from_url(request: Request):
                     beds = stats.get("bedrooms")
                     baths = stats.get("bathrooms")
                     sqft = stats.get("sqft")
+                    year_built = stats.get("year_built")
+                    list_date = stats.get("list_date")
     except Exception:
         pass
 
@@ -582,6 +584,8 @@ async def add_listing_from_url(request: Request):
         bedrooms=beds,
         bathrooms=baths,
         sqft=sqft,
+        year_built=year_built,
+        list_date=list_date,
         listing_url=resolved_url,
         description=description,
     )
@@ -689,6 +693,8 @@ def _build_listing_data(listing_row: dict) -> dict:
         "property_type": listing_row.get("property_type"),
         "listing_status": listing_row.get("listing_status"),
         "description": listing_row.get("description"),
+        "year_built": listing_row.get("year_built"),
+        "list_date": listing_row.get("list_date"),
     }
 
     # Add enrichment data (school quality + commute time)

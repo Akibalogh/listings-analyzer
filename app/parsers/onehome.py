@@ -510,6 +510,12 @@ _STATS_BEDS_RE = re.compile(r"(\d+)\s*(?:bed(?:room)?s?|bd)", re.IGNORECASE)
 _STATS_BATHS_RE = re.compile(r"(\d+)\s*(?:bath(?:room)?s?|ba)", re.IGNORECASE)
 _STATS_SQFT_RE = re.compile(r"([\d,]+)\s*(?:sq\.?\s*ft|sqft|square\s*feet)", re.IGNORECASE)
 _MIN_HOME_PRICE = 50_000  # ignore prices below this (taxes, fees, etc.)
+_YEAR_BUILT_RE = re.compile(r"(?:year\s*built|built\s*in|constructed)\s*:?\s*(\d{4})", re.IGNORECASE)
+_LIST_DATE_RE = re.compile(
+    r"(?:list(?:ed|ing)\s*(?:date|on|since)?|on\s*(?:the\s*)?market(?:\s*since)?|date\s*listed)\s*:?\s*"
+    r"(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\w+\s+\d{1,2},?\s+\d{4}|\d{4}-\d{2}-\d{2})",
+    re.IGNORECASE,
+)
 
 
 def _search_redfin_url(
@@ -701,6 +707,18 @@ def _extract_property_stats(html: str) -> dict | None:
         if sqft % 500 != 0:
             result["sqft"] = sqft
             break
+
+    # Year built
+    year_match = _YEAR_BUILT_RE.search(text)
+    if year_match:
+        year = int(year_match.group(1))
+        if 1700 <= year <= 2030:
+            result["year_built"] = year
+
+    # List date
+    list_date_match = _LIST_DATE_RE.search(text)
+    if list_date_match:
+        result["list_date"] = list_date_match.group(1).strip()
 
     return result if result else None
 

@@ -17,6 +17,8 @@ class ParsedListing(BaseModel):
     listing_status: str | None = None
     listing_url: str | None = None
     description: str | None = None  # Full listing description (scraped)
+    year_built: int | None = None
+    list_date: str | None = None  # ISO date string (YYYY-MM-DD)
     source_format: str = "unknown"
 
 

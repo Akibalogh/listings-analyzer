@@ -122,6 +122,8 @@ def poll_once() -> list[dict]:
                     listing.bedrooms = listing.bedrooms or structured.get("bedrooms")
                     listing.bathrooms = listing.bathrooms or structured.get("bathrooms")
                     listing.sqft = listing.sqft or structured.get("sqft")
+                    listing.year_built = listing.year_built or structured.get("year_built")
+                    listing.list_date = listing.list_date or structured.get("list_date")
 
             # --- Enrichment ---
             enrichment = _enrich_listing(listing, address_key)
@@ -259,6 +261,8 @@ def _evaluate_listing(
         "property_type": listing.property_type,
         "listing_status": listing.listing_status,
         "description": listing.description,
+        "year_built": listing.year_built,
+        "list_date": listing.list_date,
     }
 
     # Add enrichment data so AI can factor in school quality + commute
