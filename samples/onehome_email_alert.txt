@@ -1,5 +1,5 @@
 # Sample OneHome/Matrix MLS Email Alert
-# Source: OneKey MLS NY email alert (mlsalerts.example.com)
+# Source: OneKey MLS NY email alert
 # Date: 2026-02-27
 # Contains: 7 listings
 

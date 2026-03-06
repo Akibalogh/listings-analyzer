@@ -1,7 +1,7 @@
 """Parser for OneHome/Matrix MLS email alerts.
 
 Extracts listings from the HTML structure used by OneKey MLS NY
-(mlsalerts.example.com). The email contains listing cards with
+email alerts. The email contains listing cards with
 predictable CSS classes.
 
 Also provides scrape_listing_description() to fetch the full listing

@@ -75,7 +75,7 @@ You want:
 - Processes each email once, marks with `ListingsAnalyzer/Processed` label
 
 ### Known Input Format: OneHome/Matrix MLS Email
-Primary alert source is OneKey MLS NY via `mlsalerts.example.com`.
+Primary alert source is OneKey MLS NY email alerts.
 
 **HTML structure** (reliable CSS selectors):
 - Each listing wrapped in `<!--@Record:{ID}@-->` comment + `<DIV class="multiLineDisplay">`
