@@ -1319,37 +1319,52 @@ def manage_scrape_descriptions(request: Request):
             logger.error(f"Structured data backfill failed for listing #{lid}: {e}")
             errors.append(f"#{lid} structured data: {e}")
 
-    # Phase 4: backfill year_built/list_date for listings with URL but missing these fields
+    # Phase 4: backfill year_built/list_date from stored descriptions or page scrape
     import httpx
+    from app.parsers.onehome import _YEAR_BUILT_RE, _LIST_DATE_RE
     from app.parsers.onehome import _extract_property_stats as extract_stats
 
     year_built_backfilled = 0
     for lid in listing_ids:
         listing = db.get_listing_by_id(lid)
-        if not listing or not listing.get("listing_url"):
+        if not listing or listing.get("year_built"):
             continue
-        if listing.get("year_built"):
-            continue
-        try:
-            with httpx.Client(timeout=10, follow_redirects=True, headers={
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-            }) as client:
-                resp = client.get(listing["listing_url"])
-                if resp.status_code == 200:
-                    stats = extract_stats(resp.text)
-                    if stats:
-                        updates = {}
-                        if stats.get("year_built"):
-                            updates["year_built"] = stats["year_built"]
-                        if stats.get("list_date"):
-                            updates["list_date"] = stats["list_date"]
-                        if updates:
-                            db.update_listing_fields_by_id(lid, **updates)
-                            year_built_backfilled += 1
-                            logger.info(f"Backfilled year_built/list_date for listing #{lid}: {updates}")
-        except Exception as e:
-            logger.error(f"Year built backfill failed for listing #{lid}: {e}")
-            errors.append(f"#{lid} year_built: {e}")
+
+        updates = {}
+
+        # Try extracting from stored description first (no network needed)
+        desc = listing.get("description") or ""
+        yb_match = _YEAR_BUILT_RE.search(desc)
+        if yb_match:
+            year = int(yb_match.group(1))
+            if 1700 <= year <= 2030:
+                updates["year_built"] = year
+        ld_match = _LIST_DATE_RE.search(desc)
+        if ld_match:
+            updates["list_date"] = ld_match.group(1).strip()
+
+        # Fallback: fetch listing page if we have a URL
+        if not updates and listing.get("listing_url"):
+            try:
+                with httpx.Client(timeout=10, follow_redirects=True, headers={
+                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+                }) as client:
+                    resp = client.get(listing["listing_url"])
+                    if resp.status_code == 200:
+                        stats = extract_stats(resp.text)
+                        if stats:
+                            if stats.get("year_built"):
+                                updates["year_built"] = stats["year_built"]
+                            if stats.get("list_date"):
+                                updates["list_date"] = stats["list_date"]
+            except Exception as e:
+                logger.error(f"Year built backfill failed for listing #{lid}: {e}")
+                errors.append(f"#{lid} year_built: {e}")
+
+        if updates:
+            db.update_listing_fields_by_id(lid, **updates)
+            year_built_backfilled += 1
+            logger.info(f"Backfilled year_built/list_date for listing #{lid}: {updates}")
 
     # Trigger rescore if we scraped descriptions or backfilled data
     rescore_started = False
