@@ -660,6 +660,67 @@ class TestExtractPropertyStats:
         stats = _extract_property_stats(html)
         assert stats is None
 
+    def test_extracts_year_built_from_text(self):
+        html = """<html><body>
+        <div>$1,250,000</div>
+        <div>4 Bedrooms | 2 Bathrooms | 2,800 Sq Ft</div>
+        <div>Year Built: 1958</div>
+        </body></html>"""
+        stats = _extract_property_stats(html)
+        assert stats is not None
+        assert stats["year_built"] == 1958
+
+    def test_extracts_year_built_from_json_ld(self):
+        """YearBuilt in JSON-LD inside <script> tags should still be found."""
+        html = """<html><body>
+        <script type="application/ld+json">{"YearBuilt": "1972"}</script>
+        <div>$1,499,000 4 beds 3 bath 2,800 sqft</div>
+        </body></html>"""
+        stats = _extract_property_stats(html)
+        assert stats is not None
+        assert stats["year_built"] == 1972
+
+    def test_extracts_list_date_from_json_ld(self):
+        """OnMarketDate in JSON-LD should be extracted as list_date."""
+        html = """<html><body>
+        <script>{"OnMarketDate": "2026-02-15T00:00:00"}</script>
+        <div>$1,300,000 3 beds 2 bath 2,100 sqft</div>
+        </body></html>"""
+        stats = _extract_property_stats(html)
+        assert stats is not None
+        assert stats["list_date"] == "2026-02-15"
+
+    def test_extracts_list_date_from_visible_text(self):
+        html = """<html><body>
+        <div>$1,100,000</div>
+        <div>3 bd 2 ba 1,800 sqft</div>
+        <div>Listed on: 01/15/2026</div>
+        </body></html>"""
+        stats = _extract_property_stats(html)
+        assert stats is not None
+        assert stats["list_date"] == "01/15/2026"
+
+    def test_year_built_rejects_invalid_years(self):
+        html = """<html><body>
+        <div>$1,250,000</div>
+        <div>Built in 1650</div>
+        </body></html>"""
+        stats = _extract_property_stats(html)
+        assert stats is not None
+        assert "year_built" not in stats
+
+    def test_compact_stats_still_extracts_year_built(self):
+        """Compact stats pattern should not prevent year_built extraction."""
+        html = """<html><body>
+        <div>$1,275,000 3 beds 2 bath 2,167 sqft</div>
+        <script>{"YearBuilt": "2005", "OnMarketDate": "2026-01-20T00:00:00"}</script>
+        </body></html>"""
+        stats = _extract_property_stats(html)
+        assert stats is not None
+        assert stats["price"] == 1275000
+        assert stats["year_built"] == 2005
+        assert stats["list_date"] == "2026-01-20"
+
 
 class TestRedinFallsBackToOneKeyMLSSearch:
     """Tests for Redfin URLs falling back to OneKey MLS DDG search when no MLS ID."""

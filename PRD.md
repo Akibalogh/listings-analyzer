@@ -233,6 +233,9 @@ Mobile-first single-page app served at `/` (`app/templates/dashboard.html`).
 - "Want to Go" badge (blue pill, if flagged for tour request)
 
 ### Listing Cards (Expanded)
+- Stats row: Price, Size, Beds, Baths, **Year Built**, **Days on Market (DOM)**, $/sqft
+- Year Built extracted from listing pages or OneKeyMLS JSON-LD (`YearBuilt` field)
+- DOM calculated from `list_date` (real on-market date from OneKeyMLS `OnMarketDate`)
 - AI-generated **property summary** (structured factor analysis with ✅/⚠️/❓ indicators)
 - Falls back to hard results checklist + concerns + AI reasoning for older listings without property_summary
 - "Want to Go" / "✓ Want to Go — click to cancel" toggle *(auth-only)*
@@ -279,6 +282,8 @@ Mobile-first single-page app served at `/` (`app/templates/dashboard.html`).
 - image_urls_json (TEXT, nullable — JSON array)
 - **toured (BOOLEAN DEFAULT FALSE)**
 - **tour_requested (BOOLEAN DEFAULT FALSE)** — "Want to Go" flag
+- **year_built (INTEGER, nullable)** — extracted from listing page or OneKeyMLS JSON-LD
+- **list_date (TEXT, nullable)** — on-market date (YYYY-MM-DD); extracted from OneKeyMLS JSON-LD `OnMarketDate`
 - created_at
 
 ### Table: scores
