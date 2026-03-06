@@ -1656,7 +1656,12 @@ function buildCard(l) {
   /* Stats row */
   var statsArr = [buildStat('Price', price), buildStat('Size', sqft + ' sqft'), buildStat('Beds', beds), buildStat('Baths', baths)];
   if (l.year_built) statsArr.push(buildStat('Built', String(l.year_built)));
-  if (l.list_date) statsArr.push(buildStat('Listed', l.list_date));
+  var domSource = l.list_date || l.created_at;
+  if (domSource) {
+    var listedDate = new Date(domSource);
+    var dom = Math.floor((Date.now() - listedDate.getTime()) / 86400000);
+    if (dom >= 0) statsArr.push(buildStat('DOM', dom + 'd'));
+  }
   if (priceSqft) statsArr.push(buildStat('$/sqft', priceSqft));
   detailInner.appendChild(el('div', {className: 'card-stats'}, statsArr));
 
