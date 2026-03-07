@@ -1800,6 +1800,16 @@ def _enrich_all(clear_bogus: bool = False, clear_bogus_commute: bool = False):
                     enrichment["station_json"] = json.dumps({"station": None, "source": "osm_static"})
                     changed = True
 
+            # Persist lat/lng from geocode cache (populated by power_line/flood_zone/station calls)
+            if listing.get("lat") is None:
+                from app.enrichment import _geocode_cache
+                cache_key = f"{(listing.get('address') or '').lower()}|{(listing.get('town') or '').lower()}|{(listing.get('state') or '').lower()}"
+                coords = _geocode_cache.get(cache_key)
+                if coords:
+                    enrichment["lat"] = coords["lat"]
+                    enrichment["lng"] = coords["lon"]
+                    changed = True
+
             # Description parsing: garage, HOA, pool, basement (pure regex, no API)
             desc = listing.get("description")
             if desc:

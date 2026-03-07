@@ -1279,15 +1279,15 @@ def parse_hoa_amount(description: str | None) -> dict:
     text = description.lower()
 
     # Explicit no-HOA signals
-    if re.search(r"\bno hoa\b|\bno association fee\b|\bhoa:?\s*\$\s*0\b", text):
+    if re.search(r"\bno hoa\b|\bno association fee\b|\bhoa\s*(?:fee|dues|is|:)?\s*\$\s*0\b", text):
         return {"hoa_monthly": 0, "hoa_annual": None, "source": "description_parse"}
 
-    # Monthly patterns: "$350/mo", "HOA $350", "$350 monthly hoa"
+    # Monthly patterns: "$350/mo", "HOA $350"
+    # IMPORTANT: "$X,XXX hoa" removed — it false-positives on "property taxes $1,992 hoa dues $0"
     monthly_patterns = [
         r"\$\s*(\d[\d,]*)\s*/\s*(?:mo|month)\b",
         r"\$\s*(\d[\d,]*)\s*per\s+month",
         r"\bhoa\s*(?:fee|dues|is|:)?\s*\$\s*(\d[\d,]*)\b",
-        r"\$\s*(\d[\d,]*)\s*(?:monthly\s+)?(?:hoa|association\s+fee|dues)\b",
         r"\bmonthly\s+(?:hoa|dues|association\s+fee)\s*(?:is|of|:)?\s*\$\s*(\d[\d,]*)\b",
         r"\bassociation\s+fees?\s*(?:of|is|:)?\s*\$\s*(\d[\d,]*)\s*(?:/mo|/month|per\s+month)\b",
     ]

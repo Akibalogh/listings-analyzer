@@ -1237,6 +1237,20 @@ class TestParseHoaAmount:
         result = parse_hoa_amount("HOA: $0 — no association fees!")
         assert result["hoa_monthly"] == 0
 
+    def test_property_tax_not_confused_with_hoa(self):
+        """Dollar amount before 'hoa' that belongs to property taxes should not be matched."""
+        from app.enrichment import parse_hoa_amount
+        result = parse_hoa_amount(
+            "principal and interest $6,937 property taxes $1,992 hoa dues $0 home insurance $220"
+        )
+        assert result["hoa_monthly"] == 0  # should match "hoa dues $0", not "$1,992"
+
+    def test_hoa_dues_zero_explicit(self):
+        """'hoa dues $0' should be detected as no HOA fee."""
+        from app.enrichment import parse_hoa_amount
+        result = parse_hoa_amount("Monthly: $1,200 mortgage, hoa dues $0, insurance $150")
+        assert result["hoa_monthly"] == 0
+
 
 # ---------------------------------------------------------------------------
 # parse_pool_flag tests
