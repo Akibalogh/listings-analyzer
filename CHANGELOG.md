@@ -7,6 +7,9 @@ All notable changes to Listings Analyzer are documented here.
 ## [Unreleased]
 
 ### Added
+- **Description parsing: garage, HOA, pool, basement** — Four new regex-based parsers in `enrichment.py`: `parse_garage_count()` (count + attached/detached/carport), `parse_hoa_amount()` (monthly/annual fees), `parse_pool_flag()` (inground/above-ground/community), `parse_basement()` (finished/partially finished/unfinished/walk-out). All pure code, no API calls. 7 new DB columns: `garage_count`, `garage_type`, `hoa_monthly`, `has_pool`, `pool_type`, `has_basement`, `basement_type`. Wired into `_enrich_all()` for automatic backfill and `_build_listing_data()` for AI scoring.
+- **Criteria v52** — structured data references for garage, pool, basement, HOA. Expanded amenities section with per-signal scoring. Basement: +5 walk-out/finished, +2 partially finished, 0 unfinished, -3 slab/no basement. Pool: -5 inground, -3 above-ground, 0 no pool/community.
+- **31 new tests** — `TestParseGarageCount` (8), `TestParseHoaAmount` (7), `TestParsePoolFlag` (7), `TestParseBasement` (9). 133 total enrichment tests passing.
 - **Metro-North station proximity** — `fetch_station_proximity()` in `enrichment.py` finds nearest Metro-North station using a static 61-station dataset (Harlem, Hudson, New Haven lines). No API call at runtime. Returns station name, distance_m, walk_minutes (at 5km/h). `station_json TEXT` column added. Passed to AI scorer as `nearest_metro_north`.
 - **Criteria v50** — flood zone penalty adjusted: Zone AE/VE -20 (was -15), Zone X 500-year 0 (was -5).
 - **Criteria v51** — Metro-North station walking distance scoring: +5 under 10 min walk, 0 at 10–20 min, -5 over 20 min.

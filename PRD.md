@@ -307,6 +307,13 @@ Mobile-first single-page app served at `/` (`app/templates/dashboard.html`).
 - **power_line_json (TEXT, nullable)** — OSM Overpass result: nearest transmission line/tower distance/type/voltage within 300m
 - **flood_zone_json (TEXT, nullable)** — FEMA NFHL result: fld_zone, zone_subty, sfha flag
 - **station_json (TEXT, nullable)** — nearest Metro-North station: name, distance_m, walk_minutes
+- **garage_count (INTEGER, nullable)** — parsed from description: number of garage stalls (0 = explicitly no garage)
+- **garage_type (TEXT, nullable)** — "attached", "detached", "carport", or null
+- **hoa_monthly (INTEGER, nullable)** — monthly HOA fee in dollars, parsed from description (0 = no HOA)
+- **has_pool (BOOLEAN, nullable)** — pool on property, parsed from description
+- **pool_type (TEXT, nullable)** — "inground", "above_ground", "community", or null
+- **has_basement (BOOLEAN, nullable)** — basement present, parsed from description
+- **basement_type (TEXT, nullable)** — "finished", "partially_finished", "unfinished", "walk_out", or null
 - created_at
 
 ### Table: scores

@@ -1204,3 +1204,192 @@ def fetch_property_tax_orpts(
     except Exception as e:
         logger.debug(f"ORPTS property tax lookup failed for {address}, {town}: {e}")
         return None
+
+
+# ---------------------------------------------------------------------------
+# Structured description parsing (no API — regex on listing text)
+# ---------------------------------------------------------------------------
+
+
+def parse_garage_count(description: str | None) -> dict:
+    """Parse garage stall count from listing description text.
+
+    Looks for patterns like "2-car garage", "attached 2 car", "3 car garage",
+    "1-car attached", "no garage", "carport", etc.
+
+    Returns:
+        dict with keys:
+          - garage_count (int | None): number of stalls, 0 if explicitly no garage
+          - garage_type (str | None): "attached", "detached", "carport", or None
+          - source (str): "description_parse"
+    """
+    if not description:
+        return {"garage_count": None, "garage_type": None, "source": "description_parse"}
+
+    text = description.lower()
+
+    # Explicit no-garage signals
+    if re.search(r"\bno garage\b|\bwithout garage\b|\bno attached garage\b", text):
+        return {"garage_count": 0, "garage_type": None, "source": "description_parse"}
+
+    # Carport (not a full garage)
+    if re.search(r"\bcarport\b", text) and not re.search(r"\bgarage\b", text):
+        return {"garage_count": 1, "garage_type": "carport", "source": "description_parse"}
+
+    # Numeric patterns: "2-car garage", "2 car garage", "3-car attached", etc.
+    m = re.search(
+        r"\b([1-9])\s*[-\u2013]?\s*car\b(?:\s+(?:attached|detached))?\s*garage\b"
+        r"|\bgarage\s+(?:with\s+)?([1-9])\s*[-\u2013]?\s*car\b"
+        r"|\b([1-9])\s*[-\u2013]?\s*car\s+(?:attached|detached)\b",
+        text,
+    )
+    if m:
+        count = int(next(g for g in m.groups() if g is not None))
+        garage_type = None
+        if "attached" in text[max(0, m.start() - 20) : m.end() + 20]:
+            garage_type = "attached"
+        elif "detached" in text[max(0, m.start() - 20) : m.end() + 20]:
+            garage_type = "detached"
+        return {"garage_count": count, "garage_type": garage_type, "source": "description_parse"}
+
+    # Generic "garage" without count — assume 1
+    if re.search(r"\bgarage\b", text):
+        garage_type = None
+        if re.search(r"\battached\b", text):
+            garage_type = "attached"
+        elif re.search(r"\bdetached\b", text):
+            garage_type = "detached"
+        return {"garage_count": 1, "garage_type": garage_type, "source": "description_parse"}
+
+    return {"garage_count": None, "garage_type": None, "source": "description_parse"}
+
+
+def parse_hoa_amount(description: str | None) -> dict:
+    """Parse monthly HOA fee amount from listing description.
+
+    Returns:
+        dict with keys:
+          - hoa_monthly (int | None): monthly fee in dollars, 0 if explicitly no HOA
+          - hoa_annual (int | None): annual fee if stated as annual
+          - source (str): "description_parse"
+    """
+    if not description:
+        return {"hoa_monthly": None, "hoa_annual": None, "source": "description_parse"}
+
+    text = description.lower()
+
+    # Explicit no-HOA signals
+    if re.search(r"\bno hoa\b|\bno association fee\b|\bhoa:?\s*\$\s*0\b", text):
+        return {"hoa_monthly": 0, "hoa_annual": None, "source": "description_parse"}
+
+    # Monthly patterns: "$350/mo", "HOA $350", "$350 monthly hoa"
+    monthly_patterns = [
+        r"\$\s*(\d[\d,]*)\s*/\s*(?:mo|month)\b",
+        r"\$\s*(\d[\d,]*)\s*per\s+month",
+        r"\bhoa\s*(?:fee|dues|is|:)?\s*\$\s*(\d[\d,]*)\b",
+        r"\$\s*(\d[\d,]*)\s*(?:monthly\s+)?(?:hoa|association\s+fee|dues)\b",
+        r"\bmonthly\s+(?:hoa|dues|association\s+fee)\s*(?:is|of|:)?\s*\$\s*(\d[\d,]*)\b",
+        r"\bassociation\s+fees?\s*(?:of|is|:)?\s*\$\s*(\d[\d,]*)\s*(?:/mo|/month|per\s+month)\b",
+    ]
+    for pat in monthly_patterns:
+        m = re.search(pat, text)
+        if m:
+            # Skip if followed by annual suffix (let annual patterns handle it)
+            end_pos = m.end()
+            after = text[end_pos:end_pos + 20]
+            if re.match(r"\s*(?:/\s*(?:yr|year)|per\s+year|annually)", after):
+                continue
+            amount = int(next(g for g in m.groups() if g is not None).replace(",", ""))
+            if 10 <= amount <= 5000:
+                return {"hoa_monthly": amount, "hoa_annual": None, "source": "description_parse"}
+
+    # Annual patterns: "$3,600/year"
+    annual_patterns = [
+        r"\$\s*(\d[\d,]*)\s*/\s*(?:yr|year)\b",
+        r"\$\s*(\d[\d,]*)\s*(?:per\s+year|annually)\b",
+        r"\bhoa\s*(?:fee|dues|is|:)?\s*\$\s*(\d[\d,]*)\s*(?:per\s+year|annually|/yr|/year)\b",
+    ]
+    for pat in annual_patterns:
+        m = re.search(pat, text)
+        if m:
+            amount = int(next(g for g in m.groups() if g is not None).replace(",", ""))
+            if 100 <= amount <= 60000:
+                return {"hoa_monthly": None, "hoa_annual": amount, "source": "description_parse"}
+
+    return {"hoa_monthly": None, "hoa_annual": None, "source": "description_parse"}
+
+
+def parse_pool_flag(description: str | None) -> dict:
+    """Detect pool presence from listing description.
+
+    Returns:
+        dict with keys:
+          - has_pool (bool | None): True/False/None if unknown
+          - pool_type (str | None): "inground", "above_ground", "community", or None
+          - source (str): "description_parse"
+    """
+    if not description:
+        return {"has_pool": None, "pool_type": None, "source": "description_parse"}
+
+    text = description.lower()
+
+    # Negative: community/HOA pool (not on property)
+    if re.search(r"\bcommunity\s+pool\b|\bhoa\s+pool\b|\bclub(?:house)?\s+pool\b", text):
+        return {"has_pool": False, "pool_type": "community", "source": "description_parse"}
+
+    # Above-ground
+    if re.search(r"\babove[\s-]ground\s+pool\b|\babove\s+grade\s+pool\b", text):
+        return {"has_pool": True, "pool_type": "above_ground", "source": "description_parse"}
+
+    # In-ground (explicit)
+    if re.search(r"\bin[\s-]ground\s+pool\b|\binground\s+pool\b", text):
+        return {"has_pool": True, "pool_type": "inground", "source": "description_parse"}
+
+    # Generic pool mention — default to inground
+    if re.search(r"\bswimming\s+pool\b|\bpool\b", text):
+        # Exclude false positives: "pool table", "car pool", "pool of"
+        if not re.search(r"\bpool\s+table\b|\bcar\s*pool\b|\bpool\s+of\b", text):
+            return {"has_pool": True, "pool_type": "inground", "source": "description_parse"}
+
+    return {"has_pool": False, "pool_type": None, "source": "description_parse"}
+
+
+def parse_basement(description: str | None) -> dict:
+    """Detect basement presence and finish level from listing description.
+
+    Returns:
+        dict with keys:
+          - has_basement (bool | None): True/False/None
+          - basement_type (str | None): "finished", "partially_finished", "unfinished", "walk_out", or None
+          - source (str): "description_parse"
+    """
+    if not description:
+        return {"has_basement": None, "basement_type": None, "source": "description_parse"}
+
+    text = description.lower()
+
+    # Explicit no-basement signals
+    if re.search(r"\bno basement\b|\bslab foundation\b|\bslab\s+on\s+grade\b|\bcrawl\s*space\b", text):
+        return {"has_basement": False, "basement_type": None, "source": "description_parse"}
+
+    # Walk-out basement (most desirable)
+    if re.search(r"\bwalk[\s-]?out\s+basement\b|\bwalkout\s+basement\b|\bwalk[\s-]?out\s+lower\b", text):
+        return {"has_basement": True, "basement_type": "walk_out", "source": "description_parse"}
+
+    # Partially finished (check BEFORE finished to avoid false match on "partially finished")
+    if re.search(r"\bpartially?\s+finished\s+basement\b|\bhalf\s+finished\s+basement\b|\bpartial(?:ly)?\s+finished\s+(?:lower|basement)\b", text):
+        return {"has_basement": True, "basement_type": "partially_finished", "source": "description_parse"}
+
+    # Finished basement
+    if re.search(r"\bfinished\s+basement\b|\bfully\s+finished\s+(?:lower|basement)\b|\bbasement.*finished\b", text):
+        return {"has_basement": True, "basement_type": "finished", "source": "description_parse"}
+
+    # Unfinished basement
+    if re.search(r"\bunfinished\s+basement\b|\bfull\s+basement\b|\bbasement\s+(?:with\s+)?(?:utility|storage|laundry|mechanicals)\b", text):
+        return {"has_basement": True, "basement_type": "unfinished", "source": "description_parse"}
+
+    # Generic basement mention
+    if re.search(r"\bbasement\b|\blower\s+level\b|\bfinished\s+lower\b", text):
+        return {"has_basement": True, "basement_type": None, "source": "description_parse"}
+
+    return {"has_basement": None, "basement_type": None, "source": "description_parse"}

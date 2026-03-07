@@ -1137,3 +1137,209 @@ class TestFetchStationProximity:
         for s in _METRO_NORTH_STATIONS:
             assert 40.0 < s["lat"] < 42.5, f"{s['name']} lat out of range"
             assert -75.0 < s["lon"] < -72.0, f"{s['name']} lon out of range"
+
+
+# ---------------------------------------------------------------------------
+# parse_garage_count tests
+# ---------------------------------------------------------------------------
+
+
+class TestParseGarageCount:
+    """Tests for parse_garage_count()."""
+
+    def test_none_description(self):
+        from app.enrichment import parse_garage_count
+        result = parse_garage_count(None)
+        assert result["garage_count"] is None
+        assert result["garage_type"] is None
+
+    def test_two_car_attached_garage(self):
+        from app.enrichment import parse_garage_count
+        result = parse_garage_count("Beautiful home with 2-car attached garage and large yard.")
+        assert result["garage_count"] == 2
+        assert result["garage_type"] == "attached"
+
+    def test_three_car_garage(self):
+        from app.enrichment import parse_garage_count
+        result = parse_garage_count("Oversized 3 car garage with workshop space.")
+        assert result["garage_count"] == 3
+
+    def test_no_garage(self):
+        from app.enrichment import parse_garage_count
+        result = parse_garage_count("Charming home with no garage but ample driveway parking.")
+        assert result["garage_count"] == 0
+
+    def test_carport_only(self):
+        from app.enrichment import parse_garage_count
+        result = parse_garage_count("Property features a carport and storage shed.")
+        assert result["garage_count"] == 1
+        assert result["garage_type"] == "carport"
+
+    def test_generic_garage(self):
+        from app.enrichment import parse_garage_count
+        result = parse_garage_count("Home with detached garage on a quiet street.")
+        assert result["garage_count"] == 1
+        assert result["garage_type"] == "detached"
+
+    def test_no_mention(self):
+        from app.enrichment import parse_garage_count
+        result = parse_garage_count("Lovely 4 bedroom colonial near town center.")
+        assert result["garage_count"] is None
+
+    def test_one_car_detached(self):
+        from app.enrichment import parse_garage_count
+        result = parse_garage_count("1-car detached garage with extra storage.")
+        assert result["garage_count"] == 1
+        assert result["garage_type"] == "detached"
+
+
+# ---------------------------------------------------------------------------
+# parse_hoa_amount tests
+# ---------------------------------------------------------------------------
+
+
+class TestParseHoaAmount:
+    """Tests for parse_hoa_amount()."""
+
+    def test_none_description(self):
+        from app.enrichment import parse_hoa_amount
+        result = parse_hoa_amount(None)
+        assert result["hoa_monthly"] is None
+
+    def test_no_hoa(self):
+        from app.enrichment import parse_hoa_amount
+        result = parse_hoa_amount("Private home, no HOA restrictions.")
+        assert result["hoa_monthly"] == 0
+
+    def test_monthly_hoa(self):
+        from app.enrichment import parse_hoa_amount
+        result = parse_hoa_amount("Community features include pool. HOA $350/month.")
+        assert result["hoa_monthly"] == 350
+
+    def test_hoa_fee_dollar(self):
+        from app.enrichment import parse_hoa_amount
+        result = parse_hoa_amount("HOA fee $275 includes landscaping and snow removal.")
+        assert result["hoa_monthly"] == 275
+
+    def test_annual_hoa(self):
+        from app.enrichment import parse_hoa_amount
+        result = parse_hoa_amount("Association fee of $3,600/year covers exterior maintenance.")
+        assert result["hoa_annual"] == 3600
+
+    def test_no_mention(self):
+        from app.enrichment import parse_hoa_amount
+        result = parse_hoa_amount("Beautiful colonial on 0.5 acres in Scarsdale.")
+        assert result["hoa_monthly"] is None
+        assert result["hoa_annual"] is None
+
+    def test_hoa_zero(self):
+        from app.enrichment import parse_hoa_amount
+        result = parse_hoa_amount("HOA: $0 — no association fees!")
+        assert result["hoa_monthly"] == 0
+
+
+# ---------------------------------------------------------------------------
+# parse_pool_flag tests
+# ---------------------------------------------------------------------------
+
+
+class TestParsePoolFlag:
+    """Tests for parse_pool_flag()."""
+
+    def test_none_description(self):
+        from app.enrichment import parse_pool_flag
+        result = parse_pool_flag(None)
+        assert result["has_pool"] is None
+
+    def test_inground_pool(self):
+        from app.enrichment import parse_pool_flag
+        result = parse_pool_flag("Backyard features an in-ground pool and patio.")
+        assert result["has_pool"] is True
+        assert result["pool_type"] == "inground"
+
+    def test_above_ground_pool(self):
+        from app.enrichment import parse_pool_flag
+        result = parse_pool_flag("Large deck with above-ground pool.")
+        assert result["has_pool"] is True
+        assert result["pool_type"] == "above_ground"
+
+    def test_community_pool(self):
+        from app.enrichment import parse_pool_flag
+        result = parse_pool_flag("HOA includes access to community pool and tennis courts.")
+        assert result["has_pool"] is False
+        assert result["pool_type"] == "community"
+
+    def test_pool_table_false_positive(self):
+        from app.enrichment import parse_pool_flag
+        result = parse_pool_flag("Game room with pool table and wet bar.")
+        assert result["has_pool"] is False
+
+    def test_no_pool_mentioned(self):
+        from app.enrichment import parse_pool_flag
+        result = parse_pool_flag("Quiet neighborhood with mature trees and gardens.")
+        assert result["has_pool"] is False
+
+    def test_swimming_pool(self):
+        from app.enrichment import parse_pool_flag
+        result = parse_pool_flag("Heated swimming pool surrounded by flagstone patio.")
+        assert result["has_pool"] is True
+        assert result["pool_type"] == "inground"
+
+
+# ---------------------------------------------------------------------------
+# parse_basement tests
+# ---------------------------------------------------------------------------
+
+
+class TestParseBasement:
+    """Tests for parse_basement()."""
+
+    def test_none_description(self):
+        from app.enrichment import parse_basement
+        result = parse_basement(None)
+        assert result["has_basement"] is None
+
+    def test_finished_basement(self):
+        from app.enrichment import parse_basement
+        result = parse_basement("Spacious finished basement with rec room and full bath.")
+        assert result["has_basement"] is True
+        assert result["basement_type"] == "finished"
+
+    def test_walkout_basement(self):
+        from app.enrichment import parse_basement
+        result = parse_basement("Walk-out basement opens to backyard with patio.")
+        assert result["has_basement"] is True
+        assert result["basement_type"] == "walk_out"
+
+    def test_unfinished_basement(self):
+        from app.enrichment import parse_basement
+        result = parse_basement("Full basement with utility and laundry hookups.")
+        assert result["has_basement"] is True
+        assert result["basement_type"] == "unfinished"
+
+    def test_partially_finished(self):
+        from app.enrichment import parse_basement
+        result = parse_basement("Partially finished basement with home office.")
+        assert result["has_basement"] is True
+        assert result["basement_type"] == "partially_finished"
+
+    def test_no_basement_slab(self):
+        from app.enrichment import parse_basement
+        result = parse_basement("Ranch home on slab foundation with vaulted ceilings.")
+        assert result["has_basement"] is False
+        assert result["basement_type"] is None
+
+    def test_crawl_space(self):
+        from app.enrichment import parse_basement
+        result = parse_basement("Home features crawl space and attic storage.")
+        assert result["has_basement"] is False
+
+    def test_generic_basement(self):
+        from app.enrichment import parse_basement
+        result = parse_basement("Large lower level with potential for additional living space.")
+        assert result["has_basement"] is True
+
+    def test_no_mention(self):
+        from app.enrichment import parse_basement
+        result = parse_basement("Charming Cape Cod on tree-lined street.")
+        assert result["has_basement"] is None

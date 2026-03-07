@@ -780,6 +780,25 @@ def _build_listing_data(listing_row: dict) -> dict:
         except (json.JSONDecodeError, TypeError):
             pass
 
+    # Structured description signals (parsed from text, stored in DB)
+    if listing_row.get("garage_count") is not None:
+        listing_data["garage"] = {
+            "count": listing_row["garage_count"],
+            "type": listing_row.get("garage_type"),
+        }
+    if listing_row.get("hoa_monthly") is not None:
+        listing_data["hoa_monthly"] = listing_row["hoa_monthly"]
+    if listing_row.get("has_pool") is not None:
+        listing_data["pool"] = {
+            "has_pool": bool(listing_row["has_pool"]),
+            "type": listing_row.get("pool_type"),
+        }
+    if listing_row.get("has_basement") is not None:
+        listing_data["basement"] = {
+            "has_basement": bool(listing_row["has_basement"]),
+            "type": listing_row.get("basement_type"),
+        }
+
     return listing_data
 
 
@@ -1623,7 +1642,7 @@ def _enrich_all(clear_bogus: bool = False, clear_bogus_commute: bool = False):
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    from app.enrichment import fetch_commute_time, fetch_school_data, normalize_address, fetch_property_tax, fetch_property_tax_orpts, fetch_power_line_proximity, fetch_flood_zone, fetch_station_proximity
+    from app.enrichment import fetch_commute_time, fetch_school_data, normalize_address, fetch_property_tax, fetch_property_tax_orpts, fetch_power_line_proximity, fetch_flood_zone, fetch_station_proximity, parse_garage_count, parse_hoa_amount, parse_pool_flag, parse_basement
 
     try:
         listing_ids = db.get_all_listing_ids()
@@ -1780,6 +1799,45 @@ def _enrich_all(clear_bogus: bool = False, clear_bogus_commute: bool = False):
                 elif listing.get("address") and listing.get("town"):
                     enrichment["station_json"] = json.dumps({"station": None, "source": "osm_static"})
                     changed = True
+
+            # Description parsing: garage, HOA, pool, basement (pure regex, no API)
+            desc = listing.get("description")
+            if desc:
+                if listing.get("garage_count") is None:
+                    g = parse_garage_count(desc)
+                    if g.get("garage_count") is not None:
+                        enrichment["garage_count"] = g["garage_count"]
+                        enrichment["garage_type"] = g.get("garage_type")
+                        changed = True
+
+                if listing.get("hoa_monthly") is None:
+                    h = parse_hoa_amount(desc)
+                    if h.get("hoa_monthly") is not None:
+                        enrichment["hoa_monthly"] = h["hoa_monthly"]
+                        changed = True
+
+                if listing.get("has_pool") is None:
+                    p = parse_pool_flag(desc)
+                    if p.get("has_pool") is not None:
+                        enrichment["has_pool"] = p["has_pool"]
+                        enrichment["pool_type"] = p.get("pool_type")
+                        changed = True
+
+                if listing.get("has_basement") is None:
+                    b = parse_basement(desc)
+                    if b.get("has_basement") is not None:
+                        enrichment["has_basement"] = b["has_basement"]
+                        enrichment["basement_type"] = b.get("basement_type")
+                        changed = True
+
+            # Save any enrichment changes from this phase
+            if changed:
+                try:
+                    db.update_listing_enrichment(lid, enrichment)
+                    enriched += 1
+                except Exception as e:
+                    logger.error(f"Failed to enrich listing #{lid}: {e}")
+                    errors.append(f"#{lid}: {e}")
 
             # Collect listings needing commute data for parallel fetch
             if listing.get("commute_minutes") is None:
