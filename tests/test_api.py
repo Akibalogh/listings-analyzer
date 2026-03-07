@@ -1389,7 +1389,7 @@ class TestManageUpdateCriteria:
         """Client with MANAGE_KEY configured."""
         with patch("app.main.settings") as mock_settings:
             mock_settings.manage_key = "test-manage-key"
-            mock_settings.ai_eval_model = "claude-haiku-4-5-20251001"
+            mock_settings.ai_eval_model = "claude-opus-4-6"
             yield client
 
     def test_requires_manage_key(self, client):

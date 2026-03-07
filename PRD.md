@@ -127,7 +127,7 @@ Primary alert source is OneKey MLS NY email alerts.
 ### AI-Only Scoring
 
 All scoring is performed by the **AI evaluator** (`app/scorer.py:ai_score_listing`):
-- Uses Claude Haiku (vision-capable) via Anthropic API
+- Uses Claude Opus (`claude-opus-4-6`, vision-capable) via Anthropic API
 - Follows user-defined natural language instructions (editable in dashboard, stored in DB)
 - Evaluates listing data + scraped description + optional images
 - Returns structured JSON: score, verdict, hard results, soft points, concerns, reasoning, **property_summary**
@@ -365,7 +365,8 @@ Mobile-first single-page app served at `/` (`app/templates/dashboard.html`).
 - **Scraping:** httpx (static) + Jina Reader API (SPA rendering, no browser needed)
 
 ### AI Evaluation
-- Claude Haiku (`claude-haiku-4-5-20251001`) — cheap, fast, supports vision
+- Claude Opus (`claude-opus-4-6`) — most capable, vision-capable; used for scoring quality
+- LLM fallback parser uses Claude Haiku (`claude-haiku-4-5-20251001`) — fast/cheap for email parsing
 - AI-only scoring (no deterministic fallback)
 - Structured JSON output with server-side validation
 - AI generates both a score + a `property_summary` narrative per listing
