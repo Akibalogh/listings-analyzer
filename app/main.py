@@ -987,6 +987,39 @@ def _rescore_all_sequential_standalone(criteria_version: int, instructions: str)
 # --- Management Endpoints ---
 
 
+@app.post("/manage/update-criteria")
+async def manage_update_criteria(request: Request):
+    """Save new evaluation criteria and trigger background re-score.
+
+    Protected by MANAGE_KEY env var (not user auth).
+    Useful for programmatic criteria updates without a browser session.
+    Body: {"instructions": "<criteria text>", "created_by": "<email>"}
+    Optional query param: ?sequential=true to bypass batch API.
+    """
+    key = request.headers.get("x-manage-key", "")
+    if not settings.manage_key or key != settings.manage_key:
+        raise HTTPException(status_code=403, detail="Invalid or missing management key")
+
+    body = await request.json()
+    instructions = body.get("instructions", "").strip()
+    if not instructions:
+        raise HTTPException(status_code=400, detail="instructions cannot be empty")
+    created_by = body.get("created_by", "manage-api")
+
+    sequential = request.query_params.get("sequential", "").lower() == "true"
+    new_version = db.save_criteria(instructions, created_by=created_by)
+    logger.info(f"Saved criteria v{new_version} via manage API by {created_by}")
+
+    _start_rescore(new_version, instructions, sequential=sequential)
+
+    return {
+        "version": new_version,
+        "rescore_started": True,
+        "mode": "sequential" if sequential else "batch",
+        "instructions_preview": instructions[:200] + "...",
+    }
+
+
 @app.post("/manage/sync-criteria")
 def sync_criteria(request: Request):
     """Trigger a background re-score with the current active criteria.
