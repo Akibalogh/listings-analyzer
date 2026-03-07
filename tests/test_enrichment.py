@@ -661,3 +661,258 @@ class TestFetchPropertyTax:
         assert result["assessed_value"] == 80000
         # HTTP client should NOT have been called (cache hit)
         mock_client_cls.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Power line proximity
+# ---------------------------------------------------------------------------
+
+
+class TestHaversineM:
+    """Tests for _haversine_m distance calculation."""
+
+    def test_same_point_is_zero(self):
+        from app.enrichment import _haversine_m
+
+        assert _haversine_m(40.0, -73.0, 40.0, -73.0) == pytest.approx(0.0, abs=0.01)
+
+    def test_known_distance(self):
+        """~111 km per degree latitude at equator."""
+        from app.enrichment import _haversine_m
+
+        d = _haversine_m(0.0, 0.0, 1.0, 0.0)
+        assert 110_000 < d < 112_000
+
+    def test_short_distance(self):
+        """Two points ~200m apart should return ~200m."""
+        from app.enrichment import _haversine_m
+
+        # ~0.002 degrees lat ≈ 222m
+        d = _haversine_m(41.0, -73.8, 41.002, -73.8)
+        assert 200 < d < 250
+
+
+class TestGeocodeAddress:
+    """Tests for _geocode_address() via Nominatim."""
+
+    def test_missing_address_returns_none(self):
+        from app.enrichment import _geocode_address
+
+        assert _geocode_address(None, "Scarsdale", "NY") is None
+        assert _geocode_address("", "Scarsdale", "NY") is None
+
+    def test_missing_town_returns_none(self):
+        from app.enrichment import _geocode_address
+
+        assert _geocode_address("123 Main St", None, "NY") is None
+
+    @patch("app.enrichment.httpx.Client")
+    def test_successful_geocode(self, mock_client_cls):
+        from app.enrichment import _geocode_address, _geocode_cache
+
+        cache_key = "999 maple ave|scarsdale|ny"
+        _geocode_cache.pop(cache_key, None)
+
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = [{"lat": "41.0050", "lon": "-73.7854"}]
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.get.return_value = mock_resp
+        mock_client_cls.return_value = mock_client
+
+        result = _geocode_address("999 Maple Ave", "Scarsdale", "NY")
+        assert result is not None
+        assert result["lat"] == pytest.approx(41.005)
+        assert result["lon"] == pytest.approx(-73.7854)
+
+    @patch("app.enrichment.httpx.Client")
+    def test_geocode_uses_cache(self, mock_client_cls):
+        from app.enrichment import _geocode_address, _geocode_cache
+
+        cache_key = "1 cached ln|newtown|ny"
+        _geocode_cache[cache_key] = {"lat": 41.1, "lon": -73.9}
+
+        result = _geocode_address("1 Cached Ln", "Newtown", "NY")
+        assert result == {"lat": 41.1, "lon": -73.9}
+        mock_client_cls.assert_not_called()
+
+    @patch("app.enrichment.httpx.Client")
+    def test_geocode_empty_response_returns_none(self, mock_client_cls):
+        from app.enrichment import _geocode_address, _geocode_cache
+
+        cache_key = "unknown place rd|nowhere|ny"
+        _geocode_cache.pop(cache_key, None)
+
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = []
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.get.return_value = mock_resp
+        mock_client_cls.return_value = mock_client
+
+        result = _geocode_address("Unknown Place Rd", "Nowhere", "NY")
+        assert result is None
+
+    @patch("app.enrichment.httpx.Client")
+    def test_geocode_network_error_returns_none(self, mock_client_cls):
+        from app.enrichment import _geocode_address, _geocode_cache
+
+        cache_key = "error st|errorville|ny"
+        _geocode_cache.pop(cache_key, None)
+
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.get.side_effect = Exception("network error")
+        mock_client_cls.return_value = mock_client
+
+        result = _geocode_address("Error St", "Errorville", "NY")
+        assert result is None
+
+
+class TestFetchPowerLineProximity:
+    """Tests for fetch_power_line_proximity()."""
+
+    @patch("app.enrichment._geocode_address")
+    def test_geocode_failure_returns_none(self, mock_geocode):
+        from app.enrichment import fetch_power_line_proximity
+
+        mock_geocode.return_value = None
+        result = fetch_power_line_proximity("123 Bad St", "Nowhere", "NY")
+        assert result is None
+
+    @patch("app.enrichment.httpx.Client")
+    @patch("app.enrichment._geocode_address")
+    def test_no_power_lines_returns_none(self, mock_geocode, mock_client_cls):
+        from app.enrichment import fetch_power_line_proximity, _power_line_cache
+
+        mock_geocode.return_value = {"lat": 41.0, "lon": -73.8}
+        cache_key = "41.00000|-73.80000"
+        _power_line_cache.pop(cache_key, None)
+
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = {"elements": []}
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.post.return_value = mock_resp
+        mock_client_cls.return_value = mock_client
+
+        result = fetch_power_line_proximity("1 Safe St", "Scarsdale", "NY")
+        assert result is None
+
+    @patch("app.enrichment.httpx.Client")
+    @patch("app.enrichment._geocode_address")
+    def test_power_line_way_detected(self, mock_geocode, mock_client_cls):
+        from app.enrichment import fetch_power_line_proximity, _power_line_cache
+
+        mock_geocode.return_value = {"lat": 41.0, "lon": -73.8}
+        cache_key = "41.00000|-73.80000"
+        _power_line_cache.pop(cache_key, None)
+
+        overpass_response = {
+            "elements": [
+                {
+                    "type": "way",
+                    "id": 12345,
+                    "tags": {"power": "line", "voltage": "115000"},
+                    "geometry": [
+                        {"lat": 41.0009, "lon": -73.8},  # ~100m north
+                        {"lat": 41.0010, "lon": -73.8},
+                    ],
+                }
+            ]
+        }
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = overpass_response
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.post.return_value = mock_resp
+        mock_client_cls.return_value = mock_client
+
+        result = fetch_power_line_proximity("1 Power St", "Ardsley", "NY")
+        assert result is not None
+        assert result["nearest_distance_m"] < 200  # ~100m
+        assert result["nearest_type"] == "line"
+        assert result["voltage"] == "115000"
+        assert result["count_within_300m"] == 1
+        assert result["source"] == "osm_overpass"
+
+    @patch("app.enrichment.httpx.Client")
+    @patch("app.enrichment._geocode_address")
+    def test_power_tower_node_detected(self, mock_geocode, mock_client_cls):
+        from app.enrichment import fetch_power_line_proximity, _power_line_cache
+
+        mock_geocode.return_value = {"lat": 41.0, "lon": -73.8}
+        cache_key = "41.00000|-73.80000"
+        _power_line_cache.pop(cache_key, None)
+
+        overpass_response = {
+            "elements": [
+                {
+                    "type": "node",
+                    "id": 99999,
+                    "lat": 41.0018,  # ~200m north
+                    "lon": -73.8,
+                    "tags": {"power": "tower"},
+                }
+            ]
+        }
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = overpass_response
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.post.return_value = mock_resp
+        mock_client_cls.return_value = mock_client
+
+        result = fetch_power_line_proximity("2 Tower Rd", "Ardsley", "NY")
+        assert result is not None
+        assert 150 < result["nearest_distance_m"] < 250
+        assert result["nearest_type"] == "tower"
+
+    @patch("app.enrichment.httpx.Client")
+    @patch("app.enrichment._geocode_address")
+    def test_power_line_uses_cache(self, mock_geocode, mock_client_cls):
+        from app.enrichment import fetch_power_line_proximity, _power_line_cache
+
+        mock_geocode.return_value = {"lat": 41.5, "lon": -73.5}
+        cache_key = "41.50000|-73.50000"
+        cached_result = {
+            "nearest_distance_m": 120.5,
+            "nearest_type": "line",
+            "voltage": "230000",
+            "count_within_300m": 3,
+            "source": "osm_overpass",
+        }
+        _power_line_cache[cache_key] = cached_result
+
+        result = fetch_power_line_proximity("Cached Address", "Cached Town", "NY")
+        assert result == cached_result
+        mock_client_cls.assert_not_called()
+
+    @patch("app.enrichment.httpx.Client")
+    @patch("app.enrichment._geocode_address")
+    def test_network_error_returns_none(self, mock_geocode, mock_client_cls):
+        from app.enrichment import fetch_power_line_proximity, _power_line_cache
+
+        mock_geocode.return_value = {"lat": 41.2, "lon": -73.6}
+        cache_key = "41.20000|-73.60000"
+        _power_line_cache.pop(cache_key, None)
+
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.post.side_effect = Exception("timeout")
+        mock_client_cls.return_value = mock_client
+
+        result = fetch_power_line_proximity("3 Error Ave", "Errorville", "NY")
+        assert result is None

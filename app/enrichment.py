@@ -7,6 +7,7 @@ External API integrations:
 
 import json
 import logging
+import math
 import re
 import time
 from datetime import datetime, timedelta, timezone
@@ -590,6 +591,176 @@ def get_price_per_sqft_signal(
         "ratio": round(ratio, 3) if ratio else None,
         "signal": signal,
     }
+
+
+# ---------------------------------------------------------------------------
+# Power line proximity (OpenStreetMap Overpass API + Nominatim geocoder)
+# ---------------------------------------------------------------------------
+
+_NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
+_OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+_NOMINATIM_RATE_LIMIT = 1.1  # seconds between Nominatim calls (ToS: max 1 req/s)
+_nominatim_last_call: float = 0.0
+
+# Cache: "address|town|state" → {"lat": float, "lon": float} or None
+_geocode_cache: dict[str, dict | None] = {}
+
+# Cache: "lat|lon" → power line proximity result dict
+_power_line_cache: dict[str, dict | None] = {}
+
+
+def _geocode_address(address: str | None, town: str | None, state: str | None) -> dict | None:
+    """Geocode an address using Nominatim (free OSM geocoder).
+
+    Returns {"lat": float, "lon": float} or None on failure.
+    Rate-limited to 1 req/s per Nominatim ToS.
+    """
+    global _nominatim_last_call
+    if not address or not town:
+        return None
+    cache_key = f"{(address or '').lower()}|{(town or '').lower()}|{(state or '').lower()}"
+    if cache_key in _geocode_cache:
+        return _geocode_cache[cache_key]
+
+    # Rate limit
+    elapsed = time.time() - _nominatim_last_call
+    if elapsed < _NOMINATIM_RATE_LIMIT:
+        time.sleep(_NOMINATIM_RATE_LIMIT - elapsed)
+
+    query = f"{address}, {town}, {state or 'NY'}"
+    try:
+        with httpx.Client(timeout=10) as client:
+            resp = client.get(
+                _NOMINATIM_URL,
+                params={"q": query, "format": "json", "limit": 1},
+                headers={"User-Agent": "listings-analyzer/1.0 (contact: aki@bitsafe.finance)"},
+            )
+            _nominatim_last_call = time.time()
+            resp.raise_for_status()
+            results = resp.json()
+            if results:
+                result = {"lat": float(results[0]["lat"]), "lon": float(results[0]["lon"])}
+                _geocode_cache[cache_key] = result
+                return result
+    except Exception as e:
+        logger.debug(f"Nominatim geocoding failed for {query}: {e}")
+
+    _geocode_cache[cache_key] = None
+    return None
+
+
+def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Great-circle distance in meters between two lat/lon points."""
+    R = 6_371_000  # Earth radius in meters
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlam = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlam / 2) ** 2
+    return 2 * R * math.asin(math.sqrt(a))
+
+
+def fetch_power_line_proximity(
+    address: str | None,
+    town: str | None,
+    state: str | None,
+    radius_m: int = 300,
+) -> dict | None:
+    """Check for high-voltage power line/tower proximity via OSM Overpass API.
+
+    Only flags transmission infrastructure (power=line, power=tower).
+    Distribution poles (power=pole) are ubiquitous and not flagged.
+
+    Returns:
+        {
+            "nearest_distance_m": float,
+            "nearest_type": "line" | "tower",
+            "voltage": str | None,
+            "count_within_300m": int,
+            "source": "osm_overpass"
+        }
+        or None if geocoding fails or no infrastructure found.
+    """
+    coords = _geocode_address(address, town, state)
+    if not coords:
+        return None
+
+    lat, lon = coords["lat"], coords["lon"]
+    cache_key = f"{lat:.5f}|{lon:.5f}"
+    if cache_key in _power_line_cache:
+        return _power_line_cache[cache_key]
+
+    overpass_query = (
+        f"[out:json];"
+        f"(way[power=line](around:{radius_m},{lat},{lon});"
+        f"way[power=cable](around:{radius_m},{lat},{lon});"
+        f"node[power=tower](around:{radius_m},{lat},{lon});"
+        f");out geom;"
+    )
+
+    try:
+        with httpx.Client(timeout=15) as client:
+            resp = client.post(
+                _OVERPASS_URL,
+                content=overpass_query,
+                headers={"User-Agent": "listings-analyzer/1.0", "Content-Type": "text/plain"},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+        elements = data.get("elements", [])
+        if not elements:
+            _power_line_cache[cache_key] = None
+            return None
+
+        # Calculate distance to nearest element
+        nearest_dist = float("inf")
+        nearest_type = None
+        nearest_voltage = None
+
+        for elem in elements:
+            voltage = elem.get("tags", {}).get("voltage")
+            etype = elem.get("tags", {}).get("power", "line")
+
+            # For ways (line segments), check all geometry nodes
+            if elem.get("type") == "way" and "geometry" in elem:
+                for node in elem["geometry"]:
+                    d = _haversine_m(lat, lon, node["lat"], node["lon"])
+                    if d < nearest_dist:
+                        nearest_dist = d
+                        nearest_type = etype
+                        nearest_voltage = voltage
+            # For nodes (towers)
+            elif elem.get("type") == "node":
+                nlat = elem.get("lat", lat)
+                nlon = elem.get("lon", lon)
+                d = _haversine_m(lat, lon, nlat, nlon)
+                if d < nearest_dist:
+                    nearest_dist = d
+                    nearest_type = etype
+                    nearest_voltage = voltage
+
+        if nearest_dist == float("inf"):
+            _power_line_cache[cache_key] = None
+            return None
+
+        result = {
+            "nearest_distance_m": round(nearest_dist, 1),
+            "nearest_type": nearest_type or "line",
+            "voltage": nearest_voltage,
+            "count_within_300m": len(elements),
+            "source": "osm_overpass",
+        }
+        _power_line_cache[cache_key] = result
+        logger.info(
+            f"Power line check {address}, {town}: nearest={nearest_dist:.0f}m "
+            f"({nearest_type}, {nearest_voltage or 'voltage unknown'})"
+        )
+        return result
+
+    except Exception as e:
+        logger.debug(f"Power line proximity check failed for {address}, {town}: {e}")
+        _power_line_cache[cache_key] = None
+        return None
 
 
 # ---------------------------------------------------------------------------

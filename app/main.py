@@ -753,6 +753,15 @@ def _build_listing_data(listing_row: dict) -> dict:
     if listing_row.get("lot_acres") is not None:
         listing_data["lot_acres"] = listing_row["lot_acres"]
 
+    # Power line proximity (stored JSON if previously fetched)
+    if listing_row.get("power_line_json"):
+        try:
+            pl = json.loads(listing_row["power_line_json"])
+            if pl.get("nearest_distance_m") is not None:
+                listing_data["power_line_proximity"] = pl
+        except (json.JSONDecodeError, TypeError):
+            pass
+
     return listing_data
 
 
@@ -1596,7 +1605,7 @@ def _enrich_all(clear_bogus: bool = False, clear_bogus_commute: bool = False):
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    from app.enrichment import fetch_commute_time, fetch_school_data, normalize_address, fetch_property_tax, fetch_property_tax_orpts
+    from app.enrichment import fetch_commute_time, fetch_school_data, normalize_address, fetch_property_tax, fetch_property_tax_orpts, fetch_power_line_proximity
 
     try:
         listing_ids = db.get_all_listing_ids()
@@ -1708,6 +1717,21 @@ def _enrich_all(clear_bogus: bool = False, clear_bogus_commute: bool = False):
                     )
                 if tax_data:
                     enrichment["property_tax_json"] = json.dumps(tax_data)
+                    changed = True
+
+            # Power line proximity check (OSM Overpass — free, no key needed)
+            if not listing.get("power_line_json"):
+                power_data = fetch_power_line_proximity(
+                    listing.get("address"),
+                    town=listing.get("town"),
+                    state=listing.get("state"),
+                )
+                if power_data:
+                    enrichment["power_line_json"] = json.dumps(power_data)
+                    changed = True
+                elif power_data is None and listing.get("address") and listing.get("town"):
+                    # Mark as checked (no power lines found) to avoid re-querying
+                    enrichment["power_line_json"] = json.dumps({"nearest_distance_m": None, "source": "osm_overpass"})
                     changed = True
 
             # Collect listings needing commute data for parallel fetch
