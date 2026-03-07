@@ -45,7 +45,7 @@ You want:
 
 ### Data Enrichment
 - **School data** — SchoolDigger API (free DEV tier, 20 calls/day) fetches nearby school rankings by zip code; cached in DB to avoid rate limit; displayed on cards and fed into AI scoring
-- **Transit commute times** — Google Routes API (Essentials tier, 10K free/month) calculates commute to Brookfield Place NYC (next weekday 8 AM); tries both walk-to-station transit and drive-to-station + transit, picks the shorter one; station overrides map towns to their nearest Metro-North station; displayed as badge on dashboard cards
+- **Transit commute times** — Google Routes API (Essentials tier, 10K free/month) calculates commute to Brookfield Place NYC (next weekday 8 AM); always uses drive-to-station + transit (realistic suburban commute mode); pure walk-to-station transit is computed as a fallback only when drive+transit is unavailable; station overrides map towns to their nearest Metro-North station (e.g., Cortlandt Manor → Croton-Harmon, Chappaqua/Millwood/New Castle → Chappaqua, Armonk/North Castle → North White Plains); displayed as badge on dashboard cards
 - **Address-based dedup** — Normalized address keys (Avenue→Ave, Street→St, New York→NY, etc.) prevent duplicate listings across different email parsers; keys are recomputed on every startup so normalization improvements apply retroactively; startup dedup pass merges any duplicates that emerge, keeping the listing with toured status / most data
 
 ## 3. User Flow
@@ -142,6 +142,11 @@ Each scored listing receives a `property_summary` — a structured factor-by-fac
 - **Blank line + conclusion:** brief 1–2 sentence assessment
 - Displayed as the primary analysis section in the expanded card view
 
+### Unknown Penalty (Two-Tier)
+The AI distinguishes two types of unknowns when evaluating criteria:
+- **Verifiable unknown** — images or description are present but don't confirm the feature (e.g., multiple photos of a large house with no visible ground-floor bedroom). Apply a meaningful penalty (10–15 pts) since absence is likely.
+- **Missing-data unknown** — no floor plans, sparse description; impossible to evaluate. Apply a mild penalty (3–5 pts) — penalizing missing data too heavily unfairly disadvantages listings where the information simply wasn't provided.
+
 ### Prompt Injection Defense
 Listing data (address, description, etc.) could contain malicious instructions.
 - Listing data wrapped in `<listing_data>` XML tags, never mixed into prompt prose
@@ -177,13 +182,18 @@ Listing data (address, description, etc.) could contain malicious instructions.
 | Feature | Points |
 |---|---|
 | Base (all hard reqs pass) | +20 |
-| Ground-floor bedroom | +25 (highest priority) |
+| Ground-floor bedroom — confirmed present | +15 |
+| Ground-floor bedroom — confirmed absent | -20 to -25 |
+| Ground-floor bedroom — unknown, verifiable (images show layout but floor unclear) | -10 to -15 |
+| Ground-floor bedroom — unknown, no floor plan data | -3 to -5 |
 | Finished basement | +20 |
 | Lot >= 0.3 acre | +10 |
 | Pool | +10 |
 | Sauna | +5 |
 | Jacuzzi/hot tub | +5 |
 | Soaking tub | +5 |
+
+Ground-floor bedroom is point-based (not a hard reject) — confirming it absent is a major deduction; true unknowns (no floor plan data) receive only a mild penalty since the information simply isn't available.
 
 **Soft Warnings** (lower score slightly, never cause Reject):
 - Price above $1.5M → -5 to -10 pts
@@ -342,6 +352,7 @@ Mobile-first single-page app served at `/` (`app/templates/dashboard.html`).
 - `POST /manage/scrape-descriptions` — two-phase: (1) search DuckDuckGo for Redfin URLs for listings with address+town but no URL; (2) scrape descriptions + images for listings with URL but no description; triggers rescore if descriptions found
 - `POST /manage/enrich` — backfill school data + commute times; `?clear_bogus=true` to re-fetch; runs in background
 - `POST /manage/prune-sold` — check Redfin URLs via Jina Reader for sold/off-market status; dry-run by default, `?fix=true` deletes sold listings
+- `POST /manage/update-criteria` — save new criteria instructions and trigger re-score without Google OAuth session (body: `{"instructions": "...", "created_by": "..."}`, `?sequential=true` for sequential mode)
 
 ## 9. Key Technical Decisions
 
@@ -425,6 +436,12 @@ Mobile-first single-page app served at `/` (`app/templates/dashboard.html`).
 - OneKey MLS DDG address search, listing status extraction, structured data extraction
 - HTML URL backfill in plaintext parser (matches Redfin URLs from HTML to text-parsed listings)
 - Structured data backfill for bare-URL listings (OneKey MLS) before scoring
+- Drive+transit commute preference: always use drive-to-station + train for NY suburbs; pure transit (walking) only as fallback
+- Station overrides expanded: Cortlandt Manor → Croton-Harmon; Chappaqua/Millwood/New Castle → Chappaqua; Armonk/North Castle → North White Plains
+- `POST /manage/update-criteria` endpoint for criteria updates without Google OAuth (protected by MANAGE_KEY)
+- Ground-floor bedroom scoring changed from binary reject to point-based: +15 confirmed, -20/-25 confirmed absent, -10/-15 verifiable unknown, -3/-5 missing-data unknown
+- Two-tier unknown penalty in AI prompt: verifiable unknowns (images present, feature unconfirmed) = 10–15 pt deduction; missing-data unknowns (no floor plan) = 3–5 pt mild deduction
+- Address normalization: hyphens stripped from both address and town (fixes Croton-On-Hudson duplication)
 
 ### Phase 3 (Future)
 - Comps engine

@@ -299,6 +299,11 @@ _STATION_OVERRIDES: dict[str, str] = {
     "briarcliff manor": "Scarborough",
     "ossining": "Ossining",
     "pleasantville": "Pleasantville",
+    "chappaqua": "Chappaqua",
+    "new castle": "Chappaqua",
+    "millwood": "Chappaqua",
+    "armonk": "North White Plains",
+    "north castle": "North White Plains",
 }
 
 
@@ -377,8 +382,14 @@ def fetch_commute_time(
         logger.warning(f"No transit routes found for {origin} (direct or via station)")
         return None
 
-    # Pick the shortest commute
-    best = min(candidates, key=lambda c: c["commute_minutes"])
+    # Prefer drive+transit over pure transit — for NY suburbs, driving to the station
+    # is the realistic commute mode. Pure transit (walking to station) often returns
+    # multi-bus routes that are far longer than the realistic drive+train option.
+    drive_transit = [c for c in candidates if c["commute_mode"] == "drive+transit"]
+    if drive_transit:
+        best = min(drive_transit, key=lambda c: c["commute_minutes"])
+    else:
+        best = min(candidates, key=lambda c: c["commute_minutes"])
     if len(candidates) > 1:
         other = [c for c in candidates if c is not best][0]
         logger.info(
