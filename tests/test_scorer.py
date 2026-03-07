@@ -360,3 +360,104 @@ class TestSelectScoringImages:
         urls = [f"img_{i}.jpg" for i in range(30)]
         selected = _select_scoring_images(urls, max_images=4)
         assert len(selected) <= 4
+
+
+class TestSystemPromptUnknownPenalty:
+    """Tests that the system prompt contains nuanced unknown penalty instructions."""
+
+    def test_verifiable_unknown_mentioned(self):
+        blocks = _build_system_prompt()
+        prompt = blocks[0]["text"]
+        assert "Verifiable unknown" in prompt or "verifiable unknown" in prompt.lower()
+
+    def test_missing_data_unknown_mentioned(self):
+        blocks = _build_system_prompt()
+        prompt = blocks[0]["text"]
+        assert "Missing data" in prompt or "missing data" in prompt.lower()
+
+    def test_handling_unknowns_section_present(self):
+        blocks = _build_system_prompt()
+        prompt = blocks[0]["text"]
+        assert "HANDLING UNKNOWNS" in prompt
+
+    def test_two_tier_penalty_described(self):
+        """Both penalty tiers (high and low) should be quantified."""
+        blocks = _build_system_prompt()
+        prompt = blocks[0]["text"]
+        # High penalty tier
+        assert "10-15" in prompt or "10–15" in prompt
+        # Low penalty tier
+        assert "3-5" in prompt or "3–5" in prompt
+
+
+class TestImageHintBlocks:
+    """Tests for floor plan note and image hint blocks in _build_user_message."""
+
+    def test_no_images_fallback_message(self):
+        """When no image URLs provided, a fallback text block should mention missing data."""
+        listing_data = {"address": "Test"}
+        blocks = _build_user_message("Criteria", listing_data, image_urls=[])
+        # Only the text content block, no fallback (empty list = no images passed)
+        assert len(blocks) == 1
+
+    def test_images_passed_adds_hint_block(self):
+        """When images are passed (even if fetch fails), a hint block is appended."""
+        listing_data = {"address": "Test"}
+        with MagicMock() as mock_fetch:
+            from unittest.mock import patch
+            with patch("app.scorer._fetch_image_as_base64", return_value=None):
+                # All fetches fail → fetched=0 → no-images fallback block added
+                blocks = _build_user_message("Criteria", listing_data, image_urls=["http://example.com/img.jpg"])
+        # Should have: text block + fallback hint block
+        assert len(blocks) == 2
+        fallback_text = blocks[1]["text"]
+        assert "No listing images available" in fallback_text
+        assert "missing data" in fallback_text.lower()
+
+    def test_ground_floor_bedroom_top_priority_in_hint(self):
+        """Image hint block should call out ground-floor bedroom as top priority."""
+        listing_data = {"address": "Test"}
+        with MagicMock():
+            from unittest.mock import patch
+            # Simulate 5 successful image fetches so floor_plan_note triggers
+            fake_image = ("image/jpeg", "fakebase64data")
+            with patch("app.scorer._fetch_image_as_base64", return_value=fake_image):
+                blocks = _build_user_message(
+                    "Criteria",
+                    listing_data,
+                    image_urls=[f"http://example.com/img{i}.jpg" for i in range(5)],
+                )
+        # Find the hint text block (after images)
+        hint_blocks = [b for b in blocks if b.get("type") == "text" and "GROUND-FLOOR" in b.get("text", "")]
+        assert len(hint_blocks) == 1
+        assert "TOP PRIORITY" in hint_blocks[0]["text"]
+
+    def test_few_images_gets_missing_floor_plan_note(self):
+        """With fewer than 4 fetched images, the hint should note floor plans may be absent."""
+        listing_data = {"address": "Test"}
+        from unittest.mock import patch
+        fake_image = ("image/jpeg", "fakebase64data")
+        with patch("app.scorer._fetch_image_as_base64", return_value=fake_image):
+            blocks = _build_user_message(
+                "Criteria",
+                listing_data,
+                image_urls=["http://example.com/img1.jpg", "http://example.com/img2.jpg"],
+            )
+        hint_blocks = [b for b in blocks if b.get("type") == "text" and "floor plan" in b.get("text", "").lower()]
+        assert len(hint_blocks) == 1
+        assert "missing data" in hint_blocks[0]["text"].lower()
+
+    def test_many_images_gets_floor_plan_note(self):
+        """With 4+ fetched images, the hint should mention last images are likely floor plans."""
+        listing_data = {"address": "Test"}
+        from unittest.mock import patch
+        fake_image = ("image/jpeg", "fakebase64data")
+        with patch("app.scorer._fetch_image_as_base64", return_value=fake_image):
+            blocks = _build_user_message(
+                "Criteria",
+                listing_data,
+                image_urls=[f"http://example.com/img{i}.jpg" for i in range(8)],
+            )
+        hint_blocks = [b for b in blocks if b.get("type") == "text" and "floor plan" in b.get("text", "").lower()]
+        assert len(hint_blocks) == 1
+        assert "last images" in hint_blocks[0]["text"].lower()

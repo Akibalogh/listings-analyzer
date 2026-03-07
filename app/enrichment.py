@@ -65,9 +65,9 @@ def normalize_address(
     if not address or not town:
         return None
 
-    # Lowercase, strip periods and extra whitespace
-    addr = address.lower().strip().replace(".", "")
-    town_norm = town.lower().strip().replace(".", "")
+    # Lowercase, strip periods, hyphens (e.g. Croton-On-Hudson → Croton On Hudson), extra whitespace
+    addr = address.lower().strip().replace(".", "").replace("-", " ")
+    town_norm = town.lower().strip().replace(".", "").replace("-", " ")
     state_raw = (state or "").lower().strip().replace(".", "")
 
     # Normalize state to 2-letter code ("new york" → "ny")

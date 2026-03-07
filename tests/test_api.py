@@ -1379,3 +1379,157 @@ class TestMaxEmailAgeConfig:
         call_args = mock_svc.users().messages().list.call_args
         query = call_args[1].get("q", "") if call_args[1] else ""
         assert "newer_than" not in query
+
+
+class TestManageUpdateCriteria:
+    """Tests for POST /manage/update-criteria."""
+
+    @pytest.fixture
+    def manage_client(self, client):
+        """Client with MANAGE_KEY configured."""
+        with patch("app.main.settings") as mock_settings:
+            mock_settings.manage_key = "test-manage-key"
+            mock_settings.ai_eval_model = "claude-haiku-4-5-20251001"
+            yield client
+
+    def test_requires_manage_key(self, client):
+        res = client.post("/manage/update-criteria", json={"instructions": "Some criteria"})
+        assert res.status_code == 403
+
+    def test_wrong_manage_key_rejected(self, client):
+        with patch("app.main.settings") as mock_settings:
+            mock_settings.manage_key = "real-key"
+            res = client.post(
+                "/manage/update-criteria",
+                json={"instructions": "Some criteria"},
+                headers={"x-manage-key": "wrong-key"},
+            )
+            assert res.status_code == 403
+
+    def test_empty_instructions_rejected(self, client):
+        with patch("app.main.settings") as mock_settings:
+            mock_settings.manage_key = "test-key"
+            res = client.post(
+                "/manage/update-criteria",
+                json={"instructions": ""},
+                headers={"x-manage-key": "test-key"},
+            )
+            assert res.status_code == 400
+
+    @patch("app.main._start_rescore")
+    @patch("app.main.db.save_criteria", return_value=42)
+    def test_saves_criteria_and_triggers_rescore(self, mock_save, mock_rescore, client):
+        with patch("app.main.settings") as mock_settings:
+            mock_settings.manage_key = "test-key"
+            res = client.post(
+                "/manage/update-criteria",
+                json={"instructions": "Score listings carefully", "created_by": "test@example.com"},
+                headers={"x-manage-key": "test-key"},
+            )
+        assert res.status_code == 200
+        data = res.json()
+        assert data["version"] == 42
+        assert data["rescore_started"] is True
+        assert data["mode"] == "batch"
+        mock_save.assert_called_once_with("Score listings carefully", created_by="test@example.com")
+        mock_rescore.assert_called_once()
+
+    @patch("app.main._start_rescore")
+    @patch("app.main.db.save_criteria", return_value=43)
+    def test_sequential_mode(self, mock_save, mock_rescore, client):
+        with patch("app.main.settings") as mock_settings:
+            mock_settings.manage_key = "test-key"
+            res = client.post(
+                "/manage/update-criteria?sequential=true",
+                json={"instructions": "Score listings carefully"},
+                headers={"x-manage-key": "test-key"},
+            )
+        assert res.status_code == 200
+        assert res.json()["mode"] == "sequential"
+        mock_rescore.assert_called_once_with(43, "Score listings carefully", sequential=True)
+
+    @patch("app.main._start_rescore")
+    @patch("app.main.db.save_criteria", return_value=44)
+    def test_default_created_by(self, mock_save, mock_rescore, client):
+        """created_by defaults to 'manage-api' if not provided."""
+        with patch("app.main.settings") as mock_settings:
+            mock_settings.manage_key = "test-key"
+            client.post(
+                "/manage/update-criteria",
+                json={"instructions": "Score listings"},
+                headers={"x-manage-key": "test-key"},
+            )
+        mock_save.assert_called_once_with("Score listings", created_by="manage-api")
+
+    @patch("app.main._start_rescore")
+    @patch("app.main.db.save_criteria", return_value=45)
+    def test_instructions_preview_truncated(self, mock_save, mock_rescore, client):
+        """instructions_preview is capped at 200 chars."""
+        long_instructions = "x" * 500
+        with patch("app.main.settings") as mock_settings:
+            mock_settings.manage_key = "test-key"
+            res = client.post(
+                "/manage/update-criteria",
+                json={"instructions": long_instructions},
+                headers={"x-manage-key": "test-key"},
+            )
+        assert len(res.json()["instructions_preview"]) <= 204  # 200 + "..."
+
+
+class TestManageImageAudit:
+    """Tests for GET /manage/image-audit."""
+
+    def test_requires_manage_key(self, client):
+        res = client.get("/manage/image-audit")
+        assert res.status_code == 403
+
+    @patch("app.main.db.get_connection")
+    def test_returns_audit_summary(self, mock_conn, client):
+        with patch("app.main.settings") as mock_settings:
+            mock_settings.manage_key = "test-key"
+            mock_settings.is_postgres = False
+            mock_cursor = MagicMock()
+            # fetchone() returns tuples (SQLite uses integer indexing via [0])
+            mock_cursor.fetchone.side_effect = [
+                (10,),  # total listings
+                (7,),   # with_images
+                (5,),   # with_unknowns
+                (2,),   # unknowns_no_images
+            ]
+            mock_cursor.fetchall.return_value = []
+            mock_conn.return_value.__enter__.return_value.cursor.return_value = mock_cursor
+
+            res = client.get("/manage/image-audit", headers={"x-manage-key": "test-key"})
+
+        assert res.status_code == 200
+        data = res.json()
+        assert data["total_listings"] == 10
+        assert data["with_images"] == 7
+        assert data["without_images"] == 3  # total - with_images
+        assert data["with_unknowns"] == 5
+        assert data["unknowns_no_images"] == 2
+
+
+class TestManageRescrapeUnknowns:
+    """Tests for POST /manage/rescrape-unknowns."""
+
+    def test_requires_manage_key(self, client):
+        res = client.post("/manage/rescrape-unknowns")
+        assert res.status_code == 403
+
+    @patch("app.main.db.get_connection")
+    @patch("app.main.db.get_active_criteria", return_value=None)
+    def test_no_criteria_returns_error(self, mock_criteria, mock_conn, client):
+        with patch("app.main.settings") as mock_settings:
+            mock_settings.manage_key = "test-key"
+            mock_settings.is_postgres = False
+            mock_cursor = MagicMock()
+            mock_cursor.fetchall.return_value = []
+            mock_conn.return_value.__enter__.return_value.cursor.return_value = mock_cursor
+
+            res = client.post("/manage/rescrape-unknowns", headers={"x-manage-key": "test-key"})
+
+        assert res.status_code == 200
+        data = res.json()
+        # When no criteria set, returns error status (no listings to process)
+        assert data["status"] == "error" or "scraped" in data

@@ -478,3 +478,35 @@ class TestFetchCommuteTime:
         mock_settings.commute_destination = ""
         result = fetch_commute_time("10 Sherman Ave", "Rye", "NY", "10580")
         assert result is None
+
+
+class TestNormalizeAddressHyphen:
+    """Regression tests for hyphenated town names producing duplicate listings.
+
+    Root cause: 'Croton-On-Hudson' and 'Croton On Hudson' generated different
+    address keys, bypassing dedup logic. Fix: strip hyphens during normalization.
+    """
+
+    def test_hyphenated_town_matches_spaced(self):
+        """Croton-On-Hudson and Croton On Hudson should produce identical keys."""
+        key1 = normalize_address("19 Georgia Ln", "Croton-On-Hudson", "NY")
+        key2 = normalize_address("19 Georgia Ln", "Croton On Hudson", "NY")
+        assert key1 == key2
+
+    def test_hyphenated_town_lowercase(self):
+        """Hyphen normalization works regardless of input case."""
+        key1 = normalize_address("19 Georgia Ln", "croton-on-hudson", "NY")
+        key2 = normalize_address("19 Georgia Ln", "Croton On Hudson", "NY")
+        assert key1 == key2
+
+    def test_hyphenated_address_matches_spaced(self):
+        """Hyphens in the street address are also normalized."""
+        key1 = normalize_address("10 Maple-Ridge Rd", "Bedford", "NY")
+        key2 = normalize_address("10 Maple Ridge Rd", "Bedford", "NY")
+        assert key1 == key2
+
+    def test_non_hyphenated_towns_still_differ(self):
+        """Unrelated towns with same address should not match after hyphen fix."""
+        key1 = normalize_address("19 Georgia Ln", "Croton-On-Hudson", "NY")
+        key2 = normalize_address("19 Georgia Ln", "Yorktown", "NY")
+        assert key1 != key2
