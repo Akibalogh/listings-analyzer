@@ -807,7 +807,12 @@ def update_listing_enrichment(listing_id: int, enrichment: dict):
     Only updates columns present in the enrichment dict (supports partial updates).
     Automatically sets enriched_at timestamp.
     """
-    allowed_cols = {"address_key", "school_data_json", "commute_minutes", "commute_data_json", "property_tax_json"}
+    allowed_cols = {
+        "address_key", "school_data_json", "commute_minutes", "commute_data_json",
+        "property_tax_json", "power_line_json", "flood_zone_json", "station_json",
+        "lat", "lng", "garage_count", "garage_type", "hoa_monthly",
+        "has_pool", "pool_type", "has_basement", "basement_type",
+    }
     cols_to_update = {k: v for k, v in enrichment.items() if k in allowed_cols}
     if not cols_to_update:
         return
