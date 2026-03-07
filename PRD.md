@@ -176,27 +176,36 @@ Listing data (address, description, etc.) could contain malicious instructions.
 - Must be detached (no townhouse, condo, co-op)
 - Must have a finished basement
 
-**Soft Features** (base score 20 + points):
+**Soft Features** (base score 25 + points):
 
 | Feature | Points |
 |---|---|
-| Base (all hard reqs pass) | +20 |
+| Base (all hard reqs pass) | +25 |
+| School district — strong (95th+ percentile) | +25 |
+| School district — good (80–94th percentile) | +15 |
+| School district — average (below 80th) | +5 |
 | Ground-floor bedroom — confirmed present | +15 |
-| Ground-floor bedroom — confirmed absent | -20 to -25 |
-| Ground-floor bedroom — unknown, verifiable (images show layout but floor unclear) | -10 to -15 |
+| Ground-floor bedroom — confirmed absent | -45 to -50 |
+| Ground-floor bedroom — unknown, verifiable (floor plans present, not confirmed) | -10 to -15 |
 | Ground-floor bedroom — unknown, no floor plan data | -3 to -5 |
-| Finished basement | +20 |
-| Lot >= 0.3 acre | +10 |
-| Pool | +10 |
-| Sauna | +5 |
-| Jacuzzi/hot tub | +5 |
-| Soaking tub | +5 |
+| Ground-floor full bathroom | +15 |
+| 4-bedroom layout | +10 |
+| Dedicated office (beyond bedroom count) | +5 |
+| Finished basement | +10 |
+| Garage — two-car | +5 |
+| Garage — one-car | +2 |
+| Lot/drainage — elevated/hillside | +3 to +5 |
+| Lot/drainage — low-lying | -3 |
+| HOA present | 0 (fold into carrying cost; flag if >$500/mo) |
+| Pool | -5 |
+| Privacy buffer / meaningful lot | +5 to +10 |
 
-Ground-floor bedroom is point-based (not a hard reject) — confirming it absent is a major deduction; true unknowns (no floor plan data) receive only a mild penalty since the information simply isn't available.
+Ground-floor bedroom is the #1 priority (buyer's parents will live on ground floor). Confirmed absent is a near-disqualifying deduction.
 
 **Soft Warnings** (lower score slightly, never cause Reject):
 - Price above $1.5M → -5 to -10 pts
-- 4,500+ sqft → -5 to -10 pts
+- 4,000–4,500 sqft → -5 pts
+- 4,500+ sqft → -12 pts
 - 6+ bedrooms → -5 to -10 pts
 
 ### Verdict Logic
@@ -293,6 +302,7 @@ Mobile-first single-page app served at `/` (`app/templates/dashboard.html`).
 - **tour_requested (BOOLEAN DEFAULT FALSE)** — "Want to Go" flag
 - **year_built (INTEGER, nullable)** — extracted from listing page or OneKeyMLS JSON-LD
 - **list_date (TEXT, nullable)** — on-market date (YYYY-MM-DD); extracted from OneKeyMLS JSON-LD `OnMarketDate`
+- **lot_acres (REAL, nullable)** — extracted from JSON-LD `lotSize` field, or visible text ("0.25 acres", "10,890 sq ft lot"); valid range 0.01–1000
 - created_at
 
 ### Table: scores
@@ -447,10 +457,14 @@ Mobile-first single-page app served at `/` (`app/templates/dashboard.html`).
 ### Phase 3 ✅ Complete
 - **Age/condition scoring** — deterministic from `year_built` (age tiers: pre-1940 → -22 pts, 2005+ → 0) plus keyword scan of description (e.g. "new roof" +6, "sold as is" -12). Passed to AI as `age_condition` signal. No external API.
 - **Price/sqft benchmark** — Zillow ZHVI CSV loaded at startup (~5MB, monthly zip-level medians). Computes `below_market` / `at_market` / `above_market` signal. Passed to AI as `price_per_sqft_signal`.
-- **Property tax** — NY Open Data SODA API (free, no key required). Fetches assessed/market value for NYC boroughs during enrichment. Stored as `property_tax_json`. Passed to AI as `property_tax`.
+- **Property tax — NYC SODA** — NY Open Data SODA API (free, no key required). Fetches assessed/market value for NYC boroughs during enrichment. Stored as `property_tax_json`. Passed to AI as `property_tax`.
+- **Property tax — NY ORPTS** — NY State ORPTS API (`data.ny.gov/resource/7vem-aaz7.json`) fetches assessed/taxable values for all NY municipalities outside NYC (Westchester, Rockland, etc.). Integrated as fallback after NYC SODA. Municipality name mapped via `_ORPTS_MUNICIPALITY_MAP` (40+ Westchester hamlet→town mappings, e.g., Armonk→North Castle, Chappaqua→New Castle). Streets stored UPPERCASE with suffix in same field (e.g., "PHEASANT DR").
 - **GFB inference improvements** — scorer system prompt expanded with 4-signal framework (floor plan labels, description text, photo examination, property type/age inference). Opus now commits at 60%+ confidence instead of defaulting to "unknown". Only returns unknown if all four signals are truly absent or contradictory.
 - **Criteria v42** — schools tiered (+25 strong/95th+, +15 good/80–94th, +5 average/below 80th); price taper steeper (-5 at $1.5–1.65M, -10 at $1.65–1.8M, -15 above $1.8M); price/sqft signal doubled (±10 from ±5); Condition section collapsed into Age & Physical Condition to eliminate double-counting.
+- **Criteria v43–v46** — garage scoring (+5 two-car, +2 one-car); pool reduced -15→-5 (maintenance burden, not desired but not a dealbreaker); HOA folded into carrying cost (no direct penalty); hill/drainage added (+3 to +5 elevated, -3 low-lying); sqft penalty starts at 4,000 sqft (4,000–4,500: -5, 4,500+: -12); lot_acres field added to criteria context.
 - **`/manage/update-listing` endpoint** — update individual listing fields (year_built, price, sqft, beds, baths, address) without re-scraping; used for manual data backfill.
+- **`clear_bogus_commute` flag** — `POST /manage/enrich?clear_bogus_commute=true` nulls commute data for listings where `commute_mode == "transit"` (transit-only = unreliable for suburban drives); forces re-enrichment with drive+transit as intended.
+- **Lot size extraction** — `lot_acres` added as structured field; extracted from JSON-LD `lotSize` (object and string forms) and visible page text ("0.25 acres", "10,890 sq ft lot"); stored as `REAL` column; backfilled from stored description text during Phase 4 of `/manage/scrape-descriptions`.
 - **year_built backfill** — scraped from Redfin via Jina Reader for 3 listings missing the field (#62 → 1994, #483 → 1948).
 
 ### Phase 4 (Future)

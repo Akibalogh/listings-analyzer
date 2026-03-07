@@ -7,6 +7,24 @@ All notable changes to Listings Analyzer are documented here.
 ## [Unreleased]
 
 ### Added
+- **NY ORPTS property tax** — `fetch_property_tax_orpts()` in `enrichment.py` queries NY State ORPTS API (`data.ny.gov/resource/7vem-aaz7.json`) for assessed/taxable values for Westchester and other NY municipalities outside NYC. Integrated as fallback after NYC SODA. Municipality names mapped via `_ORPTS_MUNICIPALITY_MAP` (40+ hamlet→town mappings). Streets queried as UPPERCASE with suffix in same field.
+- **Lot size as structured field** — `lot_acres REAL` column added to `listings` table; extracted from listing pages via JSON-LD `lotSize` (object and string forms), text "X.XX acres", and "N,NNN sq ft lot"; valid range 0.01–1000 acres; backfilled from stored description text in Phase 4 of `/manage/scrape-descriptions`.
+- **`clear_bogus_commute` flag** — `POST /manage/enrich?clear_bogus_commute=true` nulls commute data for listings where `commute_mode == "transit"` (pure transit = walk/bus, unreliable for suburban areas). Forces re-enrichment with drive+transit mode.
+- **Criteria v43** — garage scoring (+5 two-car, +2 one-car, 0 no garage); pool penalty reduced -15→-5; HOA folded into carrying cost (no direct penalty, flag if >$500/mo); lot/drainage scoring (+3 to +5 elevated/hillside, -3 low-lying).
+- **Criteria v44** — lot_acres context added to instructions for AI scoring.
+- **Criteria v45–v46** — sqft penalty restructured: 4,000–4,500 sqft → -5 pts, 4,500+ → -12 pts (starts at 4,000 per buyer preference, not 3,800).
+- **7 new tests for ORPTS** — `TestFetchPropertyTaxOrpts` in `test_enrichment.py`: municipality map contents, structured data return, not-found case, exception handling, missing inputs, cache hit, NYC SODA fallthrough.
+- **7 new tests for lot size extraction** — `TestLotAcresExtraction` in `test_onehome_parser.py`: JSON-LD object, JSON-LD string (acres + sqft), visible text (acres + sqft), unrealistic value rejection, priority order.
+
+### Changed
+- **Phase 4 backfill in `/manage/scrape-descriptions`** — now also backfills `lot_acres` from stored description text for listings missing the field (in addition to year_built/list_date).
+- **`_NUMERIC_COLUMNS`** added in `db.py` — ensures `lot_acres` (REAL) uses `IS NULL` checks instead of `= ''` in `update_listing_fields_by_id`.
+
+### Fixed
+- **API tests broken by lot_acres Phase 4** — mock listings in `test_api.py` updated to include `lot_acres: 0.5`, preventing Phase 4 from hitting unmocked DB calls.
+- **`test_reprocess_finds_urls`** — added mock for `db.backfill_listing_address` (was calling unmocked DB function).
+
+### Added (previous session)
 - **GFB 4-signal inference** — scorer system prompt expanded with explicit 4-signal framework for ground-floor bedroom determination: (1) floor plan image labels (Den/Study/Guest Room on ground floor), (2) description text patterns ("first floor bedroom", "in-law suite", "master on main"), (3) photo examination (beds visible at ground level), (4) property type + age inference (ranch = always GFB, Colonial/Tudor = rarely). Opus commits at 60%+ confidence; only returns "unknown" if all four signals are absent/contradictory.
 - **Criteria v42** — tiered school scoring (+25 strong/95th+ percentile, +15 good/80–94th, +5 average/below 80th; previously flat +35); steeper price taper (-5 at $1.5–1.65M, -10 at $1.65–1.8M, -15 above $1.8M; previously -5 to -10 flat); price/sqft signal doubled (±10, was ±5); old "Condition" section collapsed into "Age & Physical Condition" — eliminates double-counting.
 - **`/manage/update-listing` endpoint** — update individual listing fields (year_built, price, sqft, bedrooms, bathrooms, address, town, state, zip_code) by listing ID without re-scraping. Protected by MANAGE_KEY.
