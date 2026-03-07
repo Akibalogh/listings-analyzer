@@ -939,7 +939,7 @@ def _rescore_all_sequential(
     )
 
 
-def _start_rescore(criteria_version: int, instructions: str):
+def _start_rescore(criteria_version: int, instructions: str, sequential: bool = False):
     """Launch background re-score thread if not already running."""
     if db.rescore_state["in_progress"]:
         logger.warning("Re-score already in progress, skipping")
@@ -949,12 +949,39 @@ def _start_rescore(criteria_version: int, instructions: str):
     db.rescore_state["criteria_version"] = criteria_version
     db.rescore_state["skipped"] = 0
     db.rescore_state["batch_id"] = None
+    target = _rescore_all_sequential_standalone if sequential else _rescore_all
     t = threading.Thread(
-        target=_rescore_all,
+        target=target,
         args=(criteria_version, instructions),
         daemon=True,
     )
     t.start()
+
+
+def _rescore_all_sequential_standalone(criteria_version: int, instructions: str):
+    """Sequential rescore entry point (bypasses batch API entirely)."""
+    try:
+        listing_ids = db.get_all_listing_ids()
+        score_metadata = db.get_all_score_metadata()
+        ids_to_score = []
+        skip_count = 0
+        for lid in listing_ids:
+            listing = db.get_listing_by_id(lid)
+            if not listing:
+                continue
+            meta = score_metadata.get(lid)
+            if _should_skip(listing, meta, criteria_version):
+                skip_count += 1
+            else:
+                ids_to_score.append(lid)
+        db.rescore_state["total"] = len(ids_to_score) + skip_count
+        db.rescore_state["skipped"] = skip_count
+        criteria = {"instructions": instructions, "version": criteria_version}
+        _rescore_all_sequential(criteria_version, instructions, ids_to_score, {})
+    except Exception:
+        logger.exception("Sequential standalone rescore failed")
+    finally:
+        db.rescore_state["in_progress"] = False
 
 
 # --- Management Endpoints ---
@@ -979,20 +1006,25 @@ def sync_criteria(request: Request):
         raise HTTPException(status_code=404, detail="No active criteria found — set criteria via AI Criteria in dashboard first")
 
     force = request.query_params.get("force", "").lower() == "true"
+    sequential = request.query_params.get("sequential", "").lower() == "true"
     if force:
         with db.get_connection() as conn:
             cur = conn.cursor()
             cur.execute("UPDATE scores SET criteria_version = NULL")
         logger.info("Force rescore: cleared criteria_version on all scores")
 
-    _start_rescore(criteria["version"], criteria["instructions"])
-    logger.info(f"Triggered rescore with active criteria v{criteria['version']}")
+    _start_rescore(criteria["version"], criteria["instructions"], sequential=sequential)
+    logger.info(
+        f"Triggered rescore with active criteria v{criteria['version']} "
+        f"({'sequential' if sequential else 'batch'})"
+    )
 
     return {
         "synced": True,
         "version": criteria["version"],
         "rescore_started": True,
         "force": force,
+        "mode": "sequential" if sequential else "batch",
         "instructions_preview": criteria["instructions"][:200] + "...",
     }
 
