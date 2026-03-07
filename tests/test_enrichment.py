@@ -284,15 +284,9 @@ class TestFetchCommuteTime:
     @patch("app.enrichment.settings")
     @patch("app.enrichment.httpx.Client")
     def test_parses_drive_transit_duration_correctly(self, mock_client_cls, mock_settings):
-        """drive+transit is preferred over pure transit for suburban addresses."""
+        """drive+transit: drive 10 min to station, 55 min transit = 65 min total."""
         mock_settings.google_maps_api_key = "test_key"
         mock_settings.commute_destination = "Brookfield Place, NYC"
-
-        transit_resp = MagicMock()
-        transit_resp.json.return_value = {
-            "routes": [{"duration": "3960s", "distanceMeters": 45000}]  # 66 min transit
-        }
-        transit_resp.raise_for_status = MagicMock()
 
         station_transit_resp = MagicMock()
         station_transit_resp.json.return_value = {
@@ -309,12 +303,13 @@ class TestFetchCommuteTime:
         mock_client = MagicMock()
         mock_client.__enter__ = MagicMock(return_value=mock_client)
         mock_client.__exit__ = MagicMock(return_value=False)
-        mock_client.post.side_effect = [transit_resp, station_transit_resp, drive_resp]
+        # Call 1: TRANSIT from station → 55 min
+        # Call 2: DRIVE to station → 10 min
+        mock_client.post.side_effect = [station_transit_resp, drive_resp]
         mock_client_cls.return_value = mock_client
 
         result = fetch_commute_time("10 Sherman Ave", "Rye", "NY", "10580")
         assert result is not None
-        # drive+transit (65 min) is preferred over pure transit (66 min) for suburbs
         assert result["commute_mode"] == "drive+transit"
         assert result["commute_minutes"] == 65  # 10 min drive + 55 min transit
         assert result["drive_minutes"] == 10
@@ -322,8 +317,8 @@ class TestFetchCommuteTime:
 
     @patch("app.enrichment.settings")
     @patch("app.enrichment.httpx.Client")
-    def test_falls_back_to_drive_plus_transit(self, mock_client_cls, mock_settings):
-        """When TRANSIT from address fails, compute drive-to-station + transit."""
+    def test_returns_none_when_station_transit_fails(self, mock_client_cls, mock_settings):
+        """Returns None when no transit route from station to destination."""
         mock_settings.google_maps_api_key = "test_key"
         mock_settings.commute_destination = "Brookfield Place, NYC"
 
@@ -331,52 +326,40 @@ class TestFetchCommuteTime:
         no_routes.json.return_value = {"routes": []}
         no_routes.raise_for_status = MagicMock()
 
-        station_transit = MagicMock()
-        station_transit.json.return_value = {
-            "routes": [{"duration": "3600s", "distanceMeters": 50000}]  # 60 min
-        }
-        station_transit.raise_for_status = MagicMock()
-
-        drive_to_station = MagicMock()
-        drive_to_station.json.return_value = {
-            "routes": [{"duration": "600s", "distanceMeters": 5000}]  # 10 min
-        }
-        drive_to_station.raise_for_status = MagicMock()
-
         mock_client = MagicMock()
         mock_client.__enter__ = MagicMock(return_value=mock_client)
         mock_client.__exit__ = MagicMock(return_value=False)
-        # Call 1: TRANSIT from address → no routes
-        # Call 2: TRANSIT from station → 60 min
-        # Call 3: DRIVE to station → 10 min
-        mock_client.post.side_effect = [no_routes, station_transit, drive_to_station]
+        mock_client.post.return_value = no_routes
         mock_client_cls.return_value = mock_client
 
         result = fetch_commute_time("31 Lalli Dr", "Katonah", "NY", "10536")
-        assert result is not None
-        assert result["commute_minutes"] == 70  # 10 + 60
-        assert result["commute_mode"] == "drive+transit"
-        assert result["drive_minutes"] == 10
-        assert result["transit_minutes"] == 60
+        assert result is None
 
     @patch("app.enrichment.settings")
     @patch("app.enrichment.httpx.Client")
-    def test_handles_no_routes_any_mode(self, mock_client_cls, mock_settings):
-        """Returns None when no transit routes exist (direct or via station)."""
+    def test_returns_none_when_drive_to_station_fails(self, mock_client_cls, mock_settings):
+        """Returns None when drive route to station is unavailable."""
         mock_settings.google_maps_api_key = "test_key"
         mock_settings.commute_destination = "Brookfield Place, NYC"
 
-        mock_response = MagicMock()
-        mock_response.json.return_value = {"routes": []}
-        mock_response.raise_for_status = MagicMock()
+        station_transit = MagicMock()
+        station_transit.json.return_value = {
+            "routes": [{"duration": "3600s", "distanceMeters": 50000}]
+        }
+        station_transit.raise_for_status = MagicMock()
+
+        no_routes = MagicMock()
+        no_routes.json.return_value = {"routes": []}
+        no_routes.raise_for_status = MagicMock()
 
         mock_client = MagicMock()
         mock_client.__enter__ = MagicMock(return_value=mock_client)
         mock_client.__exit__ = MagicMock(return_value=False)
-        mock_client.post.return_value = mock_response
+        # Call 1: TRANSIT from station → ok; Call 2: DRIVE to station → no routes
+        mock_client.post.side_effect = [station_transit, no_routes]
         mock_client_cls.return_value = mock_client
 
-        result = fetch_commute_time("Remote Island", "Nowhere", "NY", "00000")
+        result = fetch_commute_time("31 Lalli Dr", "Katonah", "NY", "10536")
         assert result is None
 
     @patch("app.enrichment.settings")
@@ -393,92 +376,6 @@ class TestFetchCommuteTime:
 
         result = fetch_commute_time("10 Sherman Ave", "Rye", "NY", "10580")
         assert result is None
-
-    @patch("app.enrichment.settings")
-    @patch("app.enrichment.httpx.Client")
-    def test_picks_shorter_of_two_strategies(self, mock_client_cls, mock_settings):
-        """When both transit and drive+transit work, pick the shorter one."""
-        mock_settings.google_maps_api_key = "test_key"
-        mock_settings.commute_destination = "Brookfield Place, NYC"
-
-        # Strategy 1: direct transit = 152 min (long walk to station)
-        direct_transit = MagicMock()
-        direct_transit.json.return_value = {
-            "routes": [{"duration": "9120s", "distanceMeters": 60000}]  # 152 min
-        }
-        direct_transit.raise_for_status = MagicMock()
-
-        # Strategy 2: station transit = 60 min, drive to station = 10 min → 70 min total
-        station_transit = MagicMock()
-        station_transit.json.return_value = {
-            "routes": [{"duration": "3600s", "distanceMeters": 50000}]  # 60 min
-        }
-        station_transit.raise_for_status = MagicMock()
-
-        drive_to_station = MagicMock()
-        drive_to_station.json.return_value = {
-            "routes": [{"duration": "600s", "distanceMeters": 5000}]  # 10 min
-        }
-        drive_to_station.raise_for_status = MagicMock()
-
-        mock_client = MagicMock()
-        mock_client.__enter__ = MagicMock(return_value=mock_client)
-        mock_client.__exit__ = MagicMock(return_value=False)
-        # Call 1: TRANSIT from address → 152 min
-        # Call 2: TRANSIT from station → 60 min
-        # Call 3: DRIVE to station → 10 min
-        mock_client.post.side_effect = [direct_transit, station_transit, drive_to_station]
-        mock_client_cls.return_value = mock_client
-
-        result = fetch_commute_time("471 Chappaqua Rd", "Briarcliff Manor", "NY", "10510")
-        assert result is not None
-        assert result["commute_minutes"] == 70  # drive+transit wins
-        assert result["commute_mode"] == "drive+transit"
-        assert result["drive_minutes"] == 10
-        assert result["transit_minutes"] == 60
-
-    @patch("app.enrichment.settings")
-    @patch("app.enrichment.httpx.Client")
-    def test_drive_transit_preferred_over_shorter_pure_transit(self, mock_client_cls, mock_settings):
-        """drive+transit is always preferred for NY suburbs, even if pure transit is shorter.
-
-        Pure transit routes in Westchester are often misleading (multi-bus combos)
-        while the real commute is drive-to-station + train.
-        """
-        mock_settings.google_maps_api_key = "test_key"
-        mock_settings.commute_destination = "Brookfield Place, NYC"
-
-        # Strategy 1: direct transit = 55 min (Google found a bus route)
-        direct_transit = MagicMock()
-        direct_transit.json.return_value = {
-            "routes": [{"duration": "3300s", "distanceMeters": 40000}]  # 55 min
-        }
-        direct_transit.raise_for_status = MagicMock()
-
-        # Strategy 2: station transit = 50 min, drive to station = 15 min → 65 min total
-        station_transit = MagicMock()
-        station_transit.json.return_value = {
-            "routes": [{"duration": "3000s", "distanceMeters": 50000}]  # 50 min
-        }
-        station_transit.raise_for_status = MagicMock()
-
-        drive_to_station = MagicMock()
-        drive_to_station.json.return_value = {
-            "routes": [{"duration": "900s", "distanceMeters": 8000}]  # 15 min
-        }
-        drive_to_station.raise_for_status = MagicMock()
-
-        mock_client = MagicMock()
-        mock_client.__enter__ = MagicMock(return_value=mock_client)
-        mock_client.__exit__ = MagicMock(return_value=False)
-        mock_client.post.side_effect = [direct_transit, station_transit, drive_to_station]
-        mock_client_cls.return_value = mock_client
-
-        result = fetch_commute_time("10 Sherman Ave", "Rye", "NY", "10580")
-        assert result is not None
-        # drive+transit wins even though pure transit (55 min) appears shorter
-        assert result["commute_mode"] == "drive+transit"
-        assert result["commute_minutes"] == 65  # 15 min drive + 50 min transit
 
     def test_station_overrides_exist(self):
         """Verify key station overrides are configured."""

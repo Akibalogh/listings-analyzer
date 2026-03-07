@@ -338,62 +338,33 @@ def fetch_commute_time(
     origin = f"{address}, {town}, {state or ''} {zip_code or ''}".strip()
     departure_time = _next_weekday_8am()
 
-    candidates: list[dict] = []
-
-    # Strategy 1: TRANSIT from address (walking access to station)
-    route = _routes_request(origin, destination, "TRANSIT", departure_time)
-    if route:
-        duration_seconds = _parse_duration(route)
-        commute_minutes = round(duration_seconds / 60)
-        logger.info(f"Commute (transit): {origin} → {destination} = {commute_minutes} min")
-        candidates.append({
-            "commute_minutes": commute_minutes,
-            "commute_mode": "transit",
-            "departure_time": departure_time.isoformat(),
-            "route_duration_seconds": duration_seconds,
-        })
-
-    # Strategy 2: drive to station + transit from station
+    # Drive to nearest Metro-North station + transit to destination
     station_town = _STATION_OVERRIDES.get(town.lower(), town)
     station = f"{station_town} train station, {state or 'NY'}"
     station_transit = _routes_request(station, destination, "TRANSIT", departure_time)
-    if station_transit:
-        drive_to_station = _routes_request(origin, station, "DRIVE")
-        if drive_to_station:
-            drive_secs = _parse_duration(drive_to_station)
-            transit_secs = _parse_duration(station_transit)
-            total_seconds = drive_secs + transit_secs
-            commute_minutes = round(total_seconds / 60)
-            logger.info(
-                f"Commute (drive+transit): {origin} → {station} ({round(drive_secs/60)} min drive) "
-                f"→ {destination} ({round(transit_secs/60)} min transit) = {commute_minutes} min total"
-            )
-            candidates.append({
-                "commute_minutes": commute_minutes,
-                "commute_mode": "drive+transit",
-                "departure_time": departure_time.isoformat(),
-                "route_duration_seconds": total_seconds,
-                "drive_minutes": round(drive_secs / 60),
-                "transit_minutes": round(transit_secs / 60),
-                "station": station,
-            })
-
-    if not candidates:
-        logger.warning(f"No transit routes found for {origin} (direct or via station)")
+    if not station_transit:
+        logger.warning(f"No transit route from {station} to {destination} for {origin}")
         return None
 
-    # Prefer drive+transit over pure transit — for NY suburbs, driving to the station
-    # is the realistic commute mode. Pure transit (walking to station) often returns
-    # multi-bus routes that are far longer than the realistic drive+train option.
-    drive_transit = [c for c in candidates if c["commute_mode"] == "drive+transit"]
-    if drive_transit:
-        best = min(drive_transit, key=lambda c: c["commute_minutes"])
-    else:
-        best = min(candidates, key=lambda c: c["commute_minutes"])
-    if len(candidates) > 1:
-        other = [c for c in candidates if c is not best][0]
-        logger.info(
-            f"Commute: picked {best['commute_mode']} ({best['commute_minutes']} min) "
-            f"over {other['commute_mode']} ({other['commute_minutes']} min) for {origin}"
-        )
-    return best
+    drive_to_station = _routes_request(origin, station, "DRIVE")
+    if not drive_to_station:
+        logger.warning(f"No drive route from {origin} to {station}")
+        return None
+
+    drive_secs = _parse_duration(drive_to_station)
+    transit_secs = _parse_duration(station_transit)
+    total_seconds = drive_secs + transit_secs
+    commute_minutes = round(total_seconds / 60)
+    logger.info(
+        f"Commute (drive+transit): {origin} → {station} ({round(drive_secs/60)} min drive) "
+        f"→ {destination} ({round(transit_secs/60)} min transit) = {commute_minutes} min total"
+    )
+    return {
+        "commute_minutes": commute_minutes,
+        "commute_mode": "drive+transit",
+        "departure_time": departure_time.isoformat(),
+        "route_duration_seconds": total_seconds,
+        "drive_minutes": round(drive_secs / 60),
+        "transit_minutes": round(transit_secs / 60),
+        "station": station,
+    }

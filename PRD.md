@@ -45,7 +45,7 @@ You want:
 
 ### Data Enrichment
 - **School data** — SchoolDigger API (free DEV tier, 20 calls/day) fetches nearby school rankings by zip code; cached in DB to avoid rate limit; displayed on cards and fed into AI scoring
-- **Transit commute times** — Google Routes API (Essentials tier, 10K free/month) calculates commute to Brookfield Place NYC (next weekday 8 AM); always uses drive-to-station + transit (realistic suburban commute mode); pure walk-to-station transit is computed as a fallback only when drive+transit is unavailable; station overrides map towns to their nearest Metro-North station (e.g., Cortlandt Manor → Croton-Harmon, Chappaqua/Millwood/New Castle → Chappaqua, Armonk/North Castle → North White Plains); displayed as badge on dashboard cards
+- **Transit commute times** — Google Routes API (Essentials tier, 10K free/month) calculates commute to Brookfield Place NYC (next weekday 8 AM); always drive-to-station + transit (the only mode — no walking/bus routes); station overrides map towns to their nearest Metro-North station (e.g., Cortlandt Manor → Croton-Harmon, Chappaqua/Millwood/New Castle → Chappaqua, Armonk/North Castle → North White Plains); displayed as badge on dashboard cards
 - **Address-based dedup** — Normalized address keys (Avenue→Ave, Street→St, New York→NY, etc.) prevent duplicate listings across different email parsers; keys are recomputed on every startup so normalization improvements apply retroactively; startup dedup pass merges any duplicates that emerge, keeping the listing with toured status / most data
 
 ## 3. User Flow
@@ -436,7 +436,7 @@ Mobile-first single-page app served at `/` (`app/templates/dashboard.html`).
 - OneKey MLS DDG address search, listing status extraction, structured data extraction
 - HTML URL backfill in plaintext parser (matches Redfin URLs from HTML to text-parsed listings)
 - Structured data backfill for bare-URL listings (OneKey MLS) before scoring
-- Drive+transit commute preference: always use drive-to-station + train for NY suburbs; pure transit (walking) only as fallback
+- Commute is drive-to-station + transit only: pure transit (walking/bus) removed entirely for consistent, comparable commute times across all listings
 - Station overrides expanded: Cortlandt Manor → Croton-Harmon; Chappaqua/Millwood/New Castle → Chappaqua; Armonk/North Castle → North White Plains
 - `POST /manage/update-criteria` endpoint for criteria updates without Google OAuth (protected by MANAGE_KEY)
 - Ground-floor bedroom scoring changed from binary reject to point-based: +15 confirmed, -20/-25 confirmed absent, -10/-15 verifiable unknown, -3/-5 missing-data unknown
