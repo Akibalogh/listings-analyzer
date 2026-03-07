@@ -306,6 +306,7 @@ Mobile-first single-page app served at `/` (`app/templates/dashboard.html`).
 - **lat (REAL, nullable)**, **lng (REAL, nullable)** — geocoded coordinates (Nominatim); used for OSM and FEMA lookups
 - **power_line_json (TEXT, nullable)** — OSM Overpass result: nearest transmission line/tower distance/type/voltage within 300m
 - **flood_zone_json (TEXT, nullable)** — FEMA NFHL result: fld_zone, zone_subty, sfha flag
+- **station_json (TEXT, nullable)** — nearest Metro-North station: name, distance_m, walk_minutes
 - created_at
 
 ### Table: scores

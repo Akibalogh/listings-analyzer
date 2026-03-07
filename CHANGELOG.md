@@ -7,6 +7,10 @@ All notable changes to Listings Analyzer are documented here.
 ## [Unreleased]
 
 ### Added
+- **Metro-North station proximity** — `fetch_station_proximity()` in `enrichment.py` finds nearest Metro-North station using a static 61-station dataset (Harlem, Hudson, New Haven lines). No API call at runtime. Returns station name, distance_m, walk_minutes (at 5km/h). `station_json TEXT` column added. Passed to AI scorer as `nearest_metro_north`.
+- **Criteria v50** — flood zone penalty adjusted: Zone AE/VE -20 (was -15), Zone X 500-year 0 (was -5).
+- **Criteria v51** — Metro-North station walking distance scoring: +5 under 10 min walk, 0 at 10–20 min, -5 over 20 min.
+- **6 new tests for station proximity** — `TestFetchStationProximity` in `test_enrichment.py`.
 - **FEMA flood zone detection** — `fetch_flood_zone()` in `enrichment.py` queries FEMA NFHL ArcGIS REST API (free, no key) by lat/lon. Returns `fld_zone`, `zone_subty`, and `sfha` (bool). `flood_zone_json TEXT` column added to `listings` table. Passed to AI scorer as `flood_zone` structured field.
 - **Criteria v47** — calibration rebalance from buyer preference study: base 25→30, school average 0 (was +5), GFBath +8 (was +15), 4BR +8 (was +10), basement +5 (was +10), commute >110 -15 (was -10).
 - **Power line proximity detection** — `fetch_power_line_proximity()` queries OSM Overpass API (free) for high-voltage transmission infrastructure (power=line/cable/tower) within 300m radius. Returns nearest distance, type, voltage. `lat REAL`, `lng REAL`, `power_line_json TEXT` columns added.

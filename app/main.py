@@ -771,6 +771,15 @@ def _build_listing_data(listing_row: dict) -> dict:
         except (json.JSONDecodeError, TypeError):
             pass
 
+    # Metro-North station proximity (stored JSON if previously fetched)
+    if listing_row.get("station_json"):
+        try:
+            st = json.loads(listing_row["station_json"])
+            if st.get("station"):
+                listing_data["nearest_metro_north"] = st
+        except (json.JSONDecodeError, TypeError):
+            pass
+
     return listing_data
 
 
@@ -1614,7 +1623,7 @@ def _enrich_all(clear_bogus: bool = False, clear_bogus_commute: bool = False):
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    from app.enrichment import fetch_commute_time, fetch_school_data, normalize_address, fetch_property_tax, fetch_property_tax_orpts, fetch_power_line_proximity, fetch_flood_zone
+    from app.enrichment import fetch_commute_time, fetch_school_data, normalize_address, fetch_property_tax, fetch_property_tax_orpts, fetch_power_line_proximity, fetch_flood_zone, fetch_station_proximity
 
     try:
         listing_ids = db.get_all_listing_ids()
@@ -1756,6 +1765,20 @@ def _enrich_all(clear_bogus: bool = False, clear_bogus_commute: bool = False):
                 elif listing.get("address") and listing.get("town"):
                     # Mark as checked to avoid re-querying
                     enrichment["flood_zone_json"] = json.dumps({"fld_zone": None, "source": "fema_nfhl"})
+                    changed = True
+
+            # Metro-North station proximity (static dataset, no API call)
+            if not listing.get("station_json"):
+                station_data = fetch_station_proximity(
+                    listing.get("address"),
+                    town=listing.get("town"),
+                    state=listing.get("state"),
+                )
+                if station_data:
+                    enrichment["station_json"] = json.dumps(station_data)
+                    changed = True
+                elif listing.get("address") and listing.get("town"):
+                    enrichment["station_json"] = json.dumps({"station": None, "source": "osm_static"})
                     changed = True
 
             # Collect listings needing commute data for parallel fetch

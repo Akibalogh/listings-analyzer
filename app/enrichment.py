@@ -594,6 +594,137 @@ def get_price_per_sqft_signal(
 
 
 # ---------------------------------------------------------------------------
+# Metro-North station proximity (static dataset from OSM, no API call at runtime)
+# ---------------------------------------------------------------------------
+
+# Stations sourced from OSM (railway=station, network=Metro-North Railroad).
+# Covers Harlem, Hudson, and New Haven lines in Westchester + CT search area.
+_METRO_NORTH_STATIONS: list[dict] = [
+    {"name": "Ardsley-on-Hudson", "lat": 41.0270084, "lon": -73.876681},
+    {"name": "Bedford Hills", "lat": 41.2371203, "lon": -73.6969658},
+    {"name": "Branchville", "lat": 41.1009, "lon": -73.4886},
+    {"name": "Bronxville", "lat": 40.9388, "lon": -73.8333},
+    {"name": "Cannondale", "lat": 41.1919, "lon": -73.4197},
+    {"name": "Chappaqua", "lat": 41.1594, "lon": -73.7659},
+    {"name": "Cortlandt", "lat": 41.2549, "lon": -73.9217},
+    {"name": "Cos Cob", "lat": 41.0582, "lon": -73.5997},
+    {"name": "Crestwood", "lat": 40.9636, "lon": -73.8372},
+    {"name": "Croton-Harmon", "lat": 41.1897, "lon": -73.8836},
+    {"name": "Darien", "lat": 41.0779, "lon": -73.4683},
+    {"name": "Dobbs Ferry", "lat": 41.0090, "lon": -73.8740},
+    {"name": "East Norwalk", "lat": 41.1008, "lon": -73.4082},
+    {"name": "Fleetwood", "lat": 40.9494, "lon": -73.8358},
+    {"name": "Glenbrook", "lat": 41.0669, "lon": -73.5405},
+    {"name": "Goldens Bridge", "lat": 41.3060, "lon": -73.6798},
+    {"name": "Greenwich", "lat": 41.0264, "lon": -73.6264},
+    {"name": "Greystone", "lat": 41.0028, "lon": -73.8999},
+    {"name": "Harrison", "lat": 40.9761, "lon": -73.7130},
+    {"name": "Hartsdale", "lat": 41.0192, "lon": -73.7986},
+    {"name": "Hastings-on-Hudson", "lat": 40.9926, "lon": -73.8799},
+    {"name": "Hawthorne", "lat": 41.1053, "lon": -73.7980},
+    {"name": "Irvington", "lat": 41.0394, "lon": -73.8682},
+    {"name": "Katonah", "lat": 41.2578, "lon": -73.6884},
+    {"name": "Larchmont", "lat": 40.9280, "lon": -73.7530},
+    {"name": "Ludlow", "lat": 40.9826, "lon": -73.8535},
+    {"name": "Mamaroneck", "lat": 40.9491, "lon": -73.7362},
+    {"name": "Merritt 7", "lat": 41.1172, "lon": -73.3894},
+    {"name": "Mount Kisco", "lat": 41.2044, "lon": -73.7271},
+    {"name": "Mount Pleasant", "lat": 41.1139, "lon": -73.8065},
+    {"name": "Mount Vernon East", "lat": 40.9107, "lon": -73.8233},
+    {"name": "Mount Vernon West", "lat": 40.9120, "lon": -73.8378},
+    {"name": "New Canaan", "lat": 41.1464, "lon": -73.4959},
+    {"name": "New Rochelle", "lat": 40.9113, "lon": -73.7824},
+    {"name": "Noroton Heights", "lat": 41.0683, "lon": -73.4829},
+    {"name": "North White Plains", "lat": 41.0615, "lon": -73.7769},
+    {"name": "Old Greenwich", "lat": 41.0322, "lon": -73.5698},
+    {"name": "Ossining", "lat": 41.1621, "lon": -73.8657},
+    {"name": "Peekskill", "lat": 41.2944, "lon": -73.9221},
+    {"name": "Pelham", "lat": 40.9102, "lon": -73.8044},
+    {"name": "Philipse Manor", "lat": 41.0880, "lon": -73.8651},
+    {"name": "Pleasantville", "lat": 41.1330, "lon": -73.7929},
+    {"name": "Port Chester", "lat": 40.9911, "lon": -73.6686},
+    {"name": "Riverdale", "lat": 40.9012, "lon": -73.9125},
+    {"name": "Riverside", "lat": 41.0437, "lon": -73.5856},
+    {"name": "Rowayton", "lat": 41.0758, "lon": -73.4456},
+    {"name": "Rye", "lat": 40.9808, "lon": -73.6880},
+    {"name": "Scarborough", "lat": 41.0992, "lon": -73.8634},
+    {"name": "Scarsdale", "lat": 41.0050, "lon": -73.7855},
+    {"name": "South Norwalk", "lat": 41.1029, "lon": -73.4219},
+    {"name": "Springdale", "lat": 41.0847, "lon": -73.5282},
+    {"name": "Stamford", "lat": 41.0468, "lon": -73.5427},
+    {"name": "Talmadge Hill", "lat": 41.1282, "lon": -73.4832},
+    {"name": "Tarrytown", "lat": 41.0627, "lon": -73.8659},
+    {"name": "Tuckahoe", "lat": 40.9541, "lon": -73.8264},
+    {"name": "Valhalla", "lat": 41.0769, "lon": -73.7778},
+    {"name": "Wakefield", "lat": 40.8978, "lon": -73.8591},
+    {"name": "White Plains", "lat": 41.0341, "lon": -73.7629},
+    {"name": "Wilton", "lat": 41.1956, "lon": -73.4399},
+    {"name": "Yonkers", "lat": 40.9311, "lon": -73.8988},
+]
+
+# Average walking speed ~83m/min (5km/h)
+_WALK_SPEED_M_PER_MIN = 83.0
+
+# Cache: "lat|lon" → station proximity result
+_station_cache: dict[str, dict | None] = {}
+
+
+def fetch_station_proximity(
+    address: str | None,
+    town: str | None,
+    state: str | None,
+) -> dict | None:
+    """Find nearest Metro-North station to the given address.
+
+    Uses static station dataset (no API call at runtime).
+    Walking time estimated at 5 km/h (83 m/min).
+
+    Returns:
+        {
+            "station": str,
+            "distance_m": float,
+            "walk_minutes": int,
+            "source": "osm_static"
+        }
+        or None if geocoding fails.
+    """
+    coords = _geocode_address(address, town, state)
+    if not coords:
+        return None
+
+    lat, lon = coords["lat"], coords["lon"]
+    cache_key = f"{lat:.5f}|{lon:.5f}|station"
+    if cache_key in _station_cache:
+        return _station_cache[cache_key]
+
+    nearest_dist = float("inf")
+    nearest_name = None
+    for station in _METRO_NORTH_STATIONS:
+        d = _haversine_m(lat, lon, station["lat"], station["lon"])
+        if d < nearest_dist:
+            nearest_dist = d
+            nearest_name = station["name"]
+
+    if nearest_name is None:
+        _station_cache[cache_key] = None
+        return None
+
+    walk_minutes = round(nearest_dist / _WALK_SPEED_M_PER_MIN)
+    result = {
+        "station": nearest_name,
+        "distance_m": round(nearest_dist),
+        "walk_minutes": walk_minutes,
+        "source": "osm_static",
+    }
+    _station_cache[cache_key] = result
+    logger.info(
+        f"Station proximity {address}, {town}: nearest={nearest_name} "
+        f"{nearest_dist:.0f}m ({walk_minutes} min walk)"
+    )
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Power line proximity (OpenStreetMap Overpass API + Nominatim geocoder)
 # ---------------------------------------------------------------------------
 

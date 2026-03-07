@@ -1050,3 +1050,90 @@ class TestFetchFloodZone:
         assert "V" in _SFHA_ZONES
         assert "VE" in _SFHA_ZONES
         assert "X" not in _SFHA_ZONES
+
+
+# ---------------------------------------------------------------------------
+# Metro-North station proximity
+# ---------------------------------------------------------------------------
+
+
+class TestFetchStationProximity:
+    """Tests for fetch_station_proximity() using static station dataset."""
+
+    @patch("app.enrichment._geocode_address")
+    def test_geocode_failure_returns_none(self, mock_geocode):
+        from app.enrichment import fetch_station_proximity
+
+        mock_geocode.return_value = None
+        result = fetch_station_proximity("Bad St", "Nowhere", "NY")
+        assert result is None
+
+    @patch("app.enrichment._geocode_address")
+    def test_scarsdale_nearest_is_scarsdale(self, mock_geocode):
+        """A point near Scarsdale station should return Scarsdale as nearest."""
+        from app.enrichment import fetch_station_proximity, _station_cache
+
+        # Scarsdale station is at ~41.005, -73.7855 — put property ~300m away
+        mock_geocode.return_value = {"lat": 41.007, "lon": -73.785}
+        cache_key = "41.00700|-73.78500|station"
+        _station_cache.pop(cache_key, None)
+
+        result = fetch_station_proximity("1 Station Rd", "Scarsdale", "NY")
+        assert result is not None
+        assert result["station"] == "Scarsdale"
+        assert result["distance_m"] < 500
+        assert result["walk_minutes"] >= 1
+        assert result["source"] == "osm_static"
+
+    @patch("app.enrichment._geocode_address")
+    def test_returns_walk_minutes(self, mock_geocode):
+        """walk_minutes should be distance_m / 83 rounded."""
+        from app.enrichment import fetch_station_proximity, _station_cache
+
+        mock_geocode.return_value = {"lat": 41.063, "lon": -73.866}
+        cache_key = "41.06300|-73.86600|station"
+        _station_cache.pop(cache_key, None)
+
+        result = fetch_station_proximity("1 Train Ln", "Tarrytown", "NY")
+        assert result is not None
+        expected_walk = round(result["distance_m"] / 83.0)
+        assert result["walk_minutes"] == expected_walk
+
+    @patch("app.enrichment._geocode_address")
+    def test_uses_cache(self, mock_geocode):
+        """Second call with same coords should use cache."""
+        from app.enrichment import fetch_station_proximity, _station_cache
+
+        mock_geocode.return_value = {"lat": 41.10, "lon": -73.80}
+        cache_key = "41.10000|-73.80000|station"
+        _station_cache[cache_key] = {
+            "station": "Hawthorne",
+            "distance_m": 450,
+            "walk_minutes": 5,
+            "source": "osm_static",
+        }
+
+        result = fetch_station_proximity("Cached St", "Hawthorne", "NY")
+        assert result["station"] == "Hawthorne"
+        # geocode was called once (to get coords), but no HTTP client needed
+        mock_geocode.assert_called_once()
+
+    def test_station_list_has_key_stations(self):
+        """Static list should include the main Westchester stations."""
+        from app.enrichment import _METRO_NORTH_STATIONS
+
+        names = {s["name"] for s in _METRO_NORTH_STATIONS}
+        assert "Scarsdale" in names
+        assert "White Plains" in names
+        assert "Tarrytown" in names
+        assert "Dobbs Ferry" in names
+        assert "Hartsdale" in names
+        assert len(_METRO_NORTH_STATIONS) >= 50
+
+    def test_all_stations_have_valid_coords(self):
+        """Every station entry must have plausible lat/lon."""
+        from app.enrichment import _METRO_NORTH_STATIONS
+
+        for s in _METRO_NORTH_STATIONS:
+            assert 40.0 < s["lat"] < 42.5, f"{s['name']} lat out of range"
+            assert -75.0 < s["lon"] < -72.0, f"{s['name']} lon out of range"
