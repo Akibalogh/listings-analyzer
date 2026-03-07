@@ -157,9 +157,8 @@ Listing data (address, description, etc.) could contain malicious instructions.
 ### Bulk Re-scoring
 - Triggered when criteria are saved, or manually via `/manage/sync-criteria`
 - Runs in a background daemon thread; progress exposed via `GET /rescore/status`
-- **Chunked batch processing** — listings processed in chunks of 10 (`_BATCH_CHUNK_SIZE`) to keep peak memory under control; each listing can include ~6.6MB of base64-encoded images; building all requests at once caused OOM on 512MB Fly.io machines
-- **Batch API** — each chunk submitted as a Message Batch (50% token discount); poll every 30s until complete; results processed and memory freed before next chunk
-- Sequential fallback preserved if batch API fails on any chunk
+- **Sequential by default** — each listing scored one at a time via real-time API; results appear immediately as they complete; fastest path to seeing updated scores after criteria changes
+- **Batch API available** via `?sequential=false` — 50% token discount but adds unpredictable async latency (Anthropic queues batch jobs); only worthwhile for very large rescores where cost matters more than speed
 
 ### Evaluation Criteria (Editable)
 - Stored in `evaluation_criteria` table with versioning (each save = new version row)

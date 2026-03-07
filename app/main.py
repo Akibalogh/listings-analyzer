@@ -939,7 +939,7 @@ def _rescore_all_sequential(
     )
 
 
-def _start_rescore(criteria_version: int, instructions: str, sequential: bool = False):
+def _start_rescore(criteria_version: int, instructions: str, sequential: bool = True):
     """Launch background re-score thread if not already running."""
     if db.rescore_state["in_progress"]:
         logger.warning("Re-score already in progress, skipping")
