@@ -851,14 +851,22 @@ def _rescore_all(criteria_version: int, instructions: str):
                 # Free memory before polling
                 del batch_requests
 
-                # Poll until batch completes
-                while True:
-                    time.sleep(30)
+                # Poll until batch completes (max 20 min per chunk)
+                _BATCH_POLL_INTERVAL = 30
+                _BATCH_MAX_POLLS = 40  # 40 × 30s = 20 minutes
+                for _poll in range(_BATCH_MAX_POLLS):
+                    time.sleep(_BATCH_POLL_INTERVAL)
                     batch = client.messages.batches.retrieve(batch_id)
                     status = batch.processing_status
-                    logger.info(f"Batch {batch_id}: {status}")
+                    logger.info(f"Batch {batch_id}: {status} (poll {_poll + 1}/{_BATCH_MAX_POLLS})")
                     if status == "ended":
                         break
+                else:
+                    logger.error(
+                        f"Batch {batch_id} timed out after {_BATCH_MAX_POLLS} polls "
+                        f"— falling back to sequential for remaining listings"
+                    )
+                    raise RuntimeError(f"Batch {batch_id} timed out")
 
                 # Process results for this chunk
                 for result in client.messages.batches.results(batch_id):
