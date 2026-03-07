@@ -316,6 +316,8 @@ Mobile-first single-page app served at `/` (`app/templates/dashboard.html`).
 - **basement_type (TEXT, nullable)** — "finished", "partially_finished", "unfinished", "walk_out", or null
 - created_at
 
+> **Note on `year_built` enrichment:** This column is populated from three sources in priority order: (1) OneKeyMLS JSON-LD `YearBuilt` field during scraping, (2) Redfin metadata text in descriptions (`"YYYY year built"` pattern via `parse_year_built()`), (3) manual backfill via `/manage/update-listing`. Coverage ~97% across active listings.
+
 ### Table: scores
 - id, listing_id (unique FK → listings)
 - score, verdict, hard_results_json, soft_points_json, concerns_json
@@ -478,12 +480,39 @@ Mobile-first single-page app served at `/` (`app/templates/dashboard.html`).
 - **Lot size extraction** — `lot_acres` added as structured field; extracted from JSON-LD `lotSize` (object and string forms) and visible page text ("0.25 acres", "10,890 sq ft lot"); stored as `REAL` column; backfilled from stored description text during Phase 4 of `/manage/scrape-descriptions`.
 - **year_built backfill** — scraped from Redfin via Jina Reader for 3 listings missing the field (#62 → 1994, #483 → 1948).
 
-### Phase 4 (Future)
+### Phase 4 (Current — Data Quality)
+- **Power line proximity** — OSM Overpass API, 300m radius, stores `power_line_json` (96.5% coverage)
+- **FEMA flood zone** — NFHL ArcGIS REST API (free, no key), stores `flood_zone_json` (96.5% coverage)
+- **Metro-North station proximity** — static 61-station dataset (Harlem/Hudson/New Haven lines), stores `station_json` (96.5% coverage)
+- **Description parsers** — `parse_garage_count()`, `parse_hoa_amount()`, `parse_pool_flag()`, `parse_basement()`, `parse_year_built()` — pure regex, no API calls; wired into `_enrich_all()` for automatic backfill
+- **Criteria v47–v52** — calibration rebalance, commute scoring, power line/flood zone/station scoring, structured data references for garage/pool/basement/HOA
+
+### Phase 5 (Future)
 - Comps engine
-- Metro-North proximity scoring
 - Slack notifications
 
-## 12. Engineering Discipline
+## 12. Known Data Gaps
+
+This section documents enrichment fields that cannot reach 100% coverage and why.
+
+| Field | Coverage | Reason for gap |
+|---|---|---|
+| `property_type` | ~12% | Comes from email parser only; not extractable from descriptions. Redfin alerts include it in HTML emails (parsed by OneHome parser) but not in plaintext emails. Affects ~88% of listings ingested from plaintext sources. |
+| `has_basement` | ~68% | Regex-based: can only detect when description explicitly mentions "basement", "lower level", "crawl space", etc. Many descriptions simply omit this information. ~32% natural ambiguity ceiling. |
+| `property_tax_json` | ~55-60% (after ORPTS expansion) | Hard floor ~37% before fix. NJ listings (Harding Township, Basking Ridge, Bernardsville area, ~9%) have no supported tax source. CT listing (Greenwich, ~2%) not covered. Some NY listings fail ORPTS address matching due to address format mismatches between listing data and parcel records. |
+| `lat`, `lng` | ~85-90% (after fix) | Listings with no address or no town cannot be geocoded. 2 listings (3.5%) have no address data. |
+| `year_built` | ~97% (after description parsing) | Hard floor: listings with no description and no JSON-LD metadata. 1 listing has neither. |
+| `basement_type` | ~32% | Subset of `has_basement`: only populated when description is specific enough to indicate finish level. "Large basement" → `has_basement=true`, `basement_type=null`. |
+| `garage_type` | ~12% | Only populated when description specifies "attached", "detached", or "carport". Generic "garage" mentions set `garage_count` but leave `garage_type` null. |
+| `hoa_monthly` | ~14% | Correct behavior: most single-family homes in Westchester have no HOA. Only HOA listings (typically newer developments, condos mislabeled as SFH, or golf course communities) have this data. |
+
+### Non-Enrichable Fields
+These fields require human input or external data sources not currently integrated:
+- `property_type` — requires HTML email parsing (plaintext emails lack it) or manual entry
+- Floor plan data — not available in any listing source; AI must infer from description/images
+- Interior condition rating — AI inference only; no structured source
+
+## 13. Engineering Discipline
 
 - PRD maintained as source of truth
 - Automated tests (parsers, scraper, image extraction, scorer, AI validation, API endpoints, management)

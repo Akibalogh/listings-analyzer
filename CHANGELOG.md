@@ -7,6 +7,17 @@ All notable changes to Listings Analyzer are documented here.
 ## [Unreleased]
 
 ### Added
+- **`parse_year_built()` description parser** — extracts year built from Redfin-style descriptions. Handles `"YYYY year built"` (Redfin metadata format) and `"built in YYYY"` patterns. Filters out listing-update dates (2026+). Wired into `_enrich_all()` for automatic backfill on listings missing `year_built`. Expected to fill ~10 of 12 previously missing values (79% → ~97% coverage). `year_built` added to `allowed_cols` whitelist in `db.py`.
+- **ORPTS municipality map expanded** — added 14 new hamlet→municipality mappings: Irvington, Dobbs Ferry, Hartsdale, Ardsley, Elmsford (Greenburgh); Thornwood (Mount Pleasant); Rye Brook, Port Chester (Rye); Cortlandt Manor (Cortlandt); Beacon (Dutchess); Highland/Lloyd (Ulster); Palisades/Orangetown (Rockland). Expected to improve property tax coverage from 37% → ~55-60% for NY listings.
+- **Direct geocoder call for lat/lng** — `_enrich_all()` now calls `_geocode_address()` directly instead of relying on stale in-memory cache. Fixes 0% lat/lng coverage on previously-geocoded listings.
+- **HOA re-parse on every enrichment cycle** — removes `is None` guard so stale/wrong HOA values (e.g., property-tax amounts misclassified as HOA fees) get corrected on next enrichment run.
+- **9 new tests for `parse_year_built`** — `TestParseYearBuilt` in `test_enrichment.py`: Redfin metadata format, `year built: YYYY`, `built in YYYY`, `constructed in YYYY`, listing-date filter, none input, no-year description, renovation-year disambiguation. 144 total enrichment tests passing.
+
+### Fixed
+- **HOA false positive from property tax amounts** — removed greedy `$X,XXX hoa/dues` regex pattern that matched dollar amounts preceding "hoa dues $0" (e.g., "property taxes $1,992 hoa dues $0" → wrongly stored $1,992 as HOA). Four listings affected. Fixed no-HOA regex to also match `hoa dues $0` pattern. Two regression tests added.
+- **lat/lng 0% coverage** — previous fix relied on in-memory geocode cache which is empty on each container start. Now calls geocoder directly; cache hit is instant if the address was already geocoded in the same enrichment run.
+
+### Added
 - **Description parsing: garage, HOA, pool, basement** — Four new regex-based parsers in `enrichment.py`: `parse_garage_count()` (count + attached/detached/carport), `parse_hoa_amount()` (monthly/annual fees), `parse_pool_flag()` (inground/above-ground/community), `parse_basement()` (finished/partially finished/unfinished/walk-out). All pure code, no API calls. 7 new DB columns: `garage_count`, `garage_type`, `hoa_monthly`, `has_pool`, `pool_type`, `has_basement`, `basement_type`. Wired into `_enrich_all()` for automatic backfill and `_build_listing_data()` for AI scoring.
 - **Criteria v52** — structured data references for garage, pool, basement, HOA. Expanded amenities section with per-signal scoring. Basement: +5 walk-out/finished, +2 partially finished, 0 unfinished, -3 slab/no basement. Pool: -5 inground, -3 above-ground, 0 no pool/community.
 - **31 new tests** — `TestParseGarageCount` (8), `TestParseHoaAmount` (7), `TestParsePoolFlag` (7), `TestParseBasement` (9). 133 total enrichment tests passing.

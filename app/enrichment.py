@@ -1034,9 +1034,30 @@ _ORPTS_MUNICIPALITY_MAP: dict[str, str] = {
     "tuckahoe": "Eastchester",
     "pelham": "Pelham",
     "pelham manor": "Pelham",
+    # Greenburgh villages/hamlets
+    "irvington": "Greenburgh",
+    "dobbs ferry": "Greenburgh",
+    "hastings-on-hudson": "Greenburgh",
+    "hastings on hudson": "Greenburgh",
+    "hartsdale": "Greenburgh",
+    "ardsley": "Greenburgh",
+    "elmsford": "Greenburgh",
+    # Mount Pleasant hamlets
+    "thornwood": "Mount Pleasant",
+    # Rye area
+    "rye brook": "Rye",
+    "port chester": "Rye",
+    # Cortlandt
+    "cortlandt manor": "Cortlandt",
     # Putnam County
     "carmel": "Carmel",
     "brewster": "Southeast",
+    # Dutchess County
+    "beacon": "Beacon",
+    # Ulster County
+    "highland": "Lloyd",
+    # Rockland County
+    "palisades": "Orangetown",
     # Direct matches (town = municipality)
     "north castle": "North Castle",
     "new castle": "New Castle",
@@ -1393,3 +1414,37 @@ def parse_basement(description: str | None) -> dict:
         return {"has_basement": True, "basement_type": None, "source": "description_parse"}
 
     return {"has_basement": None, "basement_type": None, "source": "description_parse"}
+
+
+def parse_year_built(description: str | None) -> int | None:
+    """Extract year built from listing description.
+
+    Looks for Redfin-style "YYYY year built" or "year built YYYY" patterns.
+    Filters out listing-update dates (2026+) and renovation years.
+
+    Returns:
+        int year or None
+    """
+    if not description:
+        return None
+
+    text = description.lower()
+
+    # Priority 1: Redfin structured metadata — "YYYY year built" (most reliable)
+    m = re.search(r"\b(1[89]\d{2}|20[012]\d)\s+year\s+built\b", text)
+    if m:
+        return int(m.group(1))
+
+    # Priority 2: "year built: YYYY" or "year built YYYY"
+    m = re.search(r"\byear\s+built\s*[:\s]?\s*(1[89]\d{2}|20[012]\d)\b", text)
+    if m:
+        return int(m.group(1))
+
+    # Priority 3: "built in YYYY" or "constructed in YYYY"
+    m = re.search(r"\b(?:built|constructed|erected)\s+(?:in\s+)?(1[89]\d{2}|20[012]\d)\b", text)
+    if m:
+        year = int(m.group(1))
+        if year <= 2025:  # filter out current/future years from listing dates
+            return year
+
+    return None

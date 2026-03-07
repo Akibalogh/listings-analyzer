@@ -1357,3 +1357,61 @@ class TestParseBasement:
         from app.enrichment import parse_basement
         result = parse_basement("Charming Cape Cod on tree-lined street.")
         assert result["has_basement"] is None
+
+
+# ---------------------------------------------------------------------------
+# parse_year_built tests
+# ---------------------------------------------------------------------------
+
+class TestParseYearBuilt:
+    def test_redfin_year_before(self):
+        """Redfin metadata format: YYYY year built"""
+        from app.enrichment import parse_year_built
+        result = parse_year_built("single-family property type 1934 year built 1.34 acres lot size")
+        assert result == 1934
+
+    def test_year_built_colon(self):
+        """year built: YYYY format"""
+        from app.enrichment import parse_year_built
+        result = parse_year_built("Year Built: 2003 Lot Size: 2.66 acres")
+        assert result == 2003
+
+    def test_redfin_year_built_inline(self):
+        """Redfin inline: YYYY year built followed by other metadata"""
+        from app.enrichment import parse_year_built
+        result = parse_year_built("property type 1990 year built 1.12 acres lot size 2 car garage")
+        assert result == 1990
+
+    def test_built_in(self):
+        """built in YYYY"""
+        from app.enrichment import parse_year_built
+        result = parse_year_built("This charming Colonial was built in 1955 and recently renovated.")
+        assert result == 1955
+
+    def test_constructed_in(self):
+        """constructed in YYYY"""
+        from app.enrichment import parse_year_built
+        result = parse_year_built("Custom home constructed in 2018 with modern finishes.")
+        assert result == 2018
+
+    def test_ignores_listing_update_date(self):
+        """Listing update dates (2026) should not be picked up"""
+        from app.enrichment import parse_year_built
+        result = parse_year_built("Beautiful home. listing updated: mar 4, 2026 at 11:45am")
+        assert result is None
+
+    def test_none_description(self):
+        from app.enrichment import parse_year_built
+        result = parse_year_built(None)
+        assert result is None
+
+    def test_no_year_in_description(self):
+        from app.enrichment import parse_year_built
+        result = parse_year_built("Lovely home with pool and 2-car garage on quiet street.")
+        assert result is None
+
+    def test_year_built_takes_priority_over_renovation(self):
+        """'year built 1986' wins over renovation year 2019"""
+        from app.enrichment import parse_year_built
+        result = parse_year_built("property type 1986 year built 4.8 acres renovated in 2019")
+        assert result == 1986

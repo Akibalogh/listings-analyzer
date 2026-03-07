@@ -1642,7 +1642,7 @@ def _enrich_all(clear_bogus: bool = False, clear_bogus_commute: bool = False):
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    from app.enrichment import fetch_commute_time, fetch_school_data, normalize_address, fetch_property_tax, fetch_property_tax_orpts, fetch_power_line_proximity, fetch_flood_zone, fetch_station_proximity, parse_garage_count, parse_hoa_amount, parse_pool_flag, parse_basement
+    from app.enrichment import fetch_commute_time, fetch_school_data, normalize_address, fetch_property_tax, fetch_property_tax_orpts, fetch_power_line_proximity, fetch_flood_zone, fetch_station_proximity, parse_garage_count, parse_hoa_amount, parse_pool_flag, parse_basement, parse_year_built, _geocode_address
 
     try:
         listing_ids = db.get_all_listing_ids()
@@ -1800,11 +1800,9 @@ def _enrich_all(clear_bogus: bool = False, clear_bogus_commute: bool = False):
                     enrichment["station_json"] = json.dumps({"station": None, "source": "osm_static"})
                     changed = True
 
-            # Persist lat/lng from geocode cache (populated by power_line/flood_zone/station calls)
+            # Persist lat/lng via geocoder (uses in-memory cache when already geocoded above)
             if listing.get("lat") is None:
-                from app.enrichment import _geocode_cache
-                cache_key = f"{(listing.get('address') or '').lower()}|{(listing.get('town') or '').lower()}|{(listing.get('state') or '').lower()}"
-                coords = _geocode_cache.get(cache_key)
+                coords = _geocode_address(listing.get("address"), listing.get("town"), listing.get("state"))
                 if coords:
                     enrichment["lat"] = coords["lat"]
                     enrichment["lng"] = coords["lon"]
@@ -1820,9 +1818,10 @@ def _enrich_all(clear_bogus: bool = False, clear_bogus_commute: bool = False):
                         enrichment["garage_type"] = g.get("garage_type")
                         changed = True
 
-                if listing.get("hoa_monthly") is None:
-                    h = parse_hoa_amount(desc)
-                    if h.get("hoa_monthly") is not None:
+                # Always re-parse HOA to correct stale/wrong values
+                h = parse_hoa_amount(desc)
+                if h.get("hoa_monthly") is not None:
+                    if listing.get("hoa_monthly") != h["hoa_monthly"]:
                         enrichment["hoa_monthly"] = h["hoa_monthly"]
                         changed = True
 
@@ -1838,6 +1837,12 @@ def _enrich_all(clear_bogus: bool = False, clear_bogus_commute: bool = False):
                     if b.get("has_basement") is not None:
                         enrichment["has_basement"] = b["has_basement"]
                         enrichment["basement_type"] = b.get("basement_type")
+                        changed = True
+
+                if listing.get("year_built") is None:
+                    yb = parse_year_built(desc)
+                    if yb is not None:
+                        enrichment["year_built"] = yb
                         changed = True
 
             # Save any enrichment changes from this phase
