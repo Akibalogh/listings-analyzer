@@ -1552,11 +1552,14 @@ def manage_scrape_descriptions(request: Request):
 _enrich_state: dict = {"in_progress": False, "result": None}
 
 
-def _enrich_all(clear_bogus: bool = False):
+def _enrich_all(clear_bogus: bool = False, clear_bogus_commute: bool = False):
     """Background thread: backfill enrichment data for all listings.
 
     Phase 1 (serial): address keys + school data (SchoolDigger rate-limited).
     Phase 2 (parallel): commute times via Google Routes API (no rate limit).
+    clear_bogus_commute: clear commute data for listings with stale transit-only routing
+    (commute_mode = 'transit', not 'drive+transit') so they get re-enriched with the
+    correct drive+transit hybrid approach.
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -1585,6 +1588,35 @@ def _enrich_all(clear_bogus: bool = False):
                 except (json.JSONDecodeError, TypeError):
                     pass
             logger.info(f"Cleared bogus school data from {cleared} listings")
+
+        # Phase 0.5: Clear stale transit-only commute data so listings get re-enriched
+        # with the correct drive+transit hybrid. commute_mode = "transit" means the old
+        # pure-transit routing was used (often gives 200-240 min for Westchester towns).
+        if clear_bogus_commute:
+            bogus_cleared = 0
+            for lid in listing_ids:
+                listing = db.get_listing_by_id(lid)
+                if not listing:
+                    continue
+                cd = listing.get("commute_data_json")
+                if not cd:
+                    continue
+                try:
+                    cdata = json.loads(cd)
+                    mode = cdata.get("commute_mode", "")
+                    if mode == "transit":  # stale pure-transit routing
+                        with db.get_connection() as conn:
+                            cur = conn.cursor()
+                            ph = db._placeholder()
+                            cur.execute(
+                                f"UPDATE listings SET commute_minutes = NULL, commute_data_json = NULL WHERE id = {ph}",
+                                (lid,),
+                            )
+                        bogus_cleared += 1
+                        logger.info(f"Cleared stale transit-only commute for listing #{lid}")
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            logger.info(f"Cleared stale commute data from {bogus_cleared} listings")
 
         # Phase 1 (serial): address keys + school data
         commute_needed: list[tuple[int, dict]] = []  # (lid, listing) pairs needing commute
@@ -1720,12 +1752,14 @@ def manage_enrich(request: Request):
 
     clear_bogus = request.query_params.get("clear_bogus", "").lower() == "true"
 
+    clear_bogus_commute = request.query_params.get("clear_bogus_commute", "").lower() == "true"
+
     _enrich_state["in_progress"] = True
     _enrich_state["result"] = None
-    t = threading.Thread(target=_enrich_all, args=(clear_bogus,), daemon=True)
+    t = threading.Thread(target=_enrich_all, args=(clear_bogus, clear_bogus_commute), daemon=True)
     t.start()
 
-    return {"status": "started", "clear_bogus": clear_bogus}
+    return {"status": "started", "clear_bogus": clear_bogus, "clear_bogus_commute": clear_bogus_commute}
 
 
 @app.get("/manage/enrich/status")
