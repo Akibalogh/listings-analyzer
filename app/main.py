@@ -1110,6 +1110,35 @@ def sync_criteria(request: Request):
     }
 
 
+@app.post("/manage/update-listing")
+def manage_update_listing(request: Request, body: dict = {}):
+    """Update specific fields on a listing by ID.
+
+    Body: {"listing_id": 62, "year_built": 1994}
+    Allowed fields: year_built, price, sqft, bedrooms, bathrooms, address, town, state, zip_code
+    Protected by MANAGE_KEY env var.
+    """
+    key = request.headers.get("x-manage-key", "")
+    if not settings.manage_key or key != settings.manage_key:
+        raise HTTPException(status_code=403, detail="Invalid or missing management key")
+
+    listing_id = body.get("listing_id")
+    if not listing_id:
+        raise HTTPException(status_code=400, detail="Provide listing_id in JSON body")
+
+    ALLOWED = {"year_built", "price", "sqft", "bedrooms", "bathrooms", "address", "town", "state", "zip_code"}
+    fields = {k: v for k, v in body.items() if k in ALLOWED and v is not None}
+    if not fields:
+        raise HTTPException(status_code=400, detail=f"No valid fields provided. Allowed: {sorted(ALLOWED)}")
+
+    db.update_listing_fields_by_id(listing_id, **fields)
+    listing = db.get_listing_by_id(listing_id)
+    if not listing:
+        raise HTTPException(status_code=404, detail=f"Listing #{listing_id} not found")
+
+    return {"listing_id": listing_id, "updated": fields, "message": "OK"}
+
+
 @app.post("/manage/poll")
 def manage_poll(request: Request):
     """Trigger a Gmail poll cycle. Protected by MANAGE_KEY env var.
