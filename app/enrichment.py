@@ -597,9 +597,60 @@ def get_price_per_sqft_signal(
 # ---------------------------------------------------------------------------
 
 _SODA_API_URL = "https://data.cityofnewyork.us/resource/yjxr-fw8i.json"
+_ORPTS_API_URL = "https://data.ny.gov/resource/7vem-aaz7.json"
 
 # Cache: address_key → tax data dict
 _tax_cache: dict[str, dict] = {}
+
+# Map listing town names → NY ORPTS municipality_name values
+# ORPTS uses town names (not hamlet/village names) for Westchester
+_ORPTS_MUNICIPALITY_MAP: dict[str, str] = {
+    # Westchester hamlets/villages → ORPTS town
+    "armonk": "North Castle",
+    "chappaqua": "New Castle",
+    "yorktown heights": "Yorktown",
+    "sleepy hollow": "Mount Pleasant",
+    "tarrytown": "Greenburgh",
+    "briarcliff manor": "Ossining",
+    "ossining": "Ossining",
+    "pleasantville": "Mount Pleasant",
+    "mount pleasant": "Mount Pleasant",
+    "hawthorne": "Mount Pleasant",
+    "valhalla": "Mount Pleasant",
+    "scarsdale": "Scarsdale",
+    "white plains": "White Plains",
+    "harrison": "Harrison",
+    "rye": "Rye",
+    "mamaroneck": "Mamaroneck",
+    "larchmont": "Mamaroneck",
+    "new rochelle": "New Rochelle",
+    "yonkers": "Yonkers",
+    "mount kisco": "Mount Kisco",
+    "bedford": "Bedford",
+    "bedford hills": "Bedford",
+    "katonah": "Bedford",
+    "somers": "Somers",
+    "north salem": "North Salem",
+    "lewisboro": "Lewisboro",
+    "south salem": "Lewisboro",
+    "pound ridge": "Pound Ridge",
+    "cortlandt": "Cortlandt",
+    "croton-on-hudson": "Cortlandt",
+    "croton on hudson": "Cortlandt",
+    "peekskill": "Peekskill",
+    "eastchester": "Eastchester",
+    "tuckahoe": "Eastchester",
+    "pelham": "Pelham",
+    "pelham manor": "Pelham",
+    # Putnam County
+    "carmel": "Carmel",
+    "brewster": "Southeast",
+    # Direct matches (town = municipality)
+    "north castle": "North Castle",
+    "new castle": "New Castle",
+    "yorktown": "Yorktown",
+    "greenburgh": "Greenburgh",
+}
 
 
 def fetch_property_tax(
@@ -668,4 +719,96 @@ def fetch_property_tax(
 
     except Exception as e:
         logger.debug(f"Property tax lookup failed for {address}: {e}")
+        return None
+
+
+def fetch_property_tax_orpts(
+    address: str | None,
+    town: str | None,
+) -> dict | None:
+    """Fetch property tax assessment data from NY State ORPTS open data API.
+
+    Covers all NY municipalities EXCEPT NYC. Free, no API key required.
+    Dataset: data.ny.gov/resource/7vem-aaz7 (Property Assessment Data from
+    Local Assessment Rolls).
+
+    Args:
+        address: Street address (e.g. "21 Pheasant Dr")
+        town: Town/city name (e.g. "Armonk", "Chappaqua")
+
+    Returns dict with:
+      - assessed_value (int): assessed total value
+      - market_value (int | None): full market value (often 0 for fractional-assessment towns)
+      - school_taxable (int | None): taxable value for school district
+      - county_taxable (int | None): taxable value for county
+      - municipality (str): matched municipality name
+      - address (str): matched address string
+      - source (str): "orpts"
+    Or None if not found.
+    """
+    if not address or not town:
+        return None
+
+    cache_key = f"orpts:{address}|{town}"
+    if cache_key in _tax_cache:
+        return _tax_cache[cache_key]
+
+    # Map listing town → ORPTS municipality name
+    town_lower = town.lower().strip()
+    municipality = _ORPTS_MUNICIPALITY_MAP.get(town_lower)
+    if not municipality:
+        municipality = town.strip()
+
+    # Parse street number and street name from address
+    # e.g. "21 Pheasant Dr" → number="21", street first word="PHEASANT"
+    addr_parts = address.strip().split(None, 1)
+    if len(addr_parts) < 2:
+        return None
+    number = addr_parts[0]
+    street_raw = addr_parts[1].upper()
+    street_word = street_raw.split()[0] if street_raw.split() else street_raw
+
+    try:
+        where = (
+            f"municipality_name='{municipality}'"
+            f" AND parcel_address_number='{number}'"
+            f" AND upper(parcel_address_street) like '{street_word}%'"
+        )
+        params = {
+            "$where": where,
+            "$select": "parcel_address_number,parcel_address_street,parcel_address_suff,"
+                       "municipality_name,assessment_total,full_market_value,"
+                       "school_taxable,county_taxable_value,town_taxable_value,roll_year",
+            "$limit": 1,
+        }
+
+        with httpx.Client(timeout=10.0) as client:
+            resp = client.get(_ORPTS_API_URL, params=params)
+            resp.raise_for_status()
+            data = resp.json()
+
+        if not data:
+            return None
+
+        row = data[0]
+        matched_addr = (
+            f"{row.get('parcel_address_number', '')} "
+            f"{row.get('parcel_address_street', '')} "
+            f"{row.get('parcel_address_suff', '')}".strip()
+        )
+        result = {
+            "assessed_value": int(row.get("assessment_total") or 0) or None,
+            "market_value": int(row.get("full_market_value") or 0) or None,
+            "school_taxable": int(row.get("school_taxable") or 0) or None,
+            "county_taxable": int(row.get("county_taxable_value") or 0) or None,
+            "municipality": row.get("municipality_name"),
+            "address": matched_addr,
+            "source": "orpts",
+        }
+        _tax_cache[cache_key] = result
+        logger.info(f"ORPTS tax data found for {address}, {town}: assessed={result['assessed_value']}")
+        return result
+
+    except Exception as e:
+        logger.debug(f"ORPTS property tax lookup failed for {address}, {town}: {e}")
         return None

@@ -1563,7 +1563,7 @@ def _enrich_all(clear_bogus: bool = False, clear_bogus_commute: bool = False):
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    from app.enrichment import fetch_commute_time, fetch_school_data, normalize_address, fetch_property_tax
+    from app.enrichment import fetch_commute_time, fetch_school_data, normalize_address, fetch_property_tax, fetch_property_tax_orpts
 
     try:
         listing_ids = db.get_all_listing_ids()
@@ -1661,12 +1661,18 @@ def _enrich_all(clear_bogus: bool = False, clear_bogus_commute: bool = False):
                     logger.error(f"Failed to enrich listing #{lid}: {e}")
                     errors.append(f"#{lid}: {e}")
 
-            # Property tax (NYC only — fast, no rate limit)
+            # Property tax: try NYC SODA first, then NY State ORPTS for non-NYC
             if not listing.get("property_tax_json"):
                 tax_data = fetch_property_tax(
                     listing.get("address"),
                     borough=listing.get("town"),
                 )
+                if not tax_data:
+                    # Fall back to NY State ORPTS API (covers Westchester + all non-NYC)
+                    tax_data = fetch_property_tax_orpts(
+                        listing.get("address"),
+                        town=listing.get("town"),
+                    )
                 if tax_data:
                     enrichment["property_tax_json"] = json.dumps(tax_data)
                     changed = True
