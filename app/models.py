@@ -19,6 +19,7 @@ class ParsedListing(BaseModel):
     description: str | None = None  # Full listing description (scraped)
     year_built: int | None = None
     list_date: str | None = None  # ISO date string (YYYY-MM-DD)
+    lot_acres: float | None = None
     source_format: str = "unknown"
 
 

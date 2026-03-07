@@ -287,6 +287,7 @@ def backfill_listing_address(
 
 
 _INTEGER_COLUMNS = {"price", "sqft", "bedrooms", "bathrooms", "commute_minutes", "year_built"}
+_NUMERIC_COLUMNS = _INTEGER_COLUMNS | {"lot_acres"}  # columns where IS NULL check is required
 
 
 def update_listing_fields_by_id(listing_id: int, **fields):
@@ -301,8 +302,8 @@ def update_listing_fields_by_id(listing_id: int, **fields):
     ph = _placeholder()
     for col, val in fields.items():
         if val is not None:
-            # Integer columns: only check IS NULL (comparing to '' fails in Postgres)
-            if col in _INTEGER_COLUMNS:
+            # Numeric columns (int/float): only check IS NULL (comparing to '' fails in Postgres)
+            if col in _NUMERIC_COLUMNS:
                 updates.append(
                     f"{col} = CASE WHEN {col} IS NULL THEN {ph} ELSE {col} END"
                 )
@@ -424,9 +425,9 @@ def save_listing(listing: ParsedListing, score: ScoringResult, email_id: int, en
             f"""INSERT INTO listings
             (source_email_id, address, town, state, zip_code, mls_id, price, sqft,
              bedrooms, bathrooms, property_type, listing_status, source_format,
-             listing_url, description, year_built, list_date,
+             listing_url, description, year_built, list_date, lot_acres,
              address_key, school_data_json, commute_minutes, commute_data_json)
-            VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})""",
+            VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})""",
             (
                 email_id,
                 listing.address,
@@ -445,6 +446,7 @@ def save_listing(listing: ParsedListing, score: ScoringResult, email_id: int, en
                 listing.description,
                 listing.year_built,
                 listing.list_date,
+                listing.lot_acres,
                 enr.get("address_key"),
                 enr.get("school_data_json"),
                 enr.get("commute_minutes"),
@@ -544,6 +546,7 @@ def _migrate_add_columns():
         ("listings", "year_built", "INTEGER"),
         ("listings", "list_date", "TEXT"),
         ("listings", "property_tax_json", "TEXT"),
+        ("listings", "lot_acres", "REAL"),
         ("scores", "evaluation_method", "TEXT DEFAULT 'deterministic'"),
         ("scores", "criteria_version", "INTEGER"),
         ("scores", "ai_reasoning", "TEXT"),

@@ -555,7 +555,7 @@ async def add_listing_from_url(request: Request):
     )
 
     # Try to extract structured data from the page
-    price = beds = baths = sqft = year_built = list_date = None
+    price = beds = baths = sqft = year_built = list_date = lot_acres = None
     try:
         with httpx.Client(timeout=10, follow_redirects=True, headers={
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
@@ -570,6 +570,7 @@ async def add_listing_from_url(request: Request):
                     sqft = stats.get("sqft")
                     year_built = stats.get("year_built")
                     list_date = stats.get("list_date")
+                    lot_acres = stats.get("lot_acres")
     except Exception:
         pass
 
@@ -586,6 +587,7 @@ async def add_listing_from_url(request: Request):
         sqft=sqft,
         year_built=year_built,
         list_date=list_date,
+        lot_acres=lot_acres,
         listing_url=resolved_url,
         description=description,
     )
@@ -703,6 +705,7 @@ def _build_listing_data(listing_row: dict) -> dict:
         "description": listing_row.get("description"),
         "year_built": listing_row.get("year_built"),
         "list_date": listing_row.get("list_date"),
+        "lot_acres": listing_row.get("lot_acres"),
     }
 
     # Add enrichment data (school quality + commute time)
@@ -745,6 +748,10 @@ def _build_listing_data(listing_row: dict) -> dict:
             listing_data["property_tax"] = json.loads(listing_row["property_tax_json"])
         except (json.JSONDecodeError, TypeError):
             pass
+
+    # Lot size (acres)
+    if listing_row.get("lot_acres") is not None:
+        listing_data["lot_acres"] = listing_row["lot_acres"]
 
     return listing_data
 
@@ -1478,23 +1485,29 @@ def manage_scrape_descriptions(request: Request):
     year_built_backfilled = 0
     for lid in listing_ids:
         listing = db.get_listing_by_id(lid)
-        if not listing or listing.get("year_built"):
+        if not listing:
+            continue
+        # Skip if we already have all backfillable fields
+        needs_year_built = not listing.get("year_built")
+        needs_lot_acres = listing.get("lot_acres") is None
+        if not needs_year_built and not needs_lot_acres:
             continue
 
         updates = {}
 
         # 1. Try extracting from stored description first (no network needed)
-        desc = listing.get("description") or ""
-        yb_match = _YEAR_BUILT_RE.search(desc)
-        if yb_match:
-            year = int(yb_match.group(1))
-            if 1700 <= year <= 2030:
-                updates["year_built"] = year
-        ld_match = _LIST_DATE_RE.search(desc)
-        if ld_match:
-            updates["list_date"] = ld_match.group(1).strip()
+        if needs_year_built:
+            desc = listing.get("description") or ""
+            yb_match = _YEAR_BUILT_RE.search(desc)
+            if yb_match:
+                year = int(yb_match.group(1))
+                if 1700 <= year <= 2030:
+                    updates["year_built"] = year
+            ld_match = _LIST_DATE_RE.search(desc)
+            if ld_match:
+                updates["list_date"] = ld_match.group(1).strip()
 
-        if updates:
+        if updates and not needs_lot_acres:
             db.update_listing_fields_by_id(lid, **updates)
             year_built_backfilled += 1
             logger.info(f"Backfilled year_built/list_date for listing #{lid} from description: {updates}")
@@ -1514,18 +1527,20 @@ def manage_scrape_descriptions(request: Request):
                         if resp.status_code == 200:
                             stats = extract_stats(resp.text)
                             if stats:
-                                if stats.get("year_built"):
+                                if needs_year_built and stats.get("year_built"):
                                     updates["year_built"] = stats["year_built"]
                                 if stats.get("list_date"):
                                     updates["list_date"] = stats["list_date"]
+                                if needs_lot_acres and stats.get("lot_acres") is not None:
+                                    updates["lot_acres"] = stats["lot_acres"]
             except Exception as e:
-                logger.error(f"Year built backfill failed for listing #{lid}: {e}")
-                errors.append(f"#{lid} year_built: {e}")
+                logger.error(f"Year built / lot acres backfill failed for listing #{lid}: {e}")
+                errors.append(f"#{lid} year_built/lot_acres: {e}")
 
         if updates:
             db.update_listing_fields_by_id(lid, **updates)
             year_built_backfilled += 1
-            logger.info(f"Backfilled year_built/list_date for listing #{lid} from OneKeyMLS: {updates}")
+            logger.info(f"Backfilled data for listing #{lid}: {updates}")
 
     # Trigger rescore if we scraped descriptions or backfilled data
     rescore_started = False

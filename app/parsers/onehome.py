@@ -526,6 +526,24 @@ _JSON_LIST_DATE_RE = re.compile(
 _JSON_YEAR_BUILT_RE = re.compile(
     r'"[Yy]ear[Bb]uilt"\s*:\s*"?(\d{4})',
 )
+# Lot size patterns: "0.25 acres", "10,000 sq ft lot", JSON-LD lotSize
+_LOT_ACRES_TEXT_RE = re.compile(
+    r"([\d,.]+)\s*(?:acre|ac)s?\b",
+    re.IGNORECASE,
+)
+_LOT_SQFT_TEXT_RE = re.compile(
+    r"([\d,]+)\s*(?:sq\.?\s*ft|sqft|square\s*feet)\s+lot\b",
+    re.IGNORECASE,
+)
+# Redfin JSON-LD: "lotSize":{"@type":"QuantitativeValue","value":0.25,"unitText":"acres"}
+# or "lotSize":"10890 sqft"
+_JSON_LOT_SIZE_VALUE_RE = re.compile(
+    r'"lotSize"\s*:\s*\{[^}]*"value"\s*:\s*([\d.]+)',
+)
+_JSON_LOT_SIZE_STR_RE = re.compile(
+    r'"lotSize"\s*:\s*"([\d,.]+)\s*(acres?|sqft|sq\s*ft|square\s*feet)"',
+    re.IGNORECASE,
+)
 
 
 def _search_redfin_url(
@@ -739,6 +757,53 @@ def _extract_property_stats(html: str) -> dict | None:
         json_ld = _JSON_ON_MARKET_RE.search(html) or _JSON_LIST_DATE_RE.search(html)
         if json_ld:
             result["list_date"] = json_ld.group(1)
+
+    # Lot size — try JSON-LD first (most reliable), then visible text
+    # JSON-LD value (numeric, assumed acres for Redfin)
+    json_lot_val = _JSON_LOT_SIZE_VALUE_RE.search(html)
+    if json_lot_val:
+        val = float(json_lot_val.group(1))
+        if 0.01 <= val <= 1000:
+            result["lot_acres"] = round(val, 4)
+    # JSON-LD string form
+    if "lot_acres" not in result:
+        json_lot_str = _JSON_LOT_SIZE_STR_RE.search(html)
+        if json_lot_str:
+            val_str = json_lot_str.group(1).replace(",", "")
+            unit = json_lot_str.group(2).lower()
+            try:
+                val = float(val_str)
+                if "acre" in unit:
+                    if 0.01 <= val <= 1000:
+                        result["lot_acres"] = round(val, 4)
+                else:
+                    # sq ft → acres
+                    acres = val / 43560
+                    if 0.01 <= acres <= 1000:
+                        result["lot_acres"] = round(acres, 4)
+            except ValueError:
+                pass
+    # Visible text: "0.25 acres"
+    if "lot_acres" not in result:
+        acres_match = _LOT_ACRES_TEXT_RE.search(text)
+        if acres_match:
+            try:
+                val = float(acres_match.group(1).replace(",", ""))
+                if 0.01 <= val <= 1000:
+                    result["lot_acres"] = round(val, 4)
+            except ValueError:
+                pass
+    # Visible text: "10,890 sq ft lot"
+    if "lot_acres" not in result:
+        sqft_lot_match = _LOT_SQFT_TEXT_RE.search(text)
+        if sqft_lot_match:
+            try:
+                sqft = float(sqft_lot_match.group(1).replace(",", ""))
+                acres = sqft / 43560
+                if 0.01 <= acres <= 1000:
+                    result["lot_acres"] = round(acres, 4)
+            except ValueError:
+                pass
 
     return result if result else None
 
