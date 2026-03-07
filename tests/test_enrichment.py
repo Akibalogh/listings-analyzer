@@ -916,3 +916,137 @@ class TestFetchPowerLineProximity:
 
         result = fetch_power_line_proximity("3 Error Ave", "Errorville", "NY")
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# FEMA flood zone lookup
+# ---------------------------------------------------------------------------
+
+
+class TestFetchFloodZone:
+    """Tests for fetch_flood_zone() via FEMA NFHL ArcGIS API."""
+
+    @patch("app.enrichment._geocode_address")
+    def test_geocode_failure_returns_none(self, mock_geocode):
+        from app.enrichment import fetch_flood_zone
+
+        mock_geocode.return_value = None
+        result = fetch_flood_zone("123 Bad St", "Nowhere", "NY")
+        assert result is None
+
+    @patch("app.enrichment.httpx.Client")
+    @patch("app.enrichment._geocode_address")
+    def test_zone_x_minimal_hazard(self, mock_geocode, mock_client_cls):
+        from app.enrichment import fetch_flood_zone, _flood_zone_cache
+
+        mock_geocode.return_value = {"lat": 41.05, "lon": -73.78}
+        cache_key = "41.05000|-73.78000|flood"
+        _flood_zone_cache.pop(cache_key, None)
+
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = {
+            "features": [
+                {"attributes": {"FLD_ZONE": "X", "ZONE_SUBTY": "AREA OF MINIMAL FLOOD HAZARD"}}
+            ]
+        }
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.get.return_value = mock_resp
+        mock_client_cls.return_value = mock_client
+
+        result = fetch_flood_zone("1 Safe St", "Scarsdale", "NY")
+        assert result is not None
+        assert result["fld_zone"] == "X"
+        assert result["sfha"] is False
+        assert result["source"] == "fema_nfhl"
+
+    @patch("app.enrichment.httpx.Client")
+    @patch("app.enrichment._geocode_address")
+    def test_zone_ae_is_sfha(self, mock_geocode, mock_client_cls):
+        from app.enrichment import fetch_flood_zone, _flood_zone_cache
+
+        mock_geocode.return_value = {"lat": 41.10, "lon": -73.75}
+        cache_key = "41.10000|-73.75000|flood"
+        _flood_zone_cache.pop(cache_key, None)
+
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = {
+            "features": [
+                {"attributes": {"FLD_ZONE": "AE", "ZONE_SUBTY": "1 PCT ANNUAL CHANCE FLOOD HAZARD"}}
+            ]
+        }
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.get.return_value = mock_resp
+        mock_client_cls.return_value = mock_client
+
+        result = fetch_flood_zone("5 Flood Ln", "Ardsley", "NY")
+        assert result is not None
+        assert result["fld_zone"] == "AE"
+        assert result["sfha"] is True
+
+    @patch("app.enrichment.httpx.Client")
+    @patch("app.enrichment._geocode_address")
+    def test_empty_features_returns_none(self, mock_geocode, mock_client_cls):
+        from app.enrichment import fetch_flood_zone, _flood_zone_cache
+
+        mock_geocode.return_value = {"lat": 41.20, "lon": -73.70}
+        cache_key = "41.20000|-73.70000|flood"
+        _flood_zone_cache.pop(cache_key, None)
+
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = {"features": []}
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.get.return_value = mock_resp
+        mock_client_cls.return_value = mock_client
+
+        result = fetch_flood_zone("9 No Zone Rd", "Yonkers", "NY")
+        assert result is None
+
+    @patch("app.enrichment.httpx.Client")
+    @patch("app.enrichment._geocode_address")
+    def test_uses_cache(self, mock_geocode, mock_client_cls):
+        from app.enrichment import fetch_flood_zone, _flood_zone_cache
+
+        mock_geocode.return_value = {"lat": 41.30, "lon": -73.65}
+        cache_key = "41.30000|-73.65000|flood"
+        _flood_zone_cache[cache_key] = {"fld_zone": "X", "sfha": False, "source": "fema_nfhl"}
+
+        result = fetch_flood_zone("Cached St", "Cached Town", "NY")
+        assert result["fld_zone"] == "X"
+        mock_client_cls.assert_not_called()
+
+    @patch("app.enrichment.httpx.Client")
+    @patch("app.enrichment._geocode_address")
+    def test_network_error_returns_none(self, mock_geocode, mock_client_cls):
+        from app.enrichment import fetch_flood_zone, _flood_zone_cache
+
+        mock_geocode.return_value = {"lat": 41.40, "lon": -73.60}
+        cache_key = "41.40000|-73.60000|flood"
+        _flood_zone_cache.pop(cache_key, None)
+
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.get.side_effect = Exception("timeout")
+        mock_client_cls.return_value = mock_client
+
+        result = fetch_flood_zone("Err St", "Errorville", "NY")
+        assert result is None
+
+    def test_sfha_zones_coverage(self):
+        """All primary SFHA zone prefixes should be flagged."""
+        from app.enrichment import _SFHA_ZONES
+
+        assert "A" in _SFHA_ZONES
+        assert "AE" in _SFHA_ZONES
+        assert "V" in _SFHA_ZONES
+        assert "VE" in _SFHA_ZONES
+        assert "X" not in _SFHA_ZONES

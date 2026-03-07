@@ -764,6 +764,96 @@ def fetch_power_line_proximity(
 
 
 # ---------------------------------------------------------------------------
+# FEMA flood zone lookup (NFHL ArcGIS REST API — free, no key required)
+# ---------------------------------------------------------------------------
+
+_FEMA_NFHL_URL = (
+    "https://hazards.fema.gov/arcgis/rest/services/public/NFHL/MapServer/28/query"
+)
+
+# Cache: "lat|lon" → flood zone result dict or sentinel
+_flood_zone_cache: dict[str, dict | None] = {}
+
+# Flood zones that require flood insurance (Special Flood Hazard Areas)
+_SFHA_ZONES = {"A", "AE", "AH", "AO", "AR", "A99", "V", "VE"}
+
+
+def fetch_flood_zone(
+    address: str | None,
+    town: str | None,
+    state: str | None,
+) -> dict | None:
+    """Look up FEMA flood zone designation via NFHL ArcGIS REST API.
+
+    Free, no API key required. Uses Nominatim geocoding (already rate-limited).
+
+    Returns:
+        {
+            "fld_zone": str,       # e.g. "X", "AE", "A"
+            "zone_subty": str,     # e.g. "AREA OF MINIMAL FLOOD HAZARD"
+            "sfha": bool,          # True = Special Flood Hazard Area (insurance required)
+            "source": "fema_nfhl"
+        }
+        or None if geocoding fails or API error.
+    """
+    coords = _geocode_address(address, town, state)
+    if not coords:
+        return None
+
+    lat, lon = coords["lat"], coords["lon"]
+    cache_key = f"{lat:.5f}|{lon:.5f}|flood"
+    if cache_key in _flood_zone_cache:
+        return _flood_zone_cache[cache_key]
+
+    try:
+        with httpx.Client(timeout=10) as client:
+            resp = client.get(
+                _FEMA_NFHL_URL,
+                params={
+                    "geometry": f"{lon},{lat}",
+                    "geometryType": "esriGeometryPoint",
+                    "inSR": "4326",
+                    "spatialRel": "esriSpatialRelIntersects",
+                    "outFields": "FLD_ZONE,ZONE_SUBTY",
+                    "f": "json",
+                },
+                headers={"User-Agent": "listings-analyzer/1.0 (contact: aki@bitsafe.finance)"},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+        features = data.get("features", [])
+        if not features:
+            _flood_zone_cache[cache_key] = None
+            return None
+
+        attrs = features[0].get("attributes", {})
+        fld_zone = (attrs.get("FLD_ZONE") or "").strip()
+        zone_subty = (attrs.get("ZONE_SUBTY") or "").strip()
+
+        if not fld_zone:
+            _flood_zone_cache[cache_key] = None
+            return None
+
+        result = {
+            "fld_zone": fld_zone,
+            "zone_subty": zone_subty,
+            "sfha": any(fld_zone.startswith(z) for z in _SFHA_ZONES),
+            "source": "fema_nfhl",
+        }
+        _flood_zone_cache[cache_key] = result
+        logger.info(
+            f"Flood zone {address}, {town}: {fld_zone} ({zone_subty}) sfha={result['sfha']}"
+        )
+        return result
+
+    except Exception as e:
+        logger.debug(f"Flood zone lookup failed for {address}, {town}: {e}")
+        _flood_zone_cache[cache_key] = None
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Property tax (NY Open Data SODA API — free, no key required)
 # ---------------------------------------------------------------------------
 

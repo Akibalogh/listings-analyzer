@@ -550,6 +550,7 @@ def _migrate_add_columns():
         ("listings", "lat", "REAL"),
         ("listings", "lng", "REAL"),
         ("listings", "power_line_json", "TEXT"),
+        ("listings", "flood_zone_json", "TEXT"),
         ("scores", "evaluation_method", "TEXT DEFAULT 'deterministic'"),
         ("scores", "criteria_version", "INTEGER"),
         ("scores", "ai_reasoning", "TEXT"),

@@ -7,6 +7,13 @@ All notable changes to Listings Analyzer are documented here.
 ## [Unreleased]
 
 ### Added
+- **FEMA flood zone detection** — `fetch_flood_zone()` in `enrichment.py` queries FEMA NFHL ArcGIS REST API (free, no key) by lat/lon. Returns `fld_zone`, `zone_subty`, and `sfha` (bool). `flood_zone_json TEXT` column added to `listings` table. Passed to AI scorer as `flood_zone` structured field.
+- **Criteria v47** — calibration rebalance from buyer preference study: base 25→30, school average 0 (was +5), GFBath +8 (was +15), 4BR +8 (was +10), basement +5 (was +10), commute >110 -15 (was -10).
+- **Power line proximity detection** — `fetch_power_line_proximity()` queries OSM Overpass API (free) for high-voltage transmission infrastructure (power=line/cable/tower) within 300m radius. Returns nearest distance, type, voltage. `lat REAL`, `lng REAL`, `power_line_json TEXT` columns added.
+- **Criteria v48** — power line scoring: -5 at 150–299m, -10 at 75–149m, -15 under 75m.
+- **Criteria v49** — flood zone scoring: -15 Zone AE/VE (SFHA), -10 Zone A, -5 Zone X 500-year, 0 Zone X minimal.
+- **10 new tests for power line proximity** — `TestHaversineM`, `TestGeocodeAddress`, `TestFetchPowerLineProximity` in `test_enrichment.py`.
+- **7 new tests for flood zone** — `TestFetchFloodZone` in `test_enrichment.py`: zone X, zone AE (SFHA), empty features, cache, network error, SFHA zone coverage.
 - **NY ORPTS property tax** — `fetch_property_tax_orpts()` in `enrichment.py` queries NY State ORPTS API (`data.ny.gov/resource/7vem-aaz7.json`) for assessed/taxable values for Westchester and other NY municipalities outside NYC. Integrated as fallback after NYC SODA. Municipality names mapped via `_ORPTS_MUNICIPALITY_MAP` (40+ hamlet→town mappings). Streets queried as UPPERCASE with suffix in same field.
 - **Lot size as structured field** — `lot_acres REAL` column added to `listings` table; extracted from listing pages via JSON-LD `lotSize` (object and string forms), text "X.XX acres", and "N,NNN sq ft lot"; valid range 0.01–1000 acres; backfilled from stored description text in Phase 4 of `/manage/scrape-descriptions`.
 - **`clear_bogus_commute` flag** — `POST /manage/enrich?clear_bogus_commute=true` nulls commute data for listings where `commute_mode == "transit"` (pure transit = walk/bus, unreliable for suburban areas). Forces re-enrichment with drive+transit mode.

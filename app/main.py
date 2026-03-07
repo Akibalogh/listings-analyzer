@@ -762,6 +762,15 @@ def _build_listing_data(listing_row: dict) -> dict:
         except (json.JSONDecodeError, TypeError):
             pass
 
+    # FEMA flood zone (stored JSON if previously fetched)
+    if listing_row.get("flood_zone_json"):
+        try:
+            fz = json.loads(listing_row["flood_zone_json"])
+            if fz.get("fld_zone"):
+                listing_data["flood_zone"] = fz
+        except (json.JSONDecodeError, TypeError):
+            pass
+
     return listing_data
 
 
@@ -1605,7 +1614,7 @@ def _enrich_all(clear_bogus: bool = False, clear_bogus_commute: bool = False):
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    from app.enrichment import fetch_commute_time, fetch_school_data, normalize_address, fetch_property_tax, fetch_property_tax_orpts, fetch_power_line_proximity
+    from app.enrichment import fetch_commute_time, fetch_school_data, normalize_address, fetch_property_tax, fetch_property_tax_orpts, fetch_power_line_proximity, fetch_flood_zone
 
     try:
         listing_ids = db.get_all_listing_ids()
@@ -1732,6 +1741,21 @@ def _enrich_all(clear_bogus: bool = False, clear_bogus_commute: bool = False):
                 elif power_data is None and listing.get("address") and listing.get("town"):
                     # Mark as checked (no power lines found) to avoid re-querying
                     enrichment["power_line_json"] = json.dumps({"nearest_distance_m": None, "source": "osm_overpass"})
+                    changed = True
+
+            # FEMA flood zone check (free, no key needed)
+            if not listing.get("flood_zone_json"):
+                flood_data = fetch_flood_zone(
+                    listing.get("address"),
+                    town=listing.get("town"),
+                    state=listing.get("state"),
+                )
+                if flood_data:
+                    enrichment["flood_zone_json"] = json.dumps(flood_data)
+                    changed = True
+                elif listing.get("address") and listing.get("town"):
+                    # Mark as checked to avoid re-querying
+                    enrichment["flood_zone_json"] = json.dumps({"fld_zone": None, "source": "fema_nfhl"})
                     changed = True
 
             # Collect listings needing commute data for parallel fetch

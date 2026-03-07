@@ -303,6 +303,9 @@ Mobile-first single-page app served at `/` (`app/templates/dashboard.html`).
 - **year_built (INTEGER, nullable)** — extracted from listing page or OneKeyMLS JSON-LD
 - **list_date (TEXT, nullable)** — on-market date (YYYY-MM-DD); extracted from OneKeyMLS JSON-LD `OnMarketDate`
 - **lot_acres (REAL, nullable)** — extracted from JSON-LD `lotSize` field, or visible text ("0.25 acres", "10,890 sq ft lot"); valid range 0.01–1000
+- **lat (REAL, nullable)**, **lng (REAL, nullable)** — geocoded coordinates (Nominatim); used for OSM and FEMA lookups
+- **power_line_json (TEXT, nullable)** — OSM Overpass result: nearest transmission line/tower distance/type/voltage within 300m
+- **flood_zone_json (TEXT, nullable)** — FEMA NFHL result: fld_zone, zone_subty, sfha flag
 - created_at
 
 ### Table: scores
