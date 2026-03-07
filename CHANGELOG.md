@@ -7,6 +7,12 @@ All notable changes to Listings Analyzer are documented here.
 ## [Unreleased]
 
 ### Added
+- **GFB 4-signal inference** — scorer system prompt expanded with explicit 4-signal framework for ground-floor bedroom determination: (1) floor plan image labels (Den/Study/Guest Room on ground floor), (2) description text patterns ("first floor bedroom", "in-law suite", "master on main"), (3) photo examination (beds visible at ground level), (4) property type + age inference (ranch = always GFB, Colonial/Tudor = rarely). Opus commits at 60%+ confidence; only returns "unknown" if all four signals are absent/contradictory.
+- **Criteria v42** — tiered school scoring (+25 strong/95th+ percentile, +15 good/80–94th, +5 average/below 80th; previously flat +35); steeper price taper (-5 at $1.5–1.65M, -10 at $1.65–1.8M, -15 above $1.8M; previously -5 to -10 flat); price/sqft signal doubled (±10, was ±5); old "Condition" section collapsed into "Age & Physical Condition" — eliminates double-counting.
+- **`/manage/update-listing` endpoint** — update individual listing fields (year_built, price, sqft, bedrooms, bathrooms, address, town, state, zip_code) by listing ID without re-scraping. Protected by MANAGE_KEY.
+- **year_built backfill** — scraped Redfin via Jina Reader for 3 listings missing the field: #62 (31 Lalli Dr, Katonah) → 1994, #483 (175 Palmer Ln, Thornwood) → 1948.
+
+### Added
 - **Age/condition scoring** — `score_age_condition()` in `enrichment.py` computes age tier adjustment (pre-1940 → -22 pts up to 2005+ → 0) and keyword scan of listing description (e.g. "new roof" +6, "sold as is" -12, "fixer-upper" -12). Result passed to AI scorer as `age_condition` signal. No external API required.
 - **Price/sqft market benchmark** — `get_price_per_sqft_signal()` loads Zillow ZHVI CSV at startup (~5MB), computes listing $/sqft vs ZIP-level median benchmark, returns `below_market`/`at_market`/`above_market` signal. Passed to AI as `price_per_sqft_signal`.
 - **Property tax enrichment** — `fetch_property_tax()` queries NY Open Data SODA API (free, no key) for NYC assessed/market values. Stored as `property_tax_json` column. Passed to AI as `property_tax`.

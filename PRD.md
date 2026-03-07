@@ -352,6 +352,7 @@ Mobile-first single-page app served at `/` (`app/templates/dashboard.html`).
 - `POST /manage/enrich` — backfill school data + commute times; `?clear_bogus=true` to re-fetch; runs in background
 - `POST /manage/prune-sold` — check Redfin URLs via Jina Reader for sold/off-market status; dry-run by default, `?fix=true` deletes sold listings
 - `POST /manage/update-criteria` — save new criteria instructions and trigger re-score without Google OAuth session (body: `{"instructions": "...", "created_by": "..."}`, `?sequential=true` for sequential mode)
+- `POST /manage/update-listing` — update individual listing fields by ID without re-scraping (body: `{"listing_id": 62, "year_built": 1994}`); allowed fields: year_built, price, sqft, bedrooms, bathrooms, address, town, state, zip_code
 
 ## 9. Key Technical Decisions
 
@@ -447,7 +448,10 @@ Mobile-first single-page app served at `/` (`app/templates/dashboard.html`).
 - **Age/condition scoring** — deterministic from `year_built` (age tiers: pre-1940 → -22 pts, 2005+ → 0) plus keyword scan of description (e.g. "new roof" +6, "sold as is" -12). Passed to AI as `age_condition` signal. No external API.
 - **Price/sqft benchmark** — Zillow ZHVI CSV loaded at startup (~5MB, monthly zip-level medians). Computes `below_market` / `at_market` / `above_market` signal. Passed to AI as `price_per_sqft_signal`.
 - **Property tax** — NY Open Data SODA API (free, no key required). Fetches assessed/market value for NYC boroughs during enrichment. Stored as `property_tax_json`. Passed to AI as `property_tax`.
-- Scoring criteria updated to v41 with explicit instructions for all 3 new signals.
+- **GFB inference improvements** — scorer system prompt expanded with 4-signal framework (floor plan labels, description text, photo examination, property type/age inference). Opus now commits at 60%+ confidence instead of defaulting to "unknown". Only returns unknown if all four signals are truly absent or contradictory.
+- **Criteria v42** — schools tiered (+25 strong/95th+, +15 good/80–94th, +5 average/below 80th); price taper steeper (-5 at $1.5–1.65M, -10 at $1.65–1.8M, -15 above $1.8M); price/sqft signal doubled (±10 from ±5); Condition section collapsed into Age & Physical Condition to eliminate double-counting.
+- **`/manage/update-listing` endpoint** — update individual listing fields (year_built, price, sqft, beds, baths, address) without re-scraping; used for manual data backfill.
+- **year_built backfill** — scraped from Redfin via Jina Reader for 3 listings missing the field (#62 → 1994, #483 → 1948).
 
 ### Phase 4 (Future)
 - Comps engine

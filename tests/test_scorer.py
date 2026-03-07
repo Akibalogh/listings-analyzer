@@ -484,3 +484,56 @@ class TestModelConfig:
         blocks = _build_system_prompt()
         prompt_text = " ".join(b["text"] for b in blocks)
         assert "single definitive verdict" in prompt_text
+
+
+class TestGFBInference:
+    """Tests for GFB (ground-floor bedroom) 4-signal inference in system prompt."""
+
+    def test_gfb_section_present_in_prompt(self):
+        """System prompt must contain GFB inference instructions."""
+        blocks = _build_system_prompt()
+        prompt = blocks[0]["text"]
+        assert "GROUND-FLOOR BEDROOM INFERENCE" in prompt
+
+    def test_gfb_four_signals_present(self):
+        """System prompt must describe all 4 inference signals."""
+        blocks = _build_system_prompt()
+        prompt = blocks[0]["text"]
+        assert "FLOOR PLAN IMAGES" in prompt
+        assert "DESCRIPTION TEXT" in prompt
+        assert "PHOTO EXAMINATION" in prompt
+        assert "PROPERTY TYPE" in prompt
+
+    def test_gfb_commit_instruction_present(self):
+        """Prompt must instruct Opus to commit at 60%+ confidence rather than defaulting unknown."""
+        blocks = _build_system_prompt()
+        prompt = blocks[0]["text"]
+        assert "60%" in prompt
+        assert "commit" in prompt.lower()
+
+    def test_gfb_ranch_inference_rule(self):
+        """Ranch-style homes should be noted as always having GFB."""
+        blocks = _build_system_prompt()
+        prompt = blocks[0]["text"]
+        assert "ranch" in prompt.lower() or "Ranch" in prompt
+
+    def test_gfb_description_keywords_listed(self):
+        """Key description phrases for GFB detection should be in the prompt."""
+        blocks = _build_system_prompt()
+        prompt = blocks[0]["text"]
+        assert "first floor bedroom" in prompt.lower() or "first floor bedroom" in prompt
+        assert "in-law" in prompt.lower()
+
+    def test_gfb_negative_signals_listed(self):
+        """Negative signals like 'all bedrooms upstairs' should be mentioned."""
+        blocks = _build_system_prompt()
+        prompt = blocks[0]["text"]
+        assert "all bedrooms upstairs" in prompt.lower() or "bedrooms upstairs" in prompt.lower()
+
+    def test_enrichment_data_instructions_present(self):
+        """Prompt should tell AI how to use age_condition and price_per_sqft_signal."""
+        blocks = _build_system_prompt()
+        prompt = blocks[0]["text"]
+        assert "age_condition" in prompt
+        assert "price_per_sqft_signal" in prompt
+        assert "property_tax" in prompt

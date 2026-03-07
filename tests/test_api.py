@@ -1561,3 +1561,104 @@ class TestManageRescrapeUnknowns:
         data = res.json()
         # When no criteria set, returns error status (no listings to process)
         assert data["status"] == "error" or "scraped" in data
+
+
+class TestManageUpdateListing:
+    """Tests for POST /manage/update-listing."""
+
+    def test_requires_manage_key(self, client):
+        res = client.post("/manage/update-listing", json={"listing_id": 1, "year_built": 1994})
+        assert res.status_code == 403
+
+    def test_wrong_manage_key_rejected(self, client):
+        res = client.post(
+            "/manage/update-listing",
+            headers={"x-manage-key": "wrong"},
+            json={"listing_id": 1, "year_built": 1994},
+        )
+        assert res.status_code == 403
+
+    def test_missing_listing_id_rejected(self, client):
+        with patch("app.main.settings") as mock_settings:
+            mock_settings.manage_key = "test-key"
+            res = client.post(
+                "/manage/update-listing",
+                headers={"x-manage-key": "test-key"},
+                json={"year_built": 1994},
+            )
+        assert res.status_code == 400
+
+    def test_no_valid_fields_rejected(self, client):
+        with patch("app.main.settings") as mock_settings:
+            mock_settings.manage_key = "test-key"
+            res = client.post(
+                "/manage/update-listing",
+                headers={"x-manage-key": "test-key"},
+                json={"listing_id": 1, "unknown_field": "value"},
+            )
+        assert res.status_code == 400
+
+    @patch("app.main.db.update_listing_fields_by_id")
+    @patch("app.main.db.get_listing_by_id")
+    def test_updates_year_built(self, mock_get, mock_update, client):
+        mock_get.return_value = {"id": 62, "year_built": 1994, "address": "31 Lalli Dr"}
+        with patch("app.main.settings") as mock_settings:
+            mock_settings.manage_key = "test-key"
+            res = client.post(
+                "/manage/update-listing",
+                headers={"x-manage-key": "test-key"},
+                json={"listing_id": 62, "year_built": 1994},
+            )
+        assert res.status_code == 200
+        data = res.json()
+        assert data["listing_id"] == 62
+        assert data["updated"]["year_built"] == 1994
+        assert data["message"] == "OK"
+        mock_update.assert_called_once_with(62, year_built=1994)
+
+    @patch("app.main.db.update_listing_fields_by_id")
+    @patch("app.main.db.get_listing_by_id")
+    def test_updates_multiple_fields(self, mock_get, mock_update, client):
+        mock_get.return_value = {"id": 10, "price": 1500000, "sqft": 2800}
+        with patch("app.main.settings") as mock_settings:
+            mock_settings.manage_key = "test-key"
+            res = client.post(
+                "/manage/update-listing",
+                headers={"x-manage-key": "test-key"},
+                json={"listing_id": 10, "price": 1400000, "sqft": 3000},
+            )
+        assert res.status_code == 200
+        data = res.json()
+        assert "price" in data["updated"]
+        assert "sqft" in data["updated"]
+
+    @patch("app.main.db.update_listing_fields_by_id")
+    @patch("app.main.db.get_listing_by_id", return_value=None)
+    def test_returns_404_for_missing_listing(self, mock_get, mock_update, client):
+        with patch("app.main.settings") as mock_settings:
+            mock_settings.manage_key = "test-key"
+            res = client.post(
+                "/manage/update-listing",
+                headers={"x-manage-key": "test-key"},
+                json={"listing_id": 9999, "year_built": 2000},
+            )
+        assert res.status_code == 404
+
+    @patch("app.main.db.update_listing_fields_by_id")
+    @patch("app.main.db.get_listing_by_id")
+    def test_ignores_disallowed_fields(self, mock_get, mock_update, client):
+        """Fields not in the allowlist should be silently ignored."""
+        mock_get.return_value = {"id": 5, "year_built": 2000}
+        with patch("app.main.settings") as mock_settings:
+            mock_settings.manage_key = "test-key"
+            res = client.post(
+                "/manage/update-listing",
+                headers={"x-manage-key": "test-key"},
+                json={"listing_id": 5, "year_built": 2000, "score": 100, "criteria_version": 99},
+            )
+        assert res.status_code == 200
+        # Only year_built passed to update — score/criteria_version ignored
+        call_kwargs = mock_update.call_args[1]
+        assert "score" not in call_kwargs
+        assert "criteria_version" not in call_kwargs
+        assert call_kwargs.get("year_built") == 2000
