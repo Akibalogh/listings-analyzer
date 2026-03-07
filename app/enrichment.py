@@ -293,6 +293,7 @@ _STATION_OVERRIDES: dict[str, str] = {
     "yorktown": "Croton-Harmon",
     "yorktown heights": "Croton-Harmon",
     "cortlandt": "Croton-Harmon",
+    "cortlandt manor": "Croton-Harmon",
     "mohegan lake": "Cortlandt",
     "somers": "Katonah",
     "briarcliff manor": "Scarborough",
