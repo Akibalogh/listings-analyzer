@@ -1006,7 +1006,7 @@ async def manage_update_criteria(request: Request):
         raise HTTPException(status_code=400, detail="instructions cannot be empty")
     created_by = body.get("created_by", "manage-api")
 
-    sequential = request.query_params.get("sequential", "").lower() == "true"
+    sequential = request.query_params.get("sequential", "true").lower() != "false"
     new_version = db.save_criteria(instructions, created_by=created_by)
     logger.info(f"Saved criteria v{new_version} via manage API by {created_by}")
 
@@ -1039,7 +1039,7 @@ def sync_criteria(request: Request):
         raise HTTPException(status_code=404, detail="No active criteria found — set criteria via AI Criteria in dashboard first")
 
     force = request.query_params.get("force", "").lower() == "true"
-    sequential = request.query_params.get("sequential", "").lower() == "true"
+    sequential = request.query_params.get("sequential", "true").lower() != "false"
     if force:
         with db.get_connection() as conn:
             cur = conn.cursor()

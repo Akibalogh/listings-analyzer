@@ -139,6 +139,13 @@ class TestCriteriaEndpoint:
         res = authed_client.put("/criteria", json={"instructions": ""})
         assert res.status_code == 400
 
+    @patch("app.main._start_rescore")
+    @patch("app.main.db.save_criteria", return_value=10)
+    def test_put_criteria_triggers_rescore(self, mock_save, mock_rescore, authed_client):
+        """Saving criteria via dashboard triggers a rescore."""
+        authed_client.put("/criteria", json={"instructions": "Score listings carefully"})
+        mock_rescore.assert_called_once()
+
     @patch("app.main.db.get_criteria_history", return_value=[])
     def test_history_is_public(self, mock_history, client):
         """GET /criteria/history is public — no auth required."""
@@ -540,6 +547,27 @@ class TestManageEndpoint:
         assert data["rescore_started"] is True
         mock_get_criteria.assert_called_once()
         mock_rescore.assert_called_once()
+
+    @patch("app.main._start_rescore")
+    @patch("app.main.db.get_active_criteria", return_value={"version": 7, "instructions": "test criteria"})
+    @patch("app.main.settings")
+    def test_sync_defaults_to_sequential(self, mock_settings, mock_get_criteria, mock_rescore, client):
+        """sync-criteria should use sequential mode by default (no ?sequential param needed)."""
+        mock_settings.manage_key = "test-secret-key"
+        client.post("/manage/sync-criteria", headers={"x-manage-key": "test-secret-key"})
+        _, kwargs = mock_rescore.call_args
+        assert kwargs.get("sequential") is True
+
+    @patch("app.main._start_rescore")
+    @patch("app.main.db.get_active_criteria", return_value={"version": 7, "instructions": "test criteria"})
+    @patch("app.main.settings")
+    def test_sync_sequential_false_uses_batch(self, mock_settings, mock_get_criteria, mock_rescore, client):
+        """?sequential=false should use batch mode."""
+        mock_settings.manage_key = "test-secret-key"
+        res = client.post("/manage/sync-criteria?sequential=false", headers={"x-manage-key": "test-secret-key"})
+        assert res.json()["mode"] == "batch"
+        _, kwargs = mock_rescore.call_args
+        assert kwargs.get("sequential") is False
 
     @patch("app.main.db.get_active_criteria", return_value=None)
     @patch("app.main.settings")
@@ -1430,7 +1458,7 @@ class TestManageUpdateCriteria:
         data = res.json()
         assert data["version"] == 42
         assert data["rescore_started"] is True
-        assert data["mode"] == "batch"
+        assert data["mode"] == "sequential"
         mock_save.assert_called_once_with("Score listings carefully", created_by="test@example.com")
         mock_rescore.assert_called_once()
 

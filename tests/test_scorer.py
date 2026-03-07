@@ -461,3 +461,26 @@ class TestImageHintBlocks:
         hint_blocks = [b for b in blocks if b.get("type") == "text" and "floor plan" in b.get("text", "").lower()]
         assert len(hint_blocks) == 1
         assert "last images" in hint_blocks[0]["text"].lower()
+
+
+class TestModelConfig:
+    """Tests for AI model configuration."""
+
+    def test_default_model_is_opus(self):
+        """Scoring should use Opus by default for best reasoning quality."""
+        from app.config import Settings
+        s = Settings()
+        assert s.ai_eval_model == "claude-opus-4-6"
+
+    def test_system_prompt_no_conditional_verdicts(self):
+        """System prompt must forbid conditional verdicts like 'X if Y; otherwise Z'."""
+        blocks = _build_system_prompt()
+        prompt_text = " ".join(b["text"] for b in blocks)
+        assert "NEVER write conditional verdicts" in prompt_text
+        assert "otherwise" in prompt_text  # the example of what NOT to do is present
+
+    def test_system_prompt_single_definitive_verdict(self):
+        """System prompt must require a single definitive verdict on line 1."""
+        blocks = _build_system_prompt()
+        prompt_text = " ".join(b["text"] for b in blocks)
+        assert "single definitive verdict" in prompt_text
