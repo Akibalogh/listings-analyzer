@@ -1733,12 +1733,13 @@ function buildPropertySummary(text) {
   var inConclusion = false;
   var conclusionLines = [];
   var firstNonEmpty = true;
+  var factorCount = 0;
 
   for (var i = 0; i < lines.length; i++) {
     var line = lines[i].trim();
     if (!line) {
-      /* Blank line signals start of conclusion block */
-      if (!firstNonEmpty) inConclusion = true;
+      /* Blank line after at least one factor = start of conclusion block */
+      if (factorCount > 0) inConclusion = true;
       continue;
     }
     if (firstNonEmpty) {
@@ -1749,6 +1750,7 @@ function buildPropertySummary(text) {
       conclusionLines.push(line);
     } else {
       section.appendChild(el('div', {className: 'summary-factor'}, line));
+      factorCount++;
     }
   }
   if (conclusionLines.length > 0) {
