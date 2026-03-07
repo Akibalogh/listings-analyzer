@@ -672,7 +672,15 @@ def rescore_single(request: Request, listing_id: int):
 @app.get("/rescore/status")
 def rescore_status():
     """Get the status of the background re-score operation. Public — no auth required."""
-    return db.rescore_state
+    state = dict(db.rescore_state)
+    # Add human-readable elapsed time and stuck flag
+    started = state.get("started_at")
+    if started and state.get("in_progress"):
+        elapsed = int(time.time() - started)
+        state["elapsed_seconds"] = elapsed
+        state["stuck"] = elapsed > 1800 and state.get("completed", 0) == 0
+    state.pop("started_at", None)  # don't expose raw timestamp
+    return state
 
 
 # --- Background re-scoring ---
@@ -940,12 +948,28 @@ def _rescore_all_sequential(
 
 
 def _start_rescore(criteria_version: int, instructions: str, sequential: bool = True):
-    """Launch background re-score thread if not already running."""
+    """Launch background re-score thread if not already running.
+
+    If a rescore has been in_progress with 0 completed for over 30 minutes,
+    it's considered stuck and will be cleared automatically.
+    """
     if db.rescore_state["in_progress"]:
-        logger.warning("Re-score already in progress, skipping")
-        return
+        started = db.rescore_state.get("started_at")
+        completed = db.rescore_state.get("completed", 0)
+        stuck = (
+            started is not None
+            and completed == 0
+            and (time.time() - started) > 1800  # 30 minutes
+        )
+        if stuck:
+            logger.warning("Rescore stuck (0 completed in 30+ min) — clearing and restarting")
+            db.rescore_state["in_progress"] = False
+        else:
+            logger.warning("Re-score already in progress, skipping")
+            return
 
     db.rescore_state["in_progress"] = True
+    db.rescore_state["started_at"] = time.time()
     db.rescore_state["criteria_version"] = criteria_version
     db.rescore_state["skipped"] = 0
     db.rescore_state["batch_id"] = None

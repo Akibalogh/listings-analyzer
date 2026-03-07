@@ -163,6 +163,7 @@ def get_connection():
 rescore_state = {
     "in_progress": False, "total": 0, "completed": 0,
     "skipped": 0, "criteria_version": 0, "batch_id": None,
+    "started_at": None,
 }
 
 
