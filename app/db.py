@@ -543,6 +543,7 @@ def _migrate_add_columns():
         ("listings", "passed", "BOOLEAN DEFAULT FALSE"),
         ("listings", "year_built", "INTEGER"),
         ("listings", "list_date", "TEXT"),
+        ("listings", "property_tax_json", "TEXT"),
         ("scores", "evaluation_method", "TEXT DEFAULT 'deterministic'"),
         ("scores", "criteria_version", "INTEGER"),
         ("scores", "ai_reasoning", "TEXT"),
@@ -791,7 +792,7 @@ def update_listing_enrichment(listing_id: int, enrichment: dict):
     Only updates columns present in the enrichment dict (supports partial updates).
     Automatically sets enriched_at timestamp.
     """
-    allowed_cols = {"address_key", "school_data_json", "commute_minutes", "commute_data_json"}
+    allowed_cols = {"address_key", "school_data_json", "commute_minutes", "commute_data_json", "property_tax_json"}
     cols_to_update = {k: v for k, v in enrichment.items() if k in allowed_cols}
     if not cols_to_update:
         return

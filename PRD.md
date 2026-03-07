@@ -443,11 +443,15 @@ Mobile-first single-page app served at `/` (`app/templates/dashboard.html`).
 - Two-tier unknown penalty in AI prompt: verifiable unknowns (images present, feature unconfirmed) = 10–15 pt deduction; missing-data unknowns (no floor plan) = 3–5 pt mild deduction
 - Address normalization: hyphens stripped from both address and town (fixes Croton-On-Hudson duplication)
 
-### Phase 3 (Future)
+### Phase 3 ✅ Complete
+- **Age/condition scoring** — deterministic from `year_built` (age tiers: pre-1940 → -22 pts, 2005+ → 0) plus keyword scan of description (e.g. "new roof" +6, "sold as is" -12). Passed to AI as `age_condition` signal. No external API.
+- **Price/sqft benchmark** — Zillow ZHVI CSV loaded at startup (~5MB, monthly zip-level medians). Computes `below_market` / `at_market` / `above_market` signal. Passed to AI as `price_per_sqft_signal`.
+- **Property tax** — NY Open Data SODA API (free, no key required). Fetches assessed/market value for NYC boroughs during enrichment. Stored as `property_tax_json`. Passed to AI as `property_tax`.
+- Scoring criteria updated to v41 with explicit instructions for all 3 new signals.
+
+### Phase 4 (Future)
 - Comps engine
-- Price per sqft analysis
 - Metro-North proximity scoring
-- Tax estimation
 - Slack notifications
 
 ## 12. Engineering Discipline

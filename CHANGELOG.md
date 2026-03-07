@@ -7,6 +7,11 @@ All notable changes to Listings Analyzer are documented here.
 ## [Unreleased]
 
 ### Added
+- **Age/condition scoring** — `score_age_condition()` in `enrichment.py` computes age tier adjustment (pre-1940 → -22 pts up to 2005+ → 0) and keyword scan of listing description (e.g. "new roof" +6, "sold as is" -12, "fixer-upper" -12). Result passed to AI scorer as `age_condition` signal. No external API required.
+- **Price/sqft market benchmark** — `get_price_per_sqft_signal()` loads Zillow ZHVI CSV at startup (~5MB), computes listing $/sqft vs ZIP-level median benchmark, returns `below_market`/`at_market`/`above_market` signal. Passed to AI as `price_per_sqft_signal`.
+- **Property tax enrichment** — `fetch_property_tax()` queries NY Open Data SODA API (free, no key) for NYC assessed/market values. Stored as `property_tax_json` column. Passed to AI as `property_tax`.
+- **Scoring criteria v41** — updated instructions to use all 3 new structured signals.
+- **DB migration** — `property_tax_json TEXT` column added to listings table.
 - **Image audit endpoint** — `GET /manage/image-audit` reports image coverage stats: total listings, listings with/without images, listings with unknowns in scoring, sample of high-priority targets needing images; protected by MANAGE_KEY
 - **Force rescrape unknowns** — `POST /manage/rescrape-unknowns` targets listings with "Unknown" hard requirements and insufficient images (<3); re-scrapes listing URLs for images, updates DB, re-scores with images; protected by MANAGE_KEY
 

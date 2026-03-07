@@ -425,3 +425,239 @@ class TestNormalizeAddressHyphen:
         key1 = normalize_address("19 Georgia Ln", "Croton-On-Hudson", "NY")
         key2 = normalize_address("19 Georgia Ln", "Yorktown", "NY")
         assert key1 != key2
+
+
+# ---------------------------------------------------------------------------
+# Age / condition scoring tests
+# ---------------------------------------------------------------------------
+
+class TestScoreAgeCondition:
+    """Tests for score_age_condition() — age tiers and keyword scanning."""
+
+    def test_import(self):
+        from app.enrichment import score_age_condition
+        assert callable(score_age_condition)
+
+    def test_pre1940_age_penalty(self):
+        from app.enrichment import score_age_condition
+        result = score_age_condition(1935, None)
+        assert result["age_adjustment"] == -22
+        assert result["age_tier"] == "pre-1940"
+        assert result["condition_adjustment"] == 0
+
+    def test_1940s_age_penalty(self):
+        from app.enrichment import score_age_condition
+        result = score_age_condition(1955, None)
+        assert result["age_adjustment"] == -18
+        assert result["age_tier"] == "1940-1959"
+
+    def test_1975_1989_age_penalty(self):
+        from app.enrichment import score_age_condition
+        result = score_age_condition(1982, None)
+        assert result["age_adjustment"] == -6
+        assert result["age_tier"] == "1975-1989"
+
+    def test_2005_plus_no_penalty(self):
+        from app.enrichment import score_age_condition
+        result = score_age_condition(2010, None)
+        assert result["age_adjustment"] == 0
+        assert result["age_tier"] == "2005+"
+
+    def test_unknown_year_no_penalty(self):
+        from app.enrichment import score_age_condition
+        result = score_age_condition(None, None)
+        assert result["age_adjustment"] == 0
+        assert result["age_tier"] == "unknown"
+
+    def test_positive_keywords(self):
+        from app.enrichment import score_age_condition
+        result = score_age_condition(1990, "Fully renovated with new roof and new HVAC.")
+        assert result["condition_adjustment"] > 0
+        assert "new roof" in result["keywords_matched"]
+        assert "fully renovated" in result["keywords_matched"]
+
+    def test_negative_keywords_as_is(self):
+        from app.enrichment import score_age_condition
+        result = score_age_condition(1980, "Sold as is. Needs TLC.")
+        assert result["condition_adjustment"] < 0
+        assert "sold as is" in result["keywords_matched"]
+
+    def test_condition_clamped_positive(self):
+        from app.enrichment import score_age_condition
+        desc = " ".join(["new construction newly built gut renovated new roof new hvac new windows turnkey"] * 5)
+        result = score_age_condition(2020, desc)
+        assert result["condition_adjustment"] <= 15
+
+    def test_condition_clamped_negative(self):
+        from app.enrichment import score_age_condition
+        desc = " ".join(["sold as is fixer-upper needs tlc cesspool knob and tube major repairs"] * 5)
+        result = score_age_condition(1940, desc)
+        assert result["condition_adjustment"] >= -25
+
+    def test_case_insensitive(self):
+        from app.enrichment import score_age_condition
+        result = score_age_condition(2000, "NEW ROOF installed last year. TURNKEY.")
+        assert "new roof" in result["keywords_matched"]
+
+
+# ---------------------------------------------------------------------------
+# Price per sqft signal tests
+# ---------------------------------------------------------------------------
+
+class TestGetPricePerSqftSignal:
+    """Tests for get_price_per_sqft_signal() — Zillow CSV benchmark."""
+
+    def test_import(self):
+        from app.enrichment import get_price_per_sqft_signal
+        assert callable(get_price_per_sqft_signal)
+
+    def test_returns_none_no_price(self):
+        from app.enrichment import get_price_per_sqft_signal
+        assert get_price_per_sqft_signal(None, 2000, "10528") is None
+
+    def test_returns_none_no_sqft(self):
+        from app.enrichment import get_price_per_sqft_signal
+        assert get_price_per_sqft_signal(1500000, None, "10528") is None
+
+    def test_returns_none_no_zip(self):
+        from app.enrichment import get_price_per_sqft_signal
+        assert get_price_per_sqft_signal(1500000, 2000, None) is None
+
+    def test_returns_none_unknown_zip(self):
+        """ZIP not in Zillow data → None."""
+        from app.enrichment import get_price_per_sqft_signal, _zillow_median
+        # Inject fake data
+        _zillow_median["99999"] = 600000.0
+        result = get_price_per_sqft_signal(1500000, 2000, "00001")
+        assert result is None
+
+    def test_below_market_signal(self):
+        """Listing well below market should return below_market."""
+        from app.enrichment import get_price_per_sqft_signal, _zillow_median
+        _zillow_median["10001"] = 1200000.0  # benchmark ~$800/sqft
+        result = get_price_per_sqft_signal(600000, 2000, "10001")  # $300/sqft
+        assert result is not None
+        assert result["signal"] == "below_market"
+        assert result["listing_price_per_sqft"] == 300.0
+
+    def test_above_market_signal(self):
+        """Listing well above market should return above_market."""
+        from app.enrichment import get_price_per_sqft_signal, _zillow_median
+        _zillow_median["10002"] = 600000.0  # benchmark ~$400/sqft
+        result = get_price_per_sqft_signal(2000000, 1500, "10002")  # ~$1333/sqft
+        assert result is not None
+        assert result["signal"] == "above_market"
+
+    def test_at_market_signal(self):
+        """Listing near market should return at_market."""
+        from app.enrichment import get_price_per_sqft_signal, _zillow_median
+        _zillow_median["10003"] = 900000.0  # benchmark $600/sqft
+        result = get_price_per_sqft_signal(900000, 1500, "10003")  # exactly $600/sqft
+        assert result is not None
+        assert result["signal"] == "at_market"
+        assert result["ratio"] == pytest.approx(1.0)
+
+    def test_result_keys(self):
+        """Result dict should have expected keys."""
+        from app.enrichment import get_price_per_sqft_signal, _zillow_median
+        _zillow_median["10004"] = 750000.0
+        result = get_price_per_sqft_signal(1200000, 2000, "10004")
+        assert result is not None
+        assert "listing_price_per_sqft" in result
+        assert "zillow_median_home_value" in result
+        assert "implied_benchmark_per_sqft" in result
+        assert "ratio" in result
+        assert "signal" in result
+
+
+# ---------------------------------------------------------------------------
+# Property tax fetch tests (NYC SODA API)
+# ---------------------------------------------------------------------------
+
+class TestFetchPropertyTax:
+    """Tests for fetch_property_tax() — NY Open Data SODA API."""
+
+    def test_import(self):
+        from app.enrichment import fetch_property_tax
+        assert callable(fetch_property_tax)
+
+    def test_returns_none_no_address(self):
+        from app.enrichment import fetch_property_tax
+        assert fetch_property_tax(None) is None
+
+    @patch("app.enrichment.httpx.Client")
+    def test_successful_fetch(self, mock_client_cls):
+        from app.enrichment import fetch_property_tax, _tax_cache
+        # Clear cache for this address
+        cache_key = "123 Main St|Manhattan|None"
+        _tax_cache.pop(cache_key, None)
+
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = [{
+            "assessed_value_total": "150000",
+            "market_value_total": "1200000",
+            "tax_class_at_present": "1",
+            "address": "123 MAIN ST",
+        }]
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.get.return_value = mock_resp
+        mock_client_cls.return_value = mock_client
+
+        result = fetch_property_tax("123 Main St", borough="Manhattan")
+        assert result is not None
+        assert result["assessed_value"] == 150000
+        assert result["market_value"] == 1200000
+        assert result["tax_class"] == "1"
+
+    @patch("app.enrichment.httpx.Client")
+    def test_empty_response_returns_none(self, mock_client_cls):
+        from app.enrichment import fetch_property_tax, _tax_cache
+        _tax_cache.pop("456 Oak Ave|Brooklyn|None", None)
+
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = []
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.get.return_value = mock_resp
+        mock_client_cls.return_value = mock_client
+
+        result = fetch_property_tax("456 Oak Ave", borough="Brooklyn")
+        assert result is None
+
+    @patch("app.enrichment.httpx.Client")
+    def test_network_error_returns_none(self, mock_client_cls):
+        from app.enrichment import fetch_property_tax, _tax_cache
+        _tax_cache.pop("789 Pine St|None|None", None)
+
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.get.side_effect = Exception("timeout")
+        mock_client_cls.return_value = mock_client
+
+        result = fetch_property_tax("789 Pine St")
+        assert result is None
+
+    @patch("app.enrichment.httpx.Client")
+    def test_caches_result(self, mock_client_cls):
+        """Second call with same args should use cache, not make another HTTP request."""
+        from app.enrichment import fetch_property_tax, _tax_cache
+
+        cache_key = "100 Elm St|Queens|None"
+        _tax_cache[cache_key] = {
+            "assessed_value": 80000,
+            "market_value": 700000,
+            "tax_class": "1",
+            "address": "100 ELM ST",
+        }
+
+        result = fetch_property_tax("100 Elm St", borough="Queens")
+        assert result is not None
+        assert result["assessed_value"] == 80000
+        # HTTP client should NOT have been called (cache hit)
+        mock_client_cls.assert_not_called()

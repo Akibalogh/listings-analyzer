@@ -722,6 +722,30 @@ def _build_listing_data(listing_row: dict) -> dict:
             except (json.JSONDecodeError, TypeError):
                 pass
 
+    # Age/condition signal (computed on-the-fly, no DB storage needed)
+    from app.enrichment import score_age_condition, get_price_per_sqft_signal
+    age_cond = score_age_condition(
+        listing_row.get("year_built"),
+        listing_row.get("description"),
+    )
+    listing_data["age_condition"] = age_cond
+
+    # Price/sqft benchmark vs Zillow median
+    ppsf = get_price_per_sqft_signal(
+        listing_row.get("price"),
+        listing_row.get("sqft"),
+        listing_row.get("zip_code"),
+    )
+    if ppsf:
+        listing_data["price_per_sqft_signal"] = ppsf
+
+    # Property tax (stored JSON if previously fetched)
+    if listing_row.get("property_tax_json"):
+        try:
+            listing_data["property_tax"] = json.loads(listing_row["property_tax_json"])
+        except (json.JSONDecodeError, TypeError):
+            pass
+
     return listing_data
 
 
@@ -1507,7 +1531,7 @@ def _enrich_all(clear_bogus: bool = False):
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    from app.enrichment import fetch_commute_time, fetch_school_data, normalize_address
+    from app.enrichment import fetch_commute_time, fetch_school_data, normalize_address, fetch_property_tax
 
     try:
         listing_ids = db.get_all_listing_ids()
@@ -1575,6 +1599,16 @@ def _enrich_all(clear_bogus: bool = False):
                 except Exception as e:
                     logger.error(f"Failed to enrich listing #{lid}: {e}")
                     errors.append(f"#{lid}: {e}")
+
+            # Property tax (NYC only — fast, no rate limit)
+            if not listing.get("property_tax_json"):
+                tax_data = fetch_property_tax(
+                    listing.get("address"),
+                    borough=listing.get("town"),
+                )
+                if tax_data:
+                    enrichment["property_tax_json"] = json.dumps(tax_data)
+                    changed = True
 
             # Collect listings needing commute data for parallel fetch
             if listing.get("commute_minutes") is None:

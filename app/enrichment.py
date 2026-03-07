@@ -368,3 +368,304 @@ def fetch_commute_time(
         "transit_minutes": round(transit_secs / 60),
         "station": station,
     }
+
+
+# ---------------------------------------------------------------------------
+# Age / condition scoring (pure code, no external API)
+# ---------------------------------------------------------------------------
+
+# Keyword → point delta (applied to description text, case-insensitive)
+_CONDITION_KEYWORDS: list[tuple[str, int]] = [
+    # Positive signals
+    ("new roof", +6),
+    ("new construction", +8),
+    ("newly built", +8),
+    ("gut renovated", +7),
+    ("fully renovated", +6),
+    ("fully updated", +5),
+    ("completely renovated", +6),
+    ("recently renovated", +5),
+    ("recently updated", +4),
+    ("updated kitchen", +3),
+    ("updated bath", +3),
+    ("updated bathroom", +3),
+    ("new kitchen", +4),
+    ("new bath", +3),
+    ("new bathroom", +3),
+    ("new hvac", +4),
+    ("new windows", +3),
+    ("new floors", +3),
+    ("move-in ready", +3),
+    ("turnkey", +3),
+    # Negative signals
+    ("as is", -12),
+    ("as-is", -12),
+    ("sold as is", -15),
+    ("needs work", -8),
+    ("needs tlc", -8),
+    ("tlc needed", -8),
+    ("fixer", -10),
+    ("fixer-upper", -12),
+    ("handyman special", -12),
+    ("cesspool", -6),
+    ("oil heat", -4),
+    ("knob and tube", -8),
+    ("original condition", -6),
+    ("original kitchen", -4),
+    ("original bath", -4),
+    ("deferred maintenance", -8),
+    ("major repairs", -10),
+    ("foundation issue", -12),
+    ("flood zone", -5),
+    ("flood damage", -10),
+]
+
+
+def score_age_condition(year_built: int | None, description: str | None) -> dict:
+    """Compute an age/condition score adjustment from year_built and listing description.
+
+    Returns:
+        dict with keys:
+          - age_adjustment (int): point delta from age tier (-22 to 0)
+          - condition_adjustment (int): point delta from keyword scan (clamped -25 to +15)
+          - age_tier (str): human-readable tier label
+          - keywords_matched (list[str]): matched condition keywords
+    """
+    # --- Age tier ---
+    if year_built is None:
+        age_adj = 0
+        tier = "unknown"
+    elif year_built < 1940:
+        age_adj = -22
+        tier = "pre-1940"
+    elif year_built < 1960:
+        age_adj = -18
+        tier = "1940-1959"
+    elif year_built < 1975:
+        age_adj = -12
+        tier = "1960-1974"
+    elif year_built < 1990:
+        age_adj = -6
+        tier = "1975-1989"
+    elif year_built < 2005:
+        age_adj = -2
+        tier = "1990-2004"
+    else:
+        age_adj = 0
+        tier = "2005+"
+
+    # --- Condition keywords ---
+    condition_adj = 0
+    matched: list[str] = []
+    if description:
+        desc_lower = description.lower()
+        for keyword, delta in _CONDITION_KEYWORDS:
+            if keyword in desc_lower:
+                condition_adj += delta
+                matched.append(keyword)
+
+    # Clamp condition adjustment
+    condition_adj = max(-25, min(+15, condition_adj))
+
+    return {
+        "age_adjustment": age_adj,
+        "condition_adjustment": condition_adj,
+        "age_tier": tier,
+        "keywords_matched": matched,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Price per sqft benchmark (Zillow Research CSV — loaded at startup)
+# ---------------------------------------------------------------------------
+
+_ZILLOW_CSV_URL = (
+    "https://files.zillowstatic.com/research/public_csvs/zhvi/"
+    "Zip_zhvi_uc_sfrcondo_tier_0.33_0.67_sm_sa_month.csv"
+)
+
+# In-memory cache: zip_code → median_price (most recent month)
+_zillow_median: dict[str, float] = {}
+_zillow_loaded = False
+
+
+def _load_zillow_csv() -> None:
+    """Download and parse Zillow ZHVI CSV into _zillow_median map.
+
+    Loads median home value by ZIP — used to derive $/sqft benchmark when
+    a listing's sqft is known. Called once at startup (or on first use).
+    Silently skips on network failure.
+    """
+    global _zillow_loaded, _zillow_median
+    if _zillow_loaded:
+        return
+    _zillow_loaded = True  # Set now to avoid retry loops on network failure
+
+    try:
+        logger.info("Loading Zillow ZHVI CSV...")
+        with httpx.Client(timeout=30.0, follow_redirects=True) as client:
+            resp = client.get(_ZILLOW_CSV_URL)
+            resp.raise_for_status()
+            text = resp.text
+
+        lines = text.splitlines()
+        if not lines:
+            return
+
+        headers = lines[0].split(",")
+        # The last date column holds the most recent month's value
+        last_date_col = len(headers) - 1
+        zip_col = next((i for i, h in enumerate(headers) if h.strip() == "RegionName"), None)
+        region_type_col = next(
+            (i for i, h in enumerate(headers) if h.strip() == "RegionType"), None
+        )
+        if zip_col is None:
+            logger.warning("Zillow CSV: RegionName column not found")
+            return
+
+        loaded = 0
+        for line in lines[1:]:
+            parts = line.split(",")
+            if len(parts) <= last_date_col:
+                continue
+            # Skip non-zip rows (e.g., metro, state)
+            if region_type_col is not None and parts[region_type_col].strip() != "zip":
+                continue
+            zip_code = parts[zip_col].strip().zfill(5)
+            val_str = parts[last_date_col].strip()
+            if val_str:
+                try:
+                    _zillow_median[zip_code] = float(val_str)
+                    loaded += 1
+                except ValueError:
+                    pass
+
+        logger.info(f"Zillow ZHVI loaded: {loaded} ZIPs")
+    except Exception as e:
+        logger.warning(f"Failed to load Zillow CSV: {e}")
+
+
+def get_price_per_sqft_signal(
+    price: int | None, sqft: int | None, zip_code: str | None
+) -> dict | None:
+    """Compare listing $/sqft against Zillow's median home value for the ZIP.
+
+    Returns dict with:
+      - listing_price_per_sqft (float)
+      - zillow_median_home_value (float)
+      - implied_benchmark_per_sqft (float): median / 1500 (rough typical sqft)
+      - ratio (float): listing $/sqft ÷ benchmark (>1 = above market)
+      - signal (str): "below_market" | "at_market" | "above_market" | "no_data"
+
+    Returns None if price/sqft/zip are missing or no Zillow data.
+    """
+    if not price or not sqft or sqft <= 0 or not zip_code:
+        return None
+
+    _load_zillow_csv()
+
+    zip_norm = str(zip_code).strip().zfill(5)
+    median_value = _zillow_median.get(zip_norm)
+    if not median_value:
+        return None
+
+    listing_ppsf = price / sqft
+    # Zillow ZHVI is for a "middle tier" home — we use 1,500 sqft as benchmark
+    benchmark_ppsf = median_value / 1500
+    ratio = listing_ppsf / benchmark_ppsf if benchmark_ppsf else None
+
+    if ratio is None:
+        signal = "no_data"
+    elif ratio < 0.85:
+        signal = "below_market"
+    elif ratio > 1.20:
+        signal = "above_market"
+    else:
+        signal = "at_market"
+
+    return {
+        "listing_price_per_sqft": round(listing_ppsf, 2),
+        "zillow_median_home_value": round(median_value, 0),
+        "implied_benchmark_per_sqft": round(benchmark_ppsf, 2),
+        "ratio": round(ratio, 3) if ratio else None,
+        "signal": signal,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Property tax (NY Open Data SODA API — free, no key required)
+# ---------------------------------------------------------------------------
+
+_SODA_API_URL = "https://data.cityofnewyork.us/resource/yjxr-fw8i.json"
+
+# Cache: address_key → tax data dict
+_tax_cache: dict[str, dict] = {}
+
+
+def fetch_property_tax(
+    address: str | None,
+    borough: str | None = None,
+    bbl: str | None = None,
+) -> dict | None:
+    """Fetch NYC property tax assessment data from NY Open Data SODA API.
+
+    Free, no API key required. Covers NYC 5 boroughs only.
+
+    Args:
+        address: Street address (e.g. "123 Main St")
+        borough: NYC borough name or number (1=Manhattan, 2=Bronx, 3=Brooklyn, 4=Queens, 5=Staten Island)
+        bbl: Borough-Block-Lot identifier (10-digit string)
+
+    Returns dict with:
+      - assessed_value (int): NYC assessed value
+      - market_value (int): estimated market value
+      - tax_class (str): property tax class
+      - address (str): matched address
+    Or None if not found / not NYC.
+    """
+    if not address:
+        return None
+
+    cache_key = f"{address}|{borough}|{bbl}"
+    if cache_key in _tax_cache:
+        return _tax_cache[cache_key]
+
+    try:
+        params: dict = {"$limit": 1}
+        if bbl:
+            params["bbl"] = bbl
+        else:
+            # Normalize address for SODA query
+            addr_clean = address.strip().upper()
+            params["$where"] = f"upper(address) like '{addr_clean}%'"
+            if borough:
+                # Accept name or number
+                borough_map = {
+                    "manhattan": "1", "bronx": "2", "brooklyn": "3",
+                    "queens": "4", "staten island": "5",
+                }
+                b = str(borough).lower()
+                borough_num = borough_map.get(b, b)
+                params["boro"] = borough_num
+
+        with httpx.Client(timeout=10.0) as client:
+            resp = client.get(_SODA_API_URL, params=params)
+            resp.raise_for_status()
+            data = resp.json()
+
+        if not data:
+            return None
+
+        row = data[0]
+        result = {
+            "assessed_value": int(row.get("assessed_value_total") or 0) or None,
+            "market_value": int(row.get("market_value_total") or 0) or None,
+            "tax_class": row.get("tax_class_at_present"),
+            "address": row.get("address"),
+        }
+        _tax_cache[cache_key] = result
+        return result
+
+    except Exception as e:
+        logger.debug(f"Property tax lookup failed for {address}: {e}")
+        return None
