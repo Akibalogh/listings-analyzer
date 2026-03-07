@@ -85,6 +85,7 @@ OUTPUT FORMAT — return ONLY a JSON object with exactly these keys:
 
 FORMAT FOR property_summary:
 Line 1: "<Verdict> — <Score>/100" (e.g. "Worth Touring — 65/100")
+CRITICAL: Line 1 must be a single definitive verdict. NEVER write conditional verdicts like "X if Y; otherwise Z". Pick one score and one verdict.
 Then one line per major factor, each starting with ✅ (meets/confirmed), ⚠️ (concern/marginal), or ❓ (unknown/unconfirmed):
   ✅ <Factor>: <value and brief explanation>
   ⚠️ <Factor>: <value and brief explanation>
