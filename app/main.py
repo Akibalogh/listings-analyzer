@@ -1478,7 +1478,7 @@ def manage_scrape_descriptions(request: Request):
 
     # Phase 4: backfill year_built/list_date from descriptions, listing page, or OneKeyMLS
     import httpx
-    from app.parsers.onehome import _YEAR_BUILT_RE, _LIST_DATE_RE
+    from app.parsers.onehome import _YEAR_BUILT_RE, _LIST_DATE_RE, _LOT_ACRES_TEXT_RE, _LOT_SQFT_TEXT_RE
     from app.parsers.onehome import _extract_property_stats as extract_stats
     from app.parsers.onehome import _search_onekeymls_url
 
@@ -1496,8 +1496,8 @@ def manage_scrape_descriptions(request: Request):
         updates = {}
 
         # 1. Try extracting from stored description first (no network needed)
+        desc = listing.get("description") or ""
         if needs_year_built:
-            desc = listing.get("description") or ""
             yb_match = _YEAR_BUILT_RE.search(desc)
             if yb_match:
                 year = int(yb_match.group(1))
@@ -1506,6 +1506,24 @@ def manage_scrape_descriptions(request: Request):
             ld_match = _LIST_DATE_RE.search(desc)
             if ld_match:
                 updates["list_date"] = ld_match.group(1).strip()
+        if needs_lot_acres and desc:
+            acres_m = _LOT_ACRES_TEXT_RE.search(desc)
+            if acres_m:
+                try:
+                    val = float(acres_m.group(1).replace(",", ""))
+                    if 0.01 <= val <= 1000:
+                        updates["lot_acres"] = round(val, 4)
+                except ValueError:
+                    pass
+            if "lot_acres" not in updates:
+                sqft_m = _LOT_SQFT_TEXT_RE.search(desc)
+                if sqft_m:
+                    try:
+                        acres = float(sqft_m.group(1).replace(",", "")) / 43560
+                        if 0.01 <= acres <= 1000:
+                            updates["lot_acres"] = round(acres, 4)
+                    except ValueError:
+                        pass
 
         if updates and not needs_lot_acres:
             db.update_listing_fields_by_id(lid, **updates)
