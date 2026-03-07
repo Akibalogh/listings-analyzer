@@ -1902,3 +1902,246 @@ def manage_data_quality(request: Request):
     report["re_polled"] = len(poll_result) if poll_result else 0
     report["rescore_started"] = rescore_started
     return report
+
+
+@app.get("/manage/image-audit")
+def manage_image_audit(request: Request):
+    """Audit image coverage across all listings.
+
+    Returns counts of:
+    - Total listings
+    - Listings with images
+    - Listings without images
+    - Listings with unknowns in scoring (high priority for re-scrape)
+
+    Protected by MANAGE_KEY env var.
+    """
+    key = request.headers.get("x-manage-key", "")
+    if not settings.manage_key or key != settings.manage_key:
+        raise HTTPException(status_code=403, detail="Invalid or missing management key")
+
+    with db.get_connection() as conn:
+        cur = conn.cursor()
+
+        # Total listings
+        cur.execute("SELECT COUNT(*) FROM listings")
+        total = cur.fetchone()[0]
+
+        # Listings with images
+        if settings.is_postgres:
+            cur.execute("""
+                SELECT COUNT(*) FROM listings
+                WHERE image_urls_json IS NOT NULL
+                AND image_urls_json != '[]'
+                AND image_urls_json != 'null'
+            """)
+        else:
+            cur.execute("""
+                SELECT COUNT(*) FROM listings
+                WHERE image_urls_json IS NOT NULL
+                AND image_urls_json != '[]'
+                AND image_urls_json != 'null'
+            """)
+        with_images = cur.fetchone()[0]
+
+        # Listings with unknowns in hard_results
+        cur.execute("""
+            SELECT COUNT(DISTINCT s.listing_id)
+            FROM scores s
+            WHERE s.hard_results_json LIKE '%"passed": null%'
+        """)
+        with_unknowns = cur.fetchone()[0]
+
+        # Listings with unknowns AND no images (highest priority)
+        if settings.is_postgres:
+            cur.execute("""
+                SELECT COUNT(DISTINCT s.listing_id)
+                FROM scores s
+                JOIN listings l ON l.id = s.listing_id
+                WHERE s.hard_results_json LIKE '%"passed": null%'
+                AND (l.image_urls_json IS NULL
+                     OR l.image_urls_json = '[]'
+                     OR l.image_urls_json = 'null')
+            """)
+        else:
+            cur.execute("""
+                SELECT COUNT(DISTINCT s.listing_id)
+                FROM scores s
+                JOIN listings l ON l.id = s.listing_id
+                WHERE s.hard_results_json LIKE '%"passed": null%'
+                AND (l.image_urls_json IS NULL
+                     OR l.image_urls_json = '[]'
+                     OR l.image_urls_json = 'null')
+            """)
+        unknowns_no_images = cur.fetchone()[0]
+
+        # Sample of listings needing images (listing IDs)
+        if settings.is_postgres:
+            cur.execute("""
+                SELECT l.id, l.address, l.town, s.verdict, s.score
+                FROM listings l
+                LEFT JOIN scores s ON s.listing_id = l.id
+                WHERE (l.image_urls_json IS NULL
+                       OR l.image_urls_json = '[]'
+                       OR l.image_urls_json = 'null')
+                AND s.hard_results_json LIKE '%"passed": null%'
+                ORDER BY s.score DESC
+                LIMIT 20
+            """)
+            cols = [desc[0] for desc in cur.description]
+            sample = [dict(zip(cols, row)) for row in cur.fetchall()]
+        else:
+            cur.execute("""
+                SELECT l.id, l.address, l.town, s.verdict, s.score
+                FROM listings l
+                LEFT JOIN scores s ON s.listing_id = l.id
+                WHERE (l.image_urls_json IS NULL
+                       OR l.image_urls_json = '[]'
+                       OR l.image_urls_json = 'null')
+                AND s.hard_results_json LIKE '%"passed": null%'
+                ORDER BY s.score DESC
+                LIMIT 20
+            """)
+            sample = [dict(row) for row in cur.fetchall()]
+
+    return {
+        "total_listings": total,
+        "with_images": with_images,
+        "without_images": total - with_images,
+        "with_unknowns": with_unknowns,
+        "unknowns_no_images": unknowns_no_images,
+        "sample_needs_images": sample,
+        "recommendation": (
+            f"{unknowns_no_images} listings have unknowns AND no images. "
+            f"Run POST /manage/rescrape-unknowns to fetch images and re-score."
+        ),
+    }
+
+
+@app.post("/manage/rescrape-unknowns")
+def manage_rescrape_unknowns(request: Request):
+    """Force re-scrape images for listings with unknowns in scoring.
+
+    Targets listings that:
+    1. Have "Unknown" (passed: null) in their hard_results
+    2. Either have no images OR fewer than 3 images
+
+    For each listing:
+    - Re-scrape the listing URL (if available) for images
+    - If no URL, try DuckDuckGo search for listing page
+    - Re-score with new images
+
+    Protected by MANAGE_KEY env var.
+    """
+    key = request.headers.get("x-manage-key", "")
+    if not settings.manage_key or key != settings.manage_key:
+        raise HTTPException(status_code=403, detail="Invalid or missing management key")
+
+    from app.parsers.onehome import scrape_listing_description
+
+    # Find listings with unknowns and insufficient images
+    targets = []
+    with db.get_connection() as conn:
+        cur = conn.cursor()
+        if settings.is_postgres:
+            cur.execute("""
+                SELECT l.id, l.address, l.town, l.state, l.zip_code,
+                       l.mls_id, l.listing_url, l.image_urls_json
+                FROM listings l
+                JOIN scores s ON s.listing_id = l.id
+                WHERE s.hard_results_json LIKE '%"passed": null%'
+            """)
+            cols = [desc[0] for desc in cur.description]
+            rows = [dict(zip(cols, row)) for row in cur.fetchall()]
+        else:
+            cur.execute("""
+                SELECT l.id, l.address, l.town, l.state, l.zip_code,
+                       l.mls_id, l.listing_url, l.image_urls_json
+                FROM listings l
+                JOIN scores s ON s.listing_id = l.id
+                WHERE s.hard_results_json LIKE '%"passed": null%'
+            """)
+            rows = [dict(row) for row in cur.fetchall()]
+
+        for row in rows:
+            images_json = row.get("image_urls_json")
+            try:
+                existing_images = json.loads(images_json) if images_json else []
+            except (json.JSONDecodeError, TypeError):
+                existing_images = []
+
+            # Target if no images or fewer than 3 images (likely missing floor plans)
+            if len(existing_images) < 3:
+                targets.append(row)
+
+    logger.info(f"Re-scraping {len(targets)} listings with unknowns and insufficient images")
+
+    scraped = 0
+    rescored = 0
+    errors = []
+
+    criteria = db.get_active_criteria()
+    if not criteria:
+        return {
+            "status": "error",
+            "message": "No active criteria found - cannot re-score",
+        }
+
+    for listing in targets:
+        listing_id = listing["id"]
+        url = listing.get("listing_url")
+
+        if not url:
+            logger.warning(f"Listing {listing_id} has no URL, skipping")
+            continue
+
+        try:
+            # Re-scrape for images (description already exists, just get new images)
+            _, new_images = scrape_listing_description(
+                url,
+                address=listing.get("address"),
+                town=listing.get("town"),
+                state=listing.get("state"),
+                zip_code=listing.get("zip_code"),
+                mls_id=listing.get("mls_id"),
+            )
+
+            if new_images:
+                # Update images in DB
+                db.add_listing_images(listing_id, new_images)
+                scraped += 1
+                logger.info(f"Scraped {len(new_images)} images for listing {listing_id}")
+
+                # Re-score with new images
+                listing_data = db.get_listing_by_id(listing_id)
+                if listing_data:
+                    result, reasoning = ai_score_listing(
+                        listing_data,
+                        criteria["instructions"],
+                        image_urls=new_images,
+                    )
+                    db.save_score(
+                        listing_id,
+                        result,
+                        reasoning,
+                        criteria_version=criteria["version"],
+                    )
+                    rescored += 1
+                    logger.info(
+                        f"Re-scored listing {listing_id}: {result.verdict} ({result.score}/100)"
+                    )
+            else:
+                logger.warning(f"No images found for listing {listing_id} at {url[:80]}")
+
+        except Exception as e:
+            logger.error(f"Failed to rescrape listing {listing_id}: {e}")
+            errors.append({"listing_id": listing_id, "error": str(e)})
+
+    return {
+        "status": "complete",
+        "targets": len(targets),
+        "scraped": scraped,
+        "rescored": rescored,
+        "errors": len(errors),
+        "error_details": errors[:10],  # First 10 errors
+    }

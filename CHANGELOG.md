@@ -7,6 +7,13 @@ All notable changes to Listings Analyzer are documented here.
 ## [Unreleased]
 
 ### Added
+- **Image audit endpoint** — `GET /manage/image-audit` reports image coverage stats: total listings, listings with/without images, listings with unknowns in scoring, sample of high-priority targets needing images; protected by MANAGE_KEY
+- **Force rescrape unknowns** — `POST /manage/rescrape-unknowns` targets listings with "Unknown" hard requirements and insufficient images (<3); re-scrapes listing URLs for images, updates DB, re-scores with images; protected by MANAGE_KEY
+
+### Changed
+- **Enhanced AI prompt for unknowns** — scorer system prompt now explicitly instructs AI to penalize unknowns heavily: each unknown hard requirement reduces score by 10-15 points, unknown basement by 15-20 points; 3+ unknowns should result in Weak Match or Low Priority (30-50 range), not 60+; floor plans are critical for determining basement finish, ground-floor bedrooms, detached status
+
+### Added
 - **"Passed" status** — `passed` boolean column on listings; `POST /listings/{id}/passed` toggle endpoint (auth-required); orange "Passed" badge in compact card row; "Pass" / "Passed — click to undo" button in detail actions; "Passed" filter chip with count; `/passed` URL route
 - **Redfin CDN image enumeration** — `enumerate_redfin_images()` in `onehome.py` probes sequential Redfin CDN photo indices (HEAD requests, 0–80) to discover all listing photos; static HTML scraping captures ~7 but listings often have 30–50+; called automatically from `_extract_image_urls()` when Redfin CDN URLs detected
 - **Smart image selection for scoring** — `_select_scoring_images()` in `scorer.py` picks a representative blend of 8 images: 3 from start (hero/kitchen), 2 from middle, 3 from end (floor plans/basement); ensures floor plans (typically last images) are always seen by the AI scorer
