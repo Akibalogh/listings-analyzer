@@ -1557,7 +1557,7 @@ def manage_scrape_descriptions(request: Request):
 
     # Phase 4: backfill year_built/list_date from descriptions, listing page, or OneKeyMLS
     import httpx
-    from app.parsers.onehome import _YEAR_BUILT_RE, _LIST_DATE_RE, _LOT_ACRES_TEXT_RE, _LOT_SQFT_TEXT_RE
+    from app.parsers.onehome import _YEAR_BUILT_RE, _LIST_DATE_RE, _LOT_ACRES_REDFIN_RE, _LOT_ACRES_TEXT_RE, _LOT_SQFT_TEXT_RE
     from app.parsers.onehome import _extract_property_stats as extract_stats
     from app.parsers.onehome import _search_onekeymls_url
 
@@ -1586,14 +1586,25 @@ def manage_scrape_descriptions(request: Request):
             if ld_match:
                 updates["list_date"] = ld_match.group(1).strip()
         if needs_lot_acres and desc:
-            acres_m = _LOT_ACRES_TEXT_RE.search(desc)
-            if acres_m:
+            # Try Redfin structured "X acres Lot Size" first (most reliable)
+            redfin_m = _LOT_ACRES_REDFIN_RE.search(desc)
+            if redfin_m:
                 try:
-                    val = float(acres_m.group(1).replace(",", ""))
+                    val = float(redfin_m.group(1).replace(",", ""))
                     if 0.01 <= val <= 1000:
                         updates["lot_acres"] = round(val, 4)
                 except ValueError:
                     pass
+            # Fall back to general "X acres" pattern (with fraction protection)
+            if "lot_acres" not in updates:
+                acres_m = _LOT_ACRES_TEXT_RE.search(desc)
+                if acres_m:
+                    try:
+                        val = float(acres_m.group(1).replace(",", ""))
+                        if 0.01 <= val <= 1000:
+                            updates["lot_acres"] = round(val, 4)
+                    except ValueError:
+                        pass
             if "lot_acres" not in updates:
                 sqft_m = _LOT_SQFT_TEXT_RE.search(desc)
                 if sqft_m:
@@ -2127,6 +2138,107 @@ def _parse_jina_redfin(text: str) -> dict:
     return result
 
 
+@app.post("/manage/fix-lot-acres")
+def manage_fix_lot_acres(request: Request):
+    """Re-extract lot_acres for listings with value=4.0 (known bad default from regex bug).
+
+    The original _LOT_ACRES_TEXT_RE regex matched "4 acre" from Redfin's filter sidebar
+    text "1/4 acre" — capturing "4" as the lot size. This endpoint re-extracts the correct
+    value using the fixed Redfin-specific "X acres Lot Size" pattern.
+
+    Protected by MANAGE_KEY env var.
+    """
+    from app.parsers.onehome import _LOT_ACRES_REDFIN_RE, _LOT_ACRES_TEXT_RE, _LOT_SQFT_TEXT_RE
+
+    key = request.headers.get("x-manage-key", "")
+    if not settings.manage_key or key != settings.manage_key:
+        raise HTTPException(status_code=403, detail="Invalid or missing management key")
+
+    listing_ids = db.get_all_listing_ids()
+    fixed = 0
+    cleared = 0
+    skipped = 0
+    results = []
+
+    for lid in listing_ids:
+        listing = db.get_listing_by_id(lid)
+        if not listing:
+            continue
+
+        lot_acres = listing.get("lot_acres")
+        if lot_acres != 4.0:
+            skipped += 1
+            continue
+
+        desc = listing.get("description") or ""
+        new_val = None
+
+        # Try Redfin structured pattern first
+        m = _LOT_ACRES_REDFIN_RE.search(desc)
+        if m:
+            try:
+                val = float(m.group(1).replace(",", ""))
+                if 0.01 <= val <= 1000:
+                    new_val = round(val, 4)
+            except ValueError:
+                pass
+
+        # Fall back to general pattern (now with fraction protection)
+        if new_val is None:
+            m = _LOT_ACRES_TEXT_RE.search(desc)
+            if m:
+                try:
+                    val = float(m.group(1).replace(",", ""))
+                    if 0.01 <= val <= 1000 and val != 4.0:
+                        new_val = round(val, 4)
+                except ValueError:
+                    pass
+
+        # Fall back to sq ft lot
+        if new_val is None:
+            m = _LOT_SQFT_TEXT_RE.search(desc)
+            if m:
+                try:
+                    acres = float(m.group(1).replace(",", "")) / 43560
+                    if 0.01 <= acres <= 1000:
+                        new_val = round(acres, 4)
+                except ValueError:
+                    pass
+
+        if new_val is not None and new_val != 4.0:
+            db.update_listing_fields_by_id(lid, force=True, lot_acres=new_val)
+            fixed += 1
+            results.append({
+                "id": lid,
+                "address": listing.get("address"),
+                "town": listing.get("town"),
+                "old": 4.0,
+                "new": new_val,
+            })
+            logger.info(f"Fixed lot_acres for #{lid} {listing.get('address')}: 4.0 → {new_val}")
+        else:
+            # Clear the bogus 4.0 — better to have NULL than wrong data
+            db.update_listing_fields_by_id(lid, force=True, lot_acres=None)
+            cleared += 1
+            results.append({
+                "id": lid,
+                "address": listing.get("address"),
+                "town": listing.get("town"),
+                "old": 4.0,
+                "new": None,
+                "note": "cleared — no lot data in description",
+            })
+            logger.info(f"Cleared bogus lot_acres for #{lid} {listing.get('address')}: 4.0 → NULL")
+
+    return {
+        "total": len(listing_ids),
+        "fixed": fixed,
+        "cleared": cleared,
+        "skipped": skipped,
+        "results": results,
+    }
+
+
 @app.post("/manage/scrape-redfin")
 def manage_scrape_redfin(request: Request):
     """Scrape all Redfin listing URLs via Jina reader to backfill missing fields.
@@ -2212,12 +2324,23 @@ def manage_scrape_redfin(request: Request):
         if fields:
             # Force-update price if current value looks bogus (< $100k)
             bogus_price = "price" in parsed and (listing.get("price") or 0) < 100000
-            non_price_fields = {k: v for k, v in fields.items() if k != "price" and listing.get(k) is None}
-            if non_price_fields:
-                db.update_listing_fields_by_id(lid, **non_price_fields)
+            # Force-update lot_acres if current value is 4.0 (known regex bug)
+            bogus_lot = "lot_acres" in fields and listing.get("lot_acres") == 4.0
+            non_force_fields = {
+                k: v for k, v in fields.items()
+                if k not in ("price", "lot_acres") and listing.get(k) is None
+            }
+            # Include lot_acres in non-force if it's NULL (normal backfill)
+            if "lot_acres" in fields and listing.get("lot_acres") is None:
+                non_force_fields["lot_acres"] = fields["lot_acres"]
+            if non_force_fields:
+                db.update_listing_fields_by_id(lid, **non_force_fields)
                 changed = True
             if bogus_price:
                 db.update_listing_fields_by_id(lid, force=True, price=parsed["price"])
+                changed = True
+            if bogus_lot:
+                db.update_listing_fields_by_id(lid, force=True, lot_acres=fields["lot_acres"])
                 changed = True
 
         if changed:

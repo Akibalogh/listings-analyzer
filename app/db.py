@@ -294,7 +294,7 @@ def update_listing_fields_by_id(listing_id: int, force: bool = False, **fields):
     """Update arbitrary listing columns by listing ID.
 
     By default only updates fields whose current DB value is NULL or empty.
-    Pass force=True to overwrite existing values.
+    Pass force=True to overwrite existing values (including setting to NULL).
     """
     if not fields:
         return
@@ -302,7 +302,10 @@ def update_listing_fields_by_id(listing_id: int, force: bool = False, **fields):
     values = []
     ph = _placeholder()
     for col, val in fields.items():
-        if val is not None:
+        if val is None and force:
+            # force=True allows setting to NULL
+            updates.append(f"{col} = NULL")
+        elif val is not None:
             if force:
                 updates.append(f"{col} = {ph}")
             elif col in _NUMERIC_COLUMNS:

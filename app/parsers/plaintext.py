@@ -182,8 +182,9 @@ def _parse_list_date(raw: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 # Patterns for lot size in email text: "0.25 acres", "0.25 ac", "10,890 sq ft lot"
+# Uses negative lookbehind for / to avoid matching fractions like "1/4 acre" → 4
 _LOT_ACRES_EMAIL_RE = re.compile(
-    r"([\d,.]+)\s*(?:acre|ac)s?\b",
+    r"(?<!/)([\d,.]+)\s*(?:acre|ac)s?\b",
     re.IGNORECASE,
 )
 _LOT_SQFT_EMAIL_RE = re.compile(

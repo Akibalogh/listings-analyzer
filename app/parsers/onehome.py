@@ -584,8 +584,15 @@ _JSON_YEAR_BUILT_RE = re.compile(
     r'"[Yy]ear[Bb]uilt"\s*:\s*"?(\d{4})',
 )
 # Lot size patterns: "0.25 acres", "10,000 sq ft lot", JSON-LD lotSize
+# Redfin structured text: "0.45 acres Lot Size" — most reliable from descriptions
+_LOT_ACRES_REDFIN_RE = re.compile(
+    r"([\d,.]+)\s*acres?\s*Lot\s*Size",
+    re.IGNORECASE,
+)
+# General text: "0.25 acres", "1.22 acres"
+# Uses negative lookbehind for / to avoid matching fractions like "1/4 acre"
 _LOT_ACRES_TEXT_RE = re.compile(
-    r"([\d,.]+)\s*(?:acre|ac)s?\b",
+    r"(?<!/)([\d,.]+)\s*(?:acre|ac)s?\b",
     re.IGNORECASE,
 )
 _LOT_SQFT_TEXT_RE = re.compile(
@@ -840,7 +847,17 @@ def _extract_property_stats(html: str) -> dict | None:
                         result["lot_acres"] = round(acres, 4)
             except ValueError:
                 pass
-    # Visible text: "0.25 acres"
+    # Visible text: try Redfin structured "X acres Lot Size" first (most reliable)
+    if "lot_acres" not in result:
+        redfin_match = _LOT_ACRES_REDFIN_RE.search(text)
+        if redfin_match:
+            try:
+                val = float(redfin_match.group(1).replace(",", ""))
+                if 0.01 <= val <= 1000:
+                    result["lot_acres"] = round(val, 4)
+            except ValueError:
+                pass
+    # Visible text: general "0.25 acres" (with fraction protection)
     if "lot_acres" not in result:
         acres_match = _LOT_ACRES_TEXT_RE.search(text)
         if acres_match:
