@@ -201,19 +201,21 @@
   /* Settings button — labeled text button */
   .settings-btn {
     background: rgba(139,92,246,0.15);
-    border: 1px solid rgba(139,92,246,0.3);
+    border: 1.5px solid rgba(139,92,246,0.4);
     color: #c4b5fd;
-    padding: 6px 10px;
-    border-radius: 8px;
-    font-size: 20px;
+    padding: 6px 12px;
+    border-radius: 10px;
+    font-size: 26px;
     line-height: 1;
     cursor: pointer;
     transition: all 0.2s;
     display: flex;
     align-items: center;
     justify-content: center;
+    min-width: 44px;
+    min-height: 36px;
   }
-  .settings-btn:hover { color: #fff; background: rgba(139,92,246,0.25); border-color: rgba(139,92,246,0.5); }
+  .settings-btn:hover { color: #fff; background: rgba(139,92,246,0.3); border-color: rgba(139,92,246,0.7); }
   .settings-btn:active { transform: scale(0.97); }
 
   .poll-btn {
@@ -1382,7 +1384,7 @@
 
   <div class="controls" id="controls">
     <button class="filter-chip active" data-filter="all">All</button>
-    <button class="filter-chip" data-filter="not-reject">Non-Reject</button>
+    <button class="filter-chip" data-filter="not-reject">Active</button>
     <button class="filter-chip" data-filter="Toured">Toured</button>
     <button class="filter-chip" data-filter="Want to Go">Want to Go</button>
     <button class="filter-chip" data-filter="Passed">Passed</button>
@@ -1418,6 +1420,17 @@
         </div>
         <label class="toggle-switch">
           <input type="checkbox" id="prefHidePassed" onchange="saveDisplayPrefs()">
+          <span class="toggle-track"></span>
+        </label>
+      </div>
+
+      <div class="pref-row">
+        <div class="pref-label">
+          Hide pending/sold listings
+          <small>Listings marked Pending or Sold won't appear in All view</small>
+        </div>
+        <label class="toggle-switch">
+          <input type="checkbox" id="prefHidePending" onchange="saveDisplayPrefs()">
           <span class="toggle-track"></span>
         </label>
       </div>
@@ -1491,7 +1504,7 @@ var currentUser = null;
 var googleClientId = null;
 
 /* ==== DISPLAY PREFERENCES (localStorage) ==== */
-var _displayPrefs = { hidePassed: true, hideLowScore: false, defaultSort: 'score-desc' };
+var _displayPrefs = { hidePassed: true, hidePending: false, hideLowScore: false, defaultSort: 'score-desc' };
 
 function loadDisplayPrefs() {
   try {
@@ -1507,6 +1520,7 @@ function loadDisplayPrefs() {
 
 function saveDisplayPrefs() {
   _displayPrefs.hidePassed = document.getElementById('prefHidePassed').checked;
+  _displayPrefs.hidePending = document.getElementById('prefHidePending').checked;
   _displayPrefs.hideLowScore = document.getElementById('prefHideLowScore').checked;
   _displayPrefs.defaultSort = document.getElementById('prefDefaultSort').value;
   try { localStorage.setItem('la_display_prefs', JSON.stringify(_displayPrefs)); } catch(e) {}
@@ -1515,9 +1529,11 @@ function saveDisplayPrefs() {
 
 function syncPrefsUI() {
   var hp = document.getElementById('prefHidePassed');
+  var hpend = document.getElementById('prefHidePending');
   var hls = document.getElementById('prefHideLowScore');
   var ds = document.getElementById('prefDefaultSort');
   if (hp) hp.checked = _displayPrefs.hidePassed;
+  if (hpend) hpend.checked = _displayPrefs.hidePending;
   if (hls) hls.checked = _displayPrefs.hideLowScore;
   if (ds) ds.value = _displayPrefs.defaultSort;
 }
@@ -1741,6 +1757,8 @@ function updateFilterCounts() {
   var counts = { all: 0, 'not-reject': 0, 'Toured': 0, 'Want to Go': 0, 'Passed': 0 };
   allListings.forEach(function(l) {
     if (l.passed) { counts['Passed']++; if (_displayPrefs.hidePassed) return; }
+    var isPending = ['Pending','Sold','Under Contract','Closed'].indexOf(l.listing_status || '') >= 0;
+    if (_displayPrefs.hidePending && isPending) return;
     counts['all']++;
     if (l.verdict !== 'Reject') counts['not-reject']++;
     if (l.toured) counts['Toured']++;
@@ -1765,6 +1783,12 @@ function render() {
   } else {
     if (_displayPrefs.hidePassed) {
       items = items.filter(function(l) { return !l.passed; });
+    }
+    if (_displayPrefs.hidePending) {
+      items = items.filter(function(l) {
+        var s = l.listing_status || '';
+        return s !== 'Pending' && s !== 'Sold' && s !== 'Under Contract' && s !== 'Closed';
+      });
     }
     if (_displayPrefs.hideLowScore) {
       items = items.filter(function(l) { return l.verdict !== 'Reject' && l.verdict !== 'Weak Match'; });
