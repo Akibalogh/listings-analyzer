@@ -221,6 +221,21 @@
   .settings-btn:hover { color: #fff; background: rgba(139,92,246,0.3); border-color: rgba(139,92,246,0.7); }
   .settings-btn:active { transform: scale(0.97); }
 
+  .criteria-btn {
+    background: rgba(139,92,246,0.15);
+    border: 1.5px solid rgba(139,92,246,0.4);
+    color: #c4b5fd;
+    padding: 6px 12px;
+    border-radius: 10px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: all 0.2s;
+  }
+  .criteria-btn:hover { color: #fff; background: rgba(139,92,246,0.3); border-color: rgba(139,92,246,0.7); }
+  .criteria-btn:active { transform: scale(0.97); }
+
   .poll-btn {
     background: linear-gradient(135deg, #3b82f6, #2563eb);
     color: #fff;
@@ -1405,6 +1420,7 @@
         <span class="user-email auth-only" id="userEmail"></span>
         <span class="data-confidence" id="dataConfidence" style="display:none" title="Composite data completeness across all listings"></span>
         <button class="settings-btn auth-only" onclick="openSettings()" title="Settings">&#9881;</button>
+        <button class="criteria-btn auth-only" onclick="openCriteria()">&#10024; AI Criteria</button>
         <button class="poll-btn auth-only" id="pollBtn" onclick="pollNow()">
           Check Email
         </button>
@@ -1447,7 +1463,7 @@
 <!-- Settings overlay -->
 <div class="settings-overlay" id="settingsOverlay">
   <div class="settings-panel">
-    <h2>Settings</h2>
+    <h2>Display Settings</h2>
 
     <!-- Display Preferences (auth-only) -->
     <div class="prefs-section" id="displayPrefsSection">
@@ -1502,7 +1518,16 @@
       </div>
     </div>
 
-    <div class="settings-version" style="font-size:14px;font-weight:700;margin-bottom:4px">Evaluation Criteria</div>
+    <div class="settings-actions" style="margin-top:8px">
+      <button class="settings-cancel-btn" id="settingsCloseBtn" onclick="closeSettings()">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- AI Criteria overlay -->
+<div class="settings-overlay" id="criteriaOverlay">
+  <div class="settings-panel">
+    <h2>AI Criteria</h2>
     <div class="settings-version" id="criteriaVersion"></div>
     <textarea id="criteriaText" placeholder="Enter your evaluation instructions here..."></textarea>
     <div class="settings-readonly-note" id="readonlyNote" style="display:none;font-size:12px;color:var(--text-muted);margin-top:4px;font-style:italic">Sign in to edit criteria</div>
@@ -1511,7 +1536,7 @@
       <div class="bar-label" id="rescoreLabel">Re-scoring...</div>
     </div>
     <div class="settings-actions">
-      <button class="settings-cancel-btn" id="settingsCloseBtn" onclick="closeSettings()">Close</button>
+      <button class="settings-cancel-btn" id="criteriaCloseBtn" onclick="closeCriteria()">Close</button>
       <button class="settings-save-btn" id="saveCriteriaBtn" onclick="saveCriteria()">Save &amp; Re-score All</button>
     </div>
     <div id="maintenanceSection" style="margin-top:18px;padding-top:18px;border-top:1px solid var(--border)">
@@ -2351,12 +2376,19 @@ async function rescoreListing(listingId) {
 
 /* ==== Settings ==== */
 
-async function openSettings() {
+function openSettings() {
   document.getElementById('settingsOverlay').classList.add('open');
   syncPrefsUI();
+}
+
+function closeSettings() {
+  document.getElementById('settingsOverlay').classList.remove('open');
+}
+
+async function openCriteria() {
+  document.getElementById('criteriaOverlay').classList.add('open');
   var textarea = document.getElementById('criteriaText');
   var isAuthed = !!currentUser;
-  /* Toggle read-only state for anonymous users */
   textarea.readOnly = !isAuthed;
   textarea.style.opacity = isAuthed ? '1' : '0.8';
   textarea.style.cursor = isAuthed ? '' : 'default';
@@ -2378,8 +2410,8 @@ async function openSettings() {
   loadCriteriaHistory();
 }
 
-function closeSettings() {
-  document.getElementById('settingsOverlay').classList.remove('open');
+function closeCriteria() {
+  document.getElementById('criteriaOverlay').classList.remove('open');
 }
 
 var _historyPageSize = 5;
@@ -2482,7 +2514,7 @@ async function saveCriteria() {
     if (res.ok) {
       var data = await res.json();
       document.getElementById('criteriaVersion').textContent = 'Version ' + data.version;
-      closeSettings();
+      closeCriteria();
       showToast('Criteria saved! Re-scoring all listings...');
       startRescorePolling();
     } else {
@@ -2833,12 +2865,15 @@ async function addListingFromUrl() {
   }
 }
 
-/* ==== Close settings on Escape or backdrop click ==== */
+/* ==== Close overlays on Escape or backdrop click ==== */
 document.addEventListener('keydown', function(e) {
-  if (e.key === 'Escape') closeSettings();
+  if (e.key === 'Escape') { closeSettings(); closeCriteria(); }
 });
 document.getElementById('settingsOverlay').addEventListener('click', function(e) {
   if (e.target === this) closeSettings();
+});
+document.getElementById('criteriaOverlay').addEventListener('click', function(e) {
+  if (e.target === this) closeCriteria();
 });
 
 /* ==== Last polled timestamp ==== */
