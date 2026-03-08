@@ -560,14 +560,12 @@ class TestGFBInference:
 
 
 class TestAiScoreListingErrorPaths:
-    """Tests for ai_score_listing() failure modes — all paths must produce ai_failed."""
+    """Tests for ai_score_listing() failure modes — all paths must produce ai_failed.
 
-    def _make_ai_failed_result(self):
-        from app.models import ScoringResult
-        return ScoringResult(
-            verdict="Weak Match", score=0, confidence="low",
-            concerns=["AI evaluation failed"], evaluation_method="ai_failed",
-        )
+    We patch anthropic.Anthropic so we control what the client returns/raises.
+    Responses use real strings (not MagicMock text attributes) so json.loads
+    raises JSONDecodeError correctly.
+    """
 
     def test_no_api_key_returns_deterministic(self):
         """Without ANTHROPIC_API_KEY, evaluation_method is 'deterministic' (can't score)."""
@@ -580,43 +578,39 @@ class TestAiScoreListingErrorPaths:
         assert result.score == 0
         assert reasoning is None
 
-    def test_json_decode_error_first_attempt_retries(self):
-        """JSONDecodeError on first attempt triggers a retry."""
+    def test_json_decode_error_both_attempts_marks_ai_failed(self):
+        """JSONDecodeError on both attempts → ai_failed, called twice."""
         from unittest.mock import patch, MagicMock
         from app.scorer import ai_score_listing
-        import json
-
-        call_count = [0]
-        def fake_call_ai():
-            call_count[0] += 1
-            raise json.JSONDecodeError("Expecting value", "", 0)
 
         with patch("app.scorer.settings") as mock_settings:
             mock_settings.anthropic_api_key = "sk-test"
             mock_settings.ai_eval_model = "claude-opus-4-6"
             with patch("app.scorer._build_user_message", return_value=[]):
                 with patch("app.scorer._build_system_prompt", return_value=[]):
-                    # Patch anthropic client to raise JSONDecodeError on both calls
                     mock_client = MagicMock()
-                    mock_response = MagicMock()
-                    mock_response.content = [MagicMock(text="not valid json")]
-                    mock_client.messages.create.return_value = mock_response
+                    # Use a real content object so text is a real string
+                    mock_msg = MagicMock()
+                    mock_msg.content = [MagicMock()]
+                    mock_msg.content[0].text = "not valid json at all"
+                    mock_client.messages.create.return_value = mock_msg
                     with patch("app.scorer.anthropic.Anthropic", return_value=mock_client):
                         result, reasoning = ai_score_listing({"address": "Test"}, "Criteria")
 
         assert result.evaluation_method == "ai_failed"
         assert result.score == 0
         assert reasoning is None
-        # Should have been called twice (initial + retry)
+        # Called twice — initial + retry
         assert mock_client.messages.create.call_count == 2
 
     def test_api_error_on_first_attempt_marks_ai_failed(self):
-        """Anthropic API error on first attempt → ai_failed."""
+        """Anthropic APIError on first attempt → ai_failed."""
+        import httpx
+        import anthropic as anthropic_lib
         from unittest.mock import patch, MagicMock
         from app.scorer import ai_score_listing
-        import anthropic as anthropic_lib
 
-        fake_request = MagicMock(spec=["url", "method", "headers"])
+        fake_request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
         with patch("app.scorer.settings") as mock_settings:
             mock_settings.anthropic_api_key = "sk-test"
             mock_settings.ai_eval_model = "claude-opus-4-6"
@@ -633,17 +627,17 @@ class TestAiScoreListingErrorPaths:
         assert "API error" in result.concerns[0]
 
     def test_json_error_then_api_error_on_retry_marks_ai_failed(self):
-        """JSONDecodeError on first attempt, then APIError on retry → ai_failed (not crash)."""
+        """JSONDecodeError on first attempt, then APIError on retry → ai_failed, not crash."""
+        import httpx
+        import anthropic as anthropic_lib
         from unittest.mock import patch, MagicMock
         from app.scorer import ai_score_listing
-        import anthropic as anthropic_lib
 
-        fake_request = MagicMock(spec=["url", "method", "headers"])
-        first_response = MagicMock()
-        first_response.content = [MagicMock(text="not valid json")]
-        second_exception = anthropic_lib.APIConnectionError(
-            message="Server error", request=fake_request
-        )
+        fake_request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+        first_msg = MagicMock()
+        first_msg.content = [MagicMock()]
+        first_msg.content[0].text = "not valid json"
+        api_error = anthropic_lib.APIConnectionError(message="Server error", request=fake_request)
 
         with patch("app.scorer.settings") as mock_settings:
             mock_settings.anthropic_api_key = "sk-test"
@@ -651,12 +645,10 @@ class TestAiScoreListingErrorPaths:
             with patch("app.scorer._build_user_message", return_value=[]):
                 with patch("app.scorer._build_system_prompt", return_value=[]):
                     mock_client = MagicMock()
-                    # First call: invalid JSON response; second call: API error
-                    mock_client.messages.create.side_effect = [first_response, second_exception]
+                    mock_client.messages.create.side_effect = [first_msg, api_error]
                     with patch("app.scorer.anthropic.Anthropic", return_value=mock_client):
                         result, reasoning = ai_score_listing({"address": "Test"}, "Criteria")
 
-        # Should not crash — must return ai_failed
         assert result.evaluation_method == "ai_failed"
         assert result.score == 0
         assert reasoning is None
