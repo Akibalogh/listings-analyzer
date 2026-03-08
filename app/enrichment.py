@@ -1181,35 +1181,19 @@ def fetch_property_tax_orpts(
     street_raw = addr_parts[1].upper()
     street_word = street_raw.split()[0] if street_raw.split() else street_raw
 
-    try:
-        where = (
-            f"municipality_name='{municipality}'"
-            f" AND parcel_address_number='{number}'"
-            f" AND upper(parcel_address_street) like '{street_word}%'"
-        )
-        params = {
-            "$where": where,
-            "$select": "parcel_address_number,parcel_address_street,parcel_address_suff,"
-                       "municipality_name,assessment_total,full_market_value,"
-                       "school_taxable,county_taxable_value,town_taxable_value,roll_year",
-            "$limit": 1,
-        }
+    _select = (
+        "parcel_address_number,parcel_address_street,parcel_address_suff,"
+        "municipality_name,county_name,assessment_total,full_market_value,"
+        "school_taxable,county_taxable_value,town_taxable_value,roll_year"
+    )
 
-        with httpx.Client(timeout=10.0) as client:
-            resp = client.get(_ORPTS_API_URL, params=params)
-            resp.raise_for_status()
-            data = resp.json()
-
-        if not data:
-            return None
-
-        row = data[0]
+    def _build_result(row: dict) -> dict:
         matched_addr = (
             f"{row.get('parcel_address_number', '')} "
             f"{row.get('parcel_address_street', '')} "
             f"{row.get('parcel_address_suff', '')}".strip()
         )
-        result = {
+        return {
             "assessed_value": int(row.get("assessment_total") or 0) or None,
             "market_value": int(row.get("full_market_value") or 0) or None,
             "school_taxable": int(row.get("school_taxable") or 0) or None,
@@ -1218,6 +1202,38 @@ def fetch_property_tax_orpts(
             "address": matched_addr,
             "source": "orpts",
         }
+
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            # Pass 1: municipality-scoped lookup (fast, exact)
+            where = (
+                f"municipality_name='{municipality}'"
+                f" AND parcel_address_number='{number}'"
+                f" AND upper(parcel_address_street) like '{street_word}%'"
+            )
+            resp = client.get(_ORPTS_API_URL, params={"$where": where, "$select": _select, "$limit": 1})
+            resp.raise_for_status()
+            data = resp.json()
+
+            if not data:
+                # Pass 2: county-level fallback — village/hamlet parcels often filed
+                # under a different municipality than the mailing address
+                # (e.g. Scarsdale addresses → Greenburgh; Bedford addresses → North Castle)
+                county = "Westchester"  # covers most listings; safe default
+                where2 = (
+                    f"county_name='{county}'"
+                    f" AND parcel_address_number='{number}'"
+                    f" AND upper(parcel_address_street) like '{street_word}%'"
+                )
+                resp2 = client.get(_ORPTS_API_URL, params={"$where": where2, "$select": _select, "$limit": 1})
+                resp2.raise_for_status()
+                data = resp2.json()
+
+        if not data:
+            _tax_cache[cache_key] = None
+            return None
+
+        result = _build_result(data[0])
         _tax_cache[cache_key] = result
         logger.info(f"ORPTS tax data found for {address}, {town}: assessed={result['assessed_value']}")
         return result
@@ -1414,6 +1430,64 @@ def parse_basement(description: str | None) -> dict:
         return {"has_basement": True, "basement_type": None, "source": "description_parse"}
 
     return {"has_basement": None, "basement_type": None, "source": "description_parse"}
+
+
+def parse_list_date(description: str | None) -> str | None:
+    """Extract on-market list date from listing description text.
+
+    Looks for patterns like:
+    - "listed: 01/15/2026", "listed on 01/15/2026"
+    - "on market since January 15, 2026"
+    - "date listed: 2026-01-15"
+    - Redfin structured metadata: "Jan 15, 2026 listed"
+
+    Returns ISO date string "YYYY-MM-DD" or None.
+    """
+    if not description:
+        return None
+
+    import re as _re
+    from datetime import datetime
+
+    text = description.lower()
+
+    # Pattern 1: ISO date after "listed" / "on market since" / "date listed"
+    m = _re.search(
+        r"(?:list(?:ed|ing)\s*(?:date|on|since)?|on\s*(?:the\s*)?market(?:\s*since)?|date\s*listed)\s*:?\s*"
+        r"(\d{4}-\d{2}-\d{2})",
+        text,
+    )
+    if m:
+        return m.group(1)
+
+    # Pattern 2: M/D/YYYY or MM/DD/YYYY after "listed"
+    m = _re.search(
+        r"(?:list(?:ed|ing)\s*(?:date|on|since)?|on\s*(?:the\s*)?market(?:\s*since)?|date\s*listed)\s*:?\s*"
+        r"(\d{1,2}[/-]\d{1,2}[/-]\d{4})",
+        text,
+    )
+    if m:
+        raw = m.group(1).replace("-", "/")
+        for fmt in ("%m/%d/%Y", "%d/%m/%Y"):
+            try:
+                return datetime.strptime(raw, fmt).strftime("%Y-%m-%d")
+            except ValueError:
+                pass
+
+    # Pattern 3: "Month DD, YYYY listed" (Redfin metadata style)
+    m = _re.search(
+        r"(?:list(?:ed|ing)\s*(?:date|on|since)?|on\s*(?:the\s*)?market(?:\s*since)?|date\s*listed)\s*:?\s*"
+        r"([A-Za-z]+\s+\d{1,2},?\s+\d{4})",
+        text,
+    )
+    if m:
+        for fmt in ("%B %d, %Y", "%B %d %Y", "%b %d, %Y", "%b %d %Y"):
+            try:
+                return datetime.strptime(m.group(1).strip(), fmt).strftime("%Y-%m-%d")
+            except ValueError:
+                pass
+
+    return None
 
 
 def parse_year_built(description: str | None) -> int | None:

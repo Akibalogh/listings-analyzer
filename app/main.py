@@ -1642,7 +1642,7 @@ def _enrich_all(clear_bogus: bool = False, clear_bogus_commute: bool = False):
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    from app.enrichment import fetch_commute_time, fetch_school_data, normalize_address, fetch_property_tax, fetch_property_tax_orpts, fetch_power_line_proximity, fetch_flood_zone, fetch_station_proximity, parse_garage_count, parse_hoa_amount, parse_pool_flag, parse_basement, parse_year_built, _geocode_address
+    from app.enrichment import fetch_commute_time, fetch_school_data, normalize_address, fetch_property_tax, fetch_property_tax_orpts, fetch_power_line_proximity, fetch_flood_zone, fetch_station_proximity, parse_garage_count, parse_hoa_amount, parse_pool_flag, parse_basement, parse_year_built, parse_list_date, _geocode_address
 
     try:
         listing_ids = db.get_all_listing_ids()
@@ -1843,6 +1843,12 @@ def _enrich_all(clear_bogus: bool = False, clear_bogus_commute: bool = False):
                     yb = parse_year_built(desc)
                     if yb is not None:
                         enrichment["year_built"] = yb
+                        changed = True
+
+                if listing.get("list_date") is None:
+                    ld = parse_list_date(desc)
+                    if ld is not None:
+                        enrichment["list_date"] = ld
                         changed = True
 
             # Save any enrichment changes from this phase

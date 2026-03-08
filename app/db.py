@@ -812,7 +812,7 @@ def update_listing_enrichment(listing_id: int, enrichment: dict):
         "property_tax_json", "power_line_json", "flood_zone_json", "station_json",
         "lat", "lng", "garage_count", "garage_type", "hoa_monthly",
         "has_pool", "pool_type", "has_basement", "basement_type",
-        "year_built",
+        "year_built", "list_date",
     }
     cols_to_update = {k: v for k, v in enrichment.items() if k in allowed_cols}
     if not cols_to_update:

@@ -152,6 +152,38 @@
   .data-confidence.high { color: rgba(134,239,172,0.85); }
   .data-confidence.medium { color: rgba(253,186,116,0.85); }
   .data-confidence.low { color: rgba(252,165,165,0.85); }
+  .confidence-tip {
+    display: none;
+    position: absolute;
+    z-index: 999;
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 10px;
+    padding: 12px 14px;
+    min-width: 220px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.3);
+    pointer-events: none;
+  }
+  .confidence-tip-title {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: rgba(255,255,255,0.4);
+    margin-bottom: 10px;
+  }
+  .ctip-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 5px;
+    font-size: 12px;
+    color: #e2e8f0;
+  }
+  .ctip-label { width: 76px; flex-shrink: 0; color: rgba(255,255,255,0.6); }
+  .ctip-bar { flex: 1; height: 5px; background: rgba(255,255,255,0.1); border-radius: 3px; overflow: hidden; }
+  .ctip-fill { height: 100%; border-radius: 3px; transition: width 0.3s; }
+  .ctip-pct { width: 32px; text-align: right; font-weight: 600; font-size: 11px; flex-shrink: 0; }
   .logout-btn {
     background: rgba(255,255,255,0.06);
     border: none;
@@ -2317,12 +2349,40 @@ function updateDataConfidence() {
   });
   var avg = Math.round((totalScore / allListings.length) * 100);
 
+  /* Per-field coverage % for tooltip */
+  var labels = ['Description','Images','Schools','Commute','Year Built','Lot Size','Basement','Tax','Garage'];
+  var fieldCounts = weights.map(function(w) {
+    return Math.round(allListings.filter(function(l) { return w[2](l); }).length * 100 / allListings.length);
+  });
+
   var tier = avg >= 80 ? 'high' : avg >= 60 ? 'medium' : 'low';
   el2.textContent = avg + '% data';
   el2.className = 'data-confidence ' + tier;
-  el2.title = 'Composite data completeness across ' + allListings.length + ' listings (' + avg + '%). ' +
-    'Covers: description, images, schools, commute, year built, lot size, basement, tax, garage.';
   el2.style.display = '';
+
+  /* Custom tooltip */
+  var tip = document.getElementById('confidenceTip');
+  if (!tip) {
+    tip = document.createElement('div');
+    tip.id = 'confidenceTip';
+    tip.className = 'confidence-tip';
+    document.body.appendChild(tip);
+  }
+  tip.innerHTML = '<div class="confidence-tip-title">Data Coverage (' + allListings.length + ' listings)</div>' +
+    labels.map(function(lbl, i) {
+      var pct = fieldCounts[i];
+      var bar = '<div class="ctip-bar"><div class="ctip-fill" style="width:' + pct + '%;background:' +
+        (pct >= 90 ? '#4ade80' : pct >= 70 ? '#fb923c' : '#f87171') + '"></div></div>';
+      return '<div class="ctip-row"><span class="ctip-label">' + lbl + '</span>' + bar + '<span class="ctip-pct">' + pct + '%</span></div>';
+    }).join('');
+
+  el2.onmouseenter = function(e) {
+    tip.style.display = 'block';
+    var r = el2.getBoundingClientRect();
+    tip.style.top = (r.bottom + window.scrollY + 6) + 'px';
+    tip.style.right = (document.documentElement.clientWidth - r.right) + 'px';
+  };
+  el2.onmouseleave = function() { tip.style.display = 'none'; };
 }
 
 function showToast(msg) {
