@@ -320,6 +320,26 @@ class TestSkipUnchanged:
         meta = {"criteria_version": 3, "scored_at": "2025-01-02T00:00:00"}
         assert _should_skip(listing, meta, 3)  # no enrichment → skip
 
+    def test_should_skip_ai_failed_always_rescores(self):
+        """Listings with evaluation_method='ai_failed' must always be rescored."""
+        from app.main import _should_skip
+
+        listing = {}  # no enriched_at — would normally be skipped
+        meta = {
+            "criteria_version": 3,
+            "scored_at": "2025-01-02T00:00:00",
+            "evaluation_method": "ai_failed",
+        }
+        assert not _should_skip(listing, meta, 3)  # ai_failed → never skip
+
+    def test_should_skip_scored_at_none_rescores(self):
+        """Listings with scored_at=None (schema gap / never properly scored) must rescore."""
+        from app.main import _should_skip
+
+        listing = {}  # no enriched_at
+        meta = {"criteria_version": 3, "scored_at": None, "evaluation_method": "ai"}
+        assert not _should_skip(listing, meta, 3)  # scored_at=None → never skip
+
 
 class TestSelectScoringImages:
     """Tests for _select_scoring_images() — smart image blend for AI scoring."""
@@ -537,3 +557,180 @@ class TestGFBInference:
         assert "age_condition" in prompt
         assert "price_per_sqft_signal" in prompt
         assert "property_tax" in prompt
+
+
+class TestAiScoreListingErrorPaths:
+    """Tests for ai_score_listing() failure modes — all paths must produce ai_failed."""
+
+    def _make_ai_failed_result(self):
+        from app.models import ScoringResult
+        return ScoringResult(
+            verdict="Weak Match", score=0, confidence="low",
+            concerns=["AI evaluation failed"], evaluation_method="ai_failed",
+        )
+
+    def test_no_api_key_returns_deterministic(self):
+        """Without ANTHROPIC_API_KEY, evaluation_method is 'deterministic' (can't score)."""
+        from unittest.mock import patch
+        from app.scorer import ai_score_listing
+        with patch("app.scorer.settings") as mock_settings:
+            mock_settings.anthropic_api_key = ""
+            result, reasoning = ai_score_listing({"address": "Test"}, "Criteria")
+        assert result.evaluation_method == "deterministic"
+        assert result.score == 0
+        assert reasoning is None
+
+    def test_json_decode_error_first_attempt_retries(self):
+        """JSONDecodeError on first attempt triggers a retry."""
+        from unittest.mock import patch, MagicMock
+        from app.scorer import ai_score_listing
+        import json
+
+        call_count = [0]
+        def fake_call_ai():
+            call_count[0] += 1
+            raise json.JSONDecodeError("Expecting value", "", 0)
+
+        with patch("app.scorer.settings") as mock_settings:
+            mock_settings.anthropic_api_key = "sk-test"
+            mock_settings.ai_eval_model = "claude-opus-4-6"
+            with patch("app.scorer._build_user_message", return_value=[]):
+                with patch("app.scorer._build_system_prompt", return_value=[]):
+                    # Patch anthropic client to raise JSONDecodeError on both calls
+                    mock_client = MagicMock()
+                    mock_response = MagicMock()
+                    mock_response.content = [MagicMock(text="not valid json")]
+                    mock_client.messages.create.return_value = mock_response
+                    with patch("app.scorer.anthropic.Anthropic", return_value=mock_client):
+                        result, reasoning = ai_score_listing({"address": "Test"}, "Criteria")
+
+        assert result.evaluation_method == "ai_failed"
+        assert result.score == 0
+        assert reasoning is None
+        # Should have been called twice (initial + retry)
+        assert mock_client.messages.create.call_count == 2
+
+    def test_api_error_on_first_attempt_marks_ai_failed(self):
+        """Anthropic API error on first attempt → ai_failed."""
+        from unittest.mock import patch, MagicMock
+        from app.scorer import ai_score_listing
+        import anthropic as anthropic_lib
+
+        with patch("app.scorer.settings") as mock_settings:
+            mock_settings.anthropic_api_key = "sk-test"
+            mock_settings.ai_eval_model = "claude-opus-4-6"
+            with patch("app.scorer._build_user_message", return_value=[]):
+                with patch("app.scorer._build_system_prompt", return_value=[]):
+                    mock_client = MagicMock()
+                    mock_client.messages.create.side_effect = anthropic_lib.APIStatusError(
+                        "rate limit", response=MagicMock(status_code=429), body={}
+                    )
+                    with patch("app.scorer.anthropic.Anthropic", return_value=mock_client):
+                        result, reasoning = ai_score_listing({"address": "Test"}, "Criteria")
+
+        assert result.evaluation_method == "ai_failed"
+        assert "API error" in result.concerns[0]
+
+    def test_json_error_then_api_error_on_retry_marks_ai_failed(self):
+        """JSONDecodeError on first attempt, then APIError on retry → ai_failed (not crash)."""
+        from unittest.mock import patch, MagicMock
+        from app.scorer import ai_score_listing
+        import anthropic as anthropic_lib
+        import json
+
+        with patch("app.scorer.settings") as mock_settings:
+            mock_settings.anthropic_api_key = "sk-test"
+            mock_settings.ai_eval_model = "claude-opus-4-6"
+            with patch("app.scorer._build_user_message", return_value=[]):
+                with patch("app.scorer._build_system_prompt", return_value=[]):
+                    mock_client = MagicMock()
+                    # First call: invalid JSON; second call: API error
+                    mock_client.messages.create.side_effect = [
+                        MagicMock(content=[MagicMock(text="not json")]),
+                        anthropic_lib.APIStatusError(
+                            "server error", response=MagicMock(status_code=500), body={}
+                        ),
+                    ]
+                    # First call returns invalid JSON (raises in json.loads)
+                    # We need the first call to return a response, not raise
+                    first_response = MagicMock()
+                    first_response.content = [MagicMock(text="not valid json")]
+                    second_exception = anthropic_lib.APIStatusError(
+                        "server error", response=MagicMock(status_code=500), body={}
+                    )
+                    mock_client.messages.create.side_effect = [first_response, second_exception]
+                    with patch("app.scorer.anthropic.Anthropic", return_value=mock_client):
+                        result, reasoning = ai_score_listing({"address": "Test"}, "Criteria")
+
+        # Should not crash — must return ai_failed
+        assert result.evaluation_method == "ai_failed"
+        assert result.score == 0
+        assert reasoning is None
+
+    def test_unexpected_exception_marks_ai_failed(self):
+        """Any unexpected exception → ai_failed."""
+        from unittest.mock import patch, MagicMock
+        from app.scorer import ai_score_listing
+
+        with patch("app.scorer.settings") as mock_settings:
+            mock_settings.anthropic_api_key = "sk-test"
+            mock_settings.ai_eval_model = "claude-opus-4-6"
+            with patch("app.scorer._build_user_message", return_value=[]):
+                with patch("app.scorer._build_system_prompt", return_value=[]):
+                    mock_client = MagicMock()
+                    mock_client.messages.create.side_effect = RuntimeError("unexpected")
+                    with patch("app.scorer.anthropic.Anthropic", return_value=mock_client):
+                        result, reasoning = ai_score_listing({"address": "Test"}, "Criteria")
+
+        assert result.evaluation_method == "ai_failed"
+
+
+class TestJunkImageFilter:
+    """Tests for the junk image URL filter in _build_user_message."""
+
+    def test_system_files_urls_filtered(self):
+        """system_files URLs (map tiles, small thumbnails) should be excluded."""
+        from unittest.mock import patch
+        listing_data = {"address": "Test"}
+        junk_urls = [
+            "https://ssl.cdn-redfin.com/system_files/images/59841/150x150/gen120x120/1_13.jpg",
+            "https://ssl.cdn-redfin.com/system_files/media/1088727_JPG/genDesktopMapHomeCardUrl/item_67.jpg",
+        ]
+        real_url = "https://ssl.cdn-redfin.com/photo/269/bigphoto/821/931821_2.jpg"
+
+        with patch("app.scorer._fetch_image_as_base64") as mock_fetch:
+            mock_fetch.return_value = ("image/jpeg", "fakebase64")
+            _build_user_message("Criteria", listing_data, image_urls=junk_urls + [real_url])
+            # Only the real photo URL should have been fetched
+            fetched_urls = [call[0][0] for call in mock_fetch.call_args_list]
+            assert real_url in fetched_urls
+            for junk in junk_urls:
+                assert junk not in fetched_urls
+
+    def test_genBcs_urls_filtered(self):
+        """genBcs (nearby comparable sales) URLs should be excluded."""
+        from unittest.mock import patch
+        listing_data = {"address": "Test"}
+        junk_url = "https://ssl.cdn-redfin.com/photo/269/bcsphoto/764/genBcs.840764_9.jpg"
+        real_url = "https://ssl.cdn-redfin.com/photo/269/bigphoto/956811_0.jpg"
+
+        with patch("app.scorer._fetch_image_as_base64") as mock_fetch:
+            mock_fetch.return_value = ("image/jpeg", "fakebase64")
+            _build_user_message("Criteria", listing_data, image_urls=[junk_url, real_url])
+            fetched_urls = [call[0][0] for call in mock_fetch.call_args_list]
+            assert real_url in fetched_urls
+            assert junk_url not in fetched_urls
+
+    def test_badge_and_flag_urls_filtered(self):
+        """App store badges and flag images should be excluded."""
+        from unittest.mock import patch
+        listing_data = {"address": "Test"}
+        junk_urls = [
+            "https://ssl.cdn-redfin.com/vLATEST/images/apple-app-download-badge-284x84.png",
+            "https://ssl.cdn-redfin.com/vLATEST/images/footer/flags/united-states.png",
+            "https://ssl.cdn-redfin.com/vLATEST/images/footer/equal-housing.png",
+        ]
+        with patch("app.scorer._fetch_image_as_base64") as mock_fetch:
+            mock_fetch.return_value = ("image/jpeg", "fakebase64")
+            _build_user_message("Criteria", listing_data, image_urls=junk_urls)
+            assert mock_fetch.call_count == 0  # all filtered out
