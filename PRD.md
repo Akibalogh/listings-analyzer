@@ -262,16 +262,17 @@ Mobile-first single-page app served at `/` (`app/templates/dashboard.html`).
 - "Mark as Sold" button *(auth-only)*
 
 ### Filters & Sorting
-- Filter chips: All, Non-Reject, Strong Match, Worth Touring, Reject, **Toured**, **Want to Go**
-- Sort: Score (high→low), Price (low→high), $/sqft (low→high)
-- Filter counts shown on chips
+- Filter chips: All, Active (non-reject), **Toured**, **Want to Go**, **Passed**
+- Sort: Score (high→low/low→high), Price, Sqft, $/sqft, Newest first, Commute, Schools
+- Filter counts shown on chips (respect display preferences for passed/pending hiding)
 
 ### Settings Panel (overlay, auth-only via ⚙ gear icon)
 - **Display Preferences** section (top):
-  - "Hide passed listings" toggle (default ON) — excludes passed listings from All and other views; still visible via Passed filter chip
-  - "Default filter on load" — All or Non-Reject
-  - "Default sort" — all existing sort options
-  - Preferences persisted to `localStorage`
+  - "Hide passed listings" toggle (default ON) — excludes passed from All/Active/Toured/Want to Go; still visible via Passed chip
+  - "Hide pending/sold listings" toggle (default OFF) — excludes listings with status Pending/Sold/Under Contract/Closed
+  - "Hide low-scoring listings" toggle (default OFF) — excludes Weak Match and Reject verdicts
+  - "Default sort" dropdown — persisted across sessions
+  - All preferences saved to `localStorage`
 - **Evaluation Criteria** section (below preferences):
   - Textarea with current AI evaluation instructions *(read-only for anonymous, editable for authed)*
   - Version indicator (version number + created_by)

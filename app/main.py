@@ -844,8 +844,10 @@ def _should_skip(listing_row: dict, score_meta: dict | None, criteria_version: i
     if not score_meta or score_meta.get("criteria_version") != criteria_version:
         return False  # different criteria → must rescore
     scored_at = score_meta.get("scored_at")
+    if not scored_at:
+        return False  # never properly scored (placeholder/deterministic) → must rescore
     enriched_at = listing_row.get("enriched_at")
-    if enriched_at and scored_at and enriched_at > scored_at:
+    if enriched_at and enriched_at > scored_at:
         return False  # enrichment after scoring → must rescore
     return True  # same criteria, no new enrichment → skip
 
