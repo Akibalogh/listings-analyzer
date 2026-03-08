@@ -752,6 +752,51 @@
     font-size: 12px;
     border-bottom: 1px solid #f1f5f9;
   }
+  /* Property details section */
+  .prop-details-section {
+    margin-top: 14px;
+    padding: 10px 12px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: #f8fafc;
+  }
+  .prop-details-heading {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-faint);
+    margin-bottom: 8px;
+  }
+  .prop-details-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 4px 16px;
+  }
+  @media (max-width: 400px) {
+    .prop-details-grid { grid-template-columns: 1fr; }
+  }
+  .prop-detail-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    font-size: 12px;
+    padding: 3px 0;
+    border-bottom: 1px solid #f1f5f9;
+  }
+  .prop-detail-row:last-child { border-bottom: none; }
+  .prop-detail-label {
+    color: var(--text-muted);
+    font-weight: 500;
+    flex-shrink: 0;
+    margin-right: 8px;
+  }
+  .prop-detail-value {
+    font-weight: 600;
+    color: var(--text-secondary);
+    text-align: right;
+  }
+
   .school-row:last-child { border-bottom: none; }
   .school-name {
     color: var(--text-secondary);
@@ -1685,6 +1730,10 @@ function buildCard(l) {
     detailInner.appendChild(buildEnrichmentSection(l.commute_minutes, commuteData, schoolData));
   }
 
+  /* Property details section (lot, garage, HOA, pool, basement, flood zone, tax) */
+  var propDetails = buildPropertyDetails(l);
+  if (propDetails) detailInner.appendChild(propDetails);
+
   /* AI property summary (replaces hard_results + concerns + reasoning for AI-scored listings) */
   if (l.property_summary) {
     detailInner.appendChild(buildPropertySummary(l.property_summary));
@@ -1698,13 +1747,6 @@ function buildCard(l) {
         el('div', null, l.ai_reasoning)
       ]));
     }
-  }
-  /* Listing description */
-  if (l.description) {
-    detailInner.appendChild(el('div', {className: 'listing-description'}, [
-      el('h4', null, 'Property Description'),
-      el('div', null, l.description)
-    ]));
   }
   /* Listing URL */
   if (l.listing_url) {
@@ -1847,6 +1889,83 @@ function buildEnrichmentSection(commuteMinutes, commuteData, schoolData) {
     section.appendChild(schoolCard);
   }
 
+  return section;
+}
+
+function buildPropertyDetails(l) {
+  var items = [];
+
+  /* Lot size */
+  if (l.lot_acres != null) {
+    var lotText = l.lot_acres >= 1 ? l.lot_acres.toFixed(2) + ' ac' : Math.round(l.lot_acres * 43560).toLocaleString() + ' sqft';
+    items.push({label: 'Lot', value: lotText});
+  }
+
+  /* Garage */
+  if (l.garage_count != null) {
+    var garageText = l.garage_count === 0 ? 'None' : l.garage_count + '-car' + (l.garage_type ? ' (' + l.garage_type + ')' : '');
+    items.push({label: 'Garage', value: garageText});
+  }
+
+  /* HOA */
+  if (l.hoa_monthly != null) {
+    var hoaText = l.hoa_monthly === 0 ? 'None' : '$' + l.hoa_monthly.toLocaleString() + '/mo';
+    items.push({label: 'HOA', value: hoaText});
+  }
+
+  /* Pool */
+  if (l.has_pool != null) {
+    var poolText = l.has_pool ? (l.pool_type ? l.pool_type.replace('_', ' ') : 'Yes') : 'None';
+    items.push({label: 'Pool', value: poolText});
+  }
+
+  /* Basement */
+  if (l.has_basement != null) {
+    var bsmtText = l.has_basement ? (l.basement_type ? l.basement_type.replace('_', ' ') : 'Yes') : 'None';
+    items.push({label: 'Basement', value: bsmtText});
+  }
+
+  /* Property tax (ORPTS/SODA) */
+  var taxData = parseJSON(l.property_tax_json, null);
+  if (taxData && taxData.assessed_value) {
+    items.push({label: 'Assessed', value: '$' + Math.round(taxData.assessed_value).toLocaleString()});
+  }
+
+  /* Flood zone */
+  var floodData = parseJSON(l.flood_zone_json, null);
+  if (floodData && floodData.fld_zone) {
+    var floodText = floodData.fld_zone;
+    if (floodData.sfha) floodText += ' ⚠️';
+    items.push({label: 'Flood Zone', value: floodText});
+  }
+
+  /* Power lines */
+  var plData = parseJSON(l.power_line_json, null);
+  if (plData && plData.nearest_distance_m != null) {
+    var plDist = plData.nearest_distance_m < 1000 ? Math.round(plData.nearest_distance_m) + 'm' : (plData.nearest_distance_m / 1000).toFixed(1) + 'km';
+    items.push({label: 'Power Lines', value: plDist + ' away'});
+  }
+
+  /* Metro-North station */
+  var stData = parseJSON(l.station_json, null);
+  if (stData && stData.station) {
+    var stText = stData.station + (stData.walk_minutes != null ? ' (' + stData.walk_minutes + ' min walk)' : '');
+    items.push({label: 'Metro-North', value: stText});
+  }
+
+  if (items.length === 0) return null;
+
+  var section = el('div', {className: 'prop-details-section'});
+  section.appendChild(el('h5', {className: 'prop-details-heading'}, 'Property Details'));
+  var grid = el('div', {className: 'prop-details-grid'});
+  items.forEach(function(item) {
+    var row = el('div', {className: 'prop-detail-row'}, [
+      el('span', {className: 'prop-detail-label'}, item.label),
+      el('span', {className: 'prop-detail-value'}, item.value)
+    ]);
+    grid.appendChild(row);
+  });
+  section.appendChild(grid);
   return section;
 }
 

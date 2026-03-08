@@ -7,6 +7,12 @@ All notable changes to Listings Analyzer are documented here.
 ## [Unreleased]
 
 ### Added
+- **Property Details section in expanded card** — new `buildPropertyDetails()` JS function renders enriched data not previously shown in the UI: lot size (acres or sqft), garage count/type, HOA fee (or "None"), pool, basement type, assessed value (ORPTS/SODA), FEMA flood zone (with ⚠️ if SFHA), power line proximity, and nearest Metro-North station + walk time. Displayed as a compact 2-column grid below the commute/schools section.
+
+### Removed
+- **Listing description from expanded card** — marketing text removed from detail view; full listing is accessible via the "View full listing →" link.
+
+### Added (previous)
 - **`parse_year_built()` description parser** — extracts year built from Redfin-style descriptions. Handles `"YYYY year built"` (Redfin metadata format) and `"built in YYYY"` patterns. Filters out listing-update dates (2026+). Wired into `_enrich_all()` for automatic backfill on listings missing `year_built`. Expected to fill ~10 of 12 previously missing values (79% → ~97% coverage). `year_built` added to `allowed_cols` whitelist in `db.py`.
 - **ORPTS municipality map expanded** — added 14 new hamlet→municipality mappings: Irvington, Dobbs Ferry, Hartsdale, Ardsley, Elmsford (Greenburgh); Thornwood (Mount Pleasant); Rye Brook, Port Chester (Rye); Cortlandt Manor (Cortlandt); Beacon (Dutchess); Highland/Lloyd (Ulster); Palisades/Orangetown (Rockland). Expected to improve property tax coverage from 37% → ~55-60% for NY listings.
 - **Direct geocoder call for lat/lng** — `_enrich_all()` now calls `_geocode_address()` directly instead of relying on stale in-memory cache. Fixes 0% lat/lng coverage on previously-geocoded listings.
