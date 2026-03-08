@@ -1196,6 +1196,80 @@
   }
   .settings-cancel-btn:hover { border-color: #cbd5e1; color: var(--text-secondary); }
 
+  /* Display preferences section */
+  .prefs-section {
+    margin-bottom: 20px;
+    padding-bottom: 20px;
+    border-bottom: 1px solid var(--border);
+  }
+  .prefs-section-title {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    color: var(--text-faint);
+    margin-bottom: 12px;
+  }
+  .pref-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 10px;
+    gap: 12px;
+  }
+  .pref-label {
+    font-size: 14px;
+    color: var(--text);
+    flex: 1;
+  }
+  .pref-label small {
+    display: block;
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-top: 1px;
+  }
+  /* Toggle switch */
+  .toggle-wrap { display: flex; align-items: center; gap: 8px; }
+  .toggle-switch {
+    position: relative;
+    width: 40px;
+    height: 22px;
+    flex-shrink: 0;
+  }
+  .toggle-switch input { opacity: 0; width: 0; height: 0; }
+  .toggle-track {
+    position: absolute;
+    inset: 0;
+    background: #cbd5e1;
+    border-radius: 11px;
+    cursor: pointer;
+    transition: background 0.2s;
+  }
+  .toggle-track::after {
+    content: '';
+    position: absolute;
+    width: 16px;
+    height: 16px;
+    left: 3px;
+    top: 3px;
+    background: #fff;
+    border-radius: 50%;
+    transition: transform 0.2s;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+  }
+  .toggle-switch input:checked + .toggle-track { background: var(--blue); }
+  .toggle-switch input:checked + .toggle-track::after { transform: translateX(18px); }
+  .pref-select {
+    font-size: 13px;
+    border: 1.5px solid var(--border);
+    border-radius: 8px;
+    padding: 5px 8px;
+    color: var(--text);
+    background: #fff;
+    cursor: pointer;
+  }
+  .pref-select:focus { outline: none; border-color: var(--blue); }
+
   /* Re-score progress */
   .rescore-bar {
     margin-top: 14px;
@@ -1289,7 +1363,7 @@
       <div class="header-actions">
         <span class="user-email auth-only" id="userEmail"></span>
         <span class="data-confidence" id="dataConfidence" style="display:none" title="Composite data completeness across all listings"></span>
-        <button class="settings-btn" onclick="openSettings()" title="AI Scoring Criteria">&#10024; AI Criteria</button>
+        <button class="settings-btn auth-only" onclick="openSettings()" title="Settings">&#9881;</button>
         <button class="poll-btn auth-only" id="pollBtn" onclick="pollNow()">
           Check Email
         </button>
@@ -1332,7 +1406,48 @@
 <!-- Settings overlay -->
 <div class="settings-overlay" id="settingsOverlay">
   <div class="settings-panel">
-    <h2>Evaluation Criteria</h2>
+    <h2>Settings</h2>
+
+    <!-- Display Preferences (auth-only) -->
+    <div class="prefs-section" id="displayPrefsSection">
+      <div class="prefs-section-title">Display Preferences</div>
+
+      <div class="pref-row">
+        <div class="pref-label">
+          Hide passed listings
+          <small>Passed homes won't appear in All, Non-Reject, or other views</small>
+        </div>
+        <label class="toggle-switch">
+          <input type="checkbox" id="prefHidePassed" onchange="saveDisplayPrefs()">
+          <span class="toggle-track"></span>
+        </label>
+      </div>
+
+      <div class="pref-row">
+        <div class="pref-label">Default filter on load</div>
+        <select class="pref-select" id="prefDefaultFilter" onchange="saveDisplayPrefs()">
+          <option value="all">All</option>
+          <option value="not-reject">Non-Reject</option>
+        </select>
+      </div>
+
+      <div class="pref-row">
+        <div class="pref-label">Default sort</div>
+        <select class="pref-select" id="prefDefaultSort" onchange="saveDisplayPrefs()">
+          <option value="score-desc">Score (high-low)</option>
+          <option value="score-asc">Score (low-high)</option>
+          <option value="price-asc">Price (low-high)</option>
+          <option value="price-desc">Price (high-low)</option>
+          <option value="sqft-desc">Sqft (high-low)</option>
+          <option value="ppsqft-asc">$/sqft (low-high)</option>
+          <option value="date-desc">Newest first</option>
+          <option value="commute-asc">Commute (shortest)</option>
+          <option value="schools-desc">Schools (best)</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="settings-version" style="font-size:14px;font-weight:700;margin-bottom:4px">Evaluation Criteria</div>
     <div class="settings-version" id="criteriaVersion"></div>
     <textarea id="criteriaText" placeholder="Enter your evaluation instructions here..."></textarea>
     <div class="settings-readonly-note" id="readonlyNote" style="display:none;font-size:12px;color:var(--text-muted);margin-top:4px;font-style:italic">Sign in to edit criteria</div>
@@ -1372,6 +1487,43 @@ Object.keys(_filterRoutes).forEach(function(k) { _routeByFilter[_filterRoutes[k]
 var activeFilter = _filterRoutes[location.pathname] || 'all';
 var currentUser = null;
 var googleClientId = null;
+
+/* ==== DISPLAY PREFERENCES (localStorage) ==== */
+var _displayPrefs = { hidePassed: true, defaultFilter: 'all', defaultSort: 'score-desc' };
+
+function loadDisplayPrefs() {
+  try {
+    var stored = localStorage.getItem('la_display_prefs');
+    if (stored) {
+      var parsed = JSON.parse(stored);
+      _displayPrefs = Object.assign(_displayPrefs, parsed);
+    }
+  } catch(e) {}
+  /* Apply defaults on first load (no URL-driven filter override) */
+  var urlFilter = _filterRoutes[location.pathname];
+  if (!urlFilter && _displayPrefs.defaultFilter !== 'all') {
+    activeFilter = _displayPrefs.defaultFilter;
+  }
+  var sortEl = document.getElementById('sortSelect');
+  if (sortEl) sortEl.value = _displayPrefs.defaultSort;
+}
+
+function saveDisplayPrefs() {
+  _displayPrefs.hidePassed = document.getElementById('prefHidePassed').checked;
+  _displayPrefs.defaultFilter = document.getElementById('prefDefaultFilter').value;
+  _displayPrefs.defaultSort = document.getElementById('prefDefaultSort').value;
+  try { localStorage.setItem('la_display_prefs', JSON.stringify(_displayPrefs)); } catch(e) {}
+  render();
+}
+
+function syncPrefsUI() {
+  var hp = document.getElementById('prefHidePassed');
+  var df = document.getElementById('prefDefaultFilter');
+  var ds = document.getElementById('prefDefaultSort');
+  if (hp) hp.checked = _displayPrefs.hidePassed;
+  if (df) df.value = _displayPrefs.defaultFilter;
+  if (ds) ds.value = _displayPrefs.defaultSort;
+}
 
 /* ==== AUTH ==== */
 
@@ -1591,7 +1743,7 @@ window.addEventListener('popstate', function() {
 function updateFilterCounts() {
   var counts = { all: 0, 'not-reject': 0, 'Toured': 0, 'Want to Go': 0, 'Passed': 0 };
   allListings.forEach(function(l) {
-    if (l.passed) { counts['Passed']++; return; }
+    if (l.passed) { counts['Passed']++; if (_displayPrefs.hidePassed) return; }
     counts['all']++;
     if (l.verdict !== 'Reject') counts['not-reject']++;
     if (l.toured) counts['Toured']++;
@@ -1614,7 +1766,9 @@ function render() {
   if (activeFilter === 'Passed') {
     items = items.filter(function(l) { return l.passed; });
   } else {
-    items = items.filter(function(l) { return !l.passed; });
+    if (_displayPrefs.hidePassed) {
+      items = items.filter(function(l) { return !l.passed; });
+    }
     if (activeFilter === 'not-reject') {
       items = items.filter(function(l) { return l.verdict !== 'Reject'; });
     } else if (activeFilter === 'Toured') {
@@ -2126,6 +2280,7 @@ async function rescoreListing(listingId) {
 
 async function openSettings() {
   document.getElementById('settingsOverlay').classList.add('open');
+  syncPrefsUI();
   var textarea = document.getElementById('criteriaText');
   var isAuthed = !!currentUser;
   /* Toggle read-only state for anonymous users */
@@ -2621,6 +2776,7 @@ function updateLastPolled() {
 
 /* ==== Init ==== */
 (async function() {
+  loadDisplayPrefs();
   loadGoogleClientId();
   loadListings();
   checkAuth();
