@@ -334,7 +334,11 @@ def get_criteria_history():
 @app.put("/criteria")
 async def update_criteria(request: Request):
     """Save new evaluation criteria and trigger background re-score."""
-    email = _require_auth(request)
+    key = request.headers.get("x-manage-key", "")
+    if settings.manage_key and key == settings.manage_key:
+        email = "manage-api"
+    else:
+        email = _require_auth(request)
     body = await request.json()
     instructions = body.get("instructions", "").strip()
     if not instructions:
