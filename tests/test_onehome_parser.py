@@ -60,7 +60,7 @@ class TestOneHomeParser:
         assert first.bedrooms == 4
         assert first.bathrooms == 3
         assert first.mls_id == "964038"
-        assert first.property_type == "Residential"
+        assert first.property_type == "Single Family Residential"
         assert first.listing_status == "New Listing"
         assert first.source_format == "onehome_html"
 

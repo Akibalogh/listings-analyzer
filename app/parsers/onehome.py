@@ -32,6 +32,62 @@ MLS_RE = re.compile(r"MLS\s*#?\s*(\d+)", re.IGNORECASE)
 # City, State Zip pattern
 ADDRESS_RE = re.compile(r"^(.+?),\s*(\w[\w\s]*?)\s+(\d{5}(?:-\d{4})?)$")
 
+# ---------------------------------------------------------------------------
+# Property type normalization (shared with plaintext parser)
+# ---------------------------------------------------------------------------
+
+_PROPERTY_TYPE_CANONICAL_MAP = {
+    "single family residential": "Single Family Residential",
+    "single family home": "Single Family Residential",
+    "single family": "Single Family Residential",
+    "single-family residential": "Single Family Residential",
+    "single-family home": "Single Family Residential",
+    "single-family": "Single Family Residential",
+    "residential": "Single Family Residential",
+    "condominium": "Condo/Co-op",
+    "condo": "Condo/Co-op",
+    "co-op": "Condo/Co-op",
+    "co op": "Condo/Co-op",
+    "coop": "Condo/Co-op",
+    "townhouse": "Townhouse",
+    "townhome": "Townhouse",
+    "multi-family": "Multi-Family",
+    "multi family": "Multi-Family",
+    "multifamily": "Multi-Family",
+    "two-family": "Multi-Family",
+    "two family": "Multi-Family",
+    "colonial": "Single Family Residential",
+    "ranch": "Single Family Residential",
+    "cape cod": "Single Family Residential",
+    "split level": "Single Family Residential",
+    "split-level": "Single Family Residential",
+    "contemporary": "Single Family Residential",
+    "victorian": "Single Family Residential",
+    "tudor": "Single Family Residential",
+    "farmhouse": "Single Family Residential",
+    "craftsman": "Single Family Residential",
+    "mobile home": "Mobile/Manufactured Home",
+    "manufactured home": "Mobile/Manufactured Home",
+}
+
+
+def _canonicalize_property_type(raw: str) -> str | None:
+    """Normalize a raw property type string to a canonical value.
+
+    Returns a canonical string (e.g. "Single Family Residential") or the
+    title-cased raw value if no mapping is found but the string is not blank.
+    """
+    if not raw:
+        return None
+    normalized = raw.strip().lower()
+    if normalized in _PROPERTY_TYPE_CANONICAL_MAP:
+        return _PROPERTY_TYPE_CANONICAL_MAP[normalized]
+    # Prefix match handles "Single Family Residential - Detached", etc.
+    for key, canonical in _PROPERTY_TYPE_CANONICAL_MAP.items():
+        if normalized.startswith(key):
+            return canonical
+    return raw.strip().title()
+
 
 class OneHomeParser(EmailParser):
     def can_parse(self, html: str | None, text: str | None) -> bool:
@@ -113,7 +169,8 @@ class OneHomeParser(EmailParser):
         # Property type
         title_el = block.find(class_="highlight-title")
         if title_el:
-            listing.property_type = title_el.get_text(strip=True)
+            raw_type = title_el.get_text(strip=True)
+            listing.property_type = _canonicalize_property_type(raw_type)
 
         # Listing status (New Listing, Price Increased, etc.)
         status_el = block.find(class_="highlight-status")

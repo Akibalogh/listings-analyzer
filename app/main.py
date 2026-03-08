@@ -1673,7 +1673,7 @@ def _enrich_all(clear_bogus: bool = False, clear_bogus_commute: bool = False):
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    from app.enrichment import fetch_commute_time, fetch_school_data, normalize_address, fetch_property_tax, fetch_property_tax_orpts, fetch_power_line_proximity, fetch_flood_zone, fetch_station_proximity, parse_garage_count, parse_hoa_amount, parse_pool_flag, parse_basement, parse_year_built, parse_list_date, _geocode_address
+    from app.enrichment import fetch_commute_time, fetch_school_data, normalize_address, fetch_property_tax, fetch_property_tax_orpts, fetch_power_line_proximity, fetch_flood_zone, fetch_station_proximity, parse_garage_count, parse_hoa_amount, parse_pool_flag, parse_basement, parse_year_built, parse_list_date, _geocode_address, enrich_missing_urls
 
     try:
         listing_ids = db.get_all_listing_ids()
@@ -1681,6 +1681,7 @@ def _enrich_all(clear_bogus: bool = False, clear_bogus_commute: bool = False):
         school_calls = 0
         commute_calls = 0
         errors = []
+        url_resolve_calls = 0
 
         # Phase 0: Clear ALL bogus school data before enrichment
         if clear_bogus:
@@ -1727,6 +1728,25 @@ def _enrich_all(clear_bogus: bool = False, clear_bogus_commute: bool = False):
                 except (json.JSONDecodeError, TypeError):
                     pass
             logger.info(f"Cleared stale commute data from {bogus_cleared} listings")
+
+        # Phase 0.75: Resolve missing listing URLs via Redfin autocomplete API
+        # Collect listings that have address+town but no listing_url, then batch-resolve.
+        missing_url_listings = []
+        for lid in listing_ids:
+            listing = db.get_listing_by_id(lid)
+            if not listing:
+                continue
+            if not listing.get("listing_url") and listing.get("address") and listing.get("town"):
+                missing_url_listings.append(listing)
+
+        if missing_url_listings:
+            logger.info(f"Resolving URLs for {len(missing_url_listings)} listings via Redfin autocomplete")
+            url_result = enrich_missing_urls(missing_url_listings)
+            url_resolve_calls = url_result["found"]
+            if url_result["found"] > 0:
+                enriched += url_result["found"]
+            if url_result["errors"]:
+                errors.extend(url_result["errors"])
 
         # Phase 1 (serial): address keys + school data
         commute_needed: list[tuple[int, dict]] = []  # (lid, listing) pairs needing commute
@@ -1940,12 +1960,14 @@ def _enrich_all(clear_bogus: bool = False, clear_bogus_commute: bool = False):
             "enriched": enriched,
             "school_api_calls": school_calls,
             "commute_api_calls": commute_calls,
+            "url_resolve_calls": url_resolve_calls,
             "errors": errors,
             "rescore_started": rescore_started,
         }
         logger.info(
             f"Enrichment complete: {enriched} enriched, "
-            f"{school_calls} school API calls, {commute_calls} commute API calls"
+            f"{school_calls} school API calls, {commute_calls} commute API calls, "
+            f"{url_resolve_calls} URLs resolved"
         )
     except Exception as e:
         logger.error(f"Enrichment failed: {e}")

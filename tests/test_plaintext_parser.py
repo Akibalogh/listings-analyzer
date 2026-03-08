@@ -437,3 +437,173 @@ $1,200,000 4 Beds 2.5 Baths 3,034 sqft
         listings = self.parser.parse(html, text)
         assert len(listings) == 1
         assert listings[0].listing_url is None
+
+    # --- property_type extraction ---
+
+    def test_property_type_labeled_style(self):
+        """'Style: Colonial' maps to Single Family Residential."""
+        text = """
+$1,200,000 4 Beds 2.5 Baths 3,034 sqft
+31 Lalli Dr, Katonah, NY 10536
+Style: Colonial
+        """
+        listings = self.parser.parse(None, text)
+        assert len(listings) == 1
+        assert listings[0].property_type == "Single Family Residential"
+
+    def test_property_type_labeled_type(self):
+        """'Type: Single Family Residential' extracts and canonicalizes."""
+        text = """
+$1,400,000 5 Beds 3 Baths 3,274 sqft
+7 Dickson Ln, Bedford Corners, NY 10549
+Type: Single Family Residential
+        """
+        listings = self.parser.parse(None, text)
+        assert len(listings) == 1
+        assert listings[0].property_type == "Single Family Residential"
+
+    def test_property_type_labeled_condo(self):
+        """'Property Type: Condominium' canonicalizes to Condo/Co-op."""
+        text = """
+$750,000 2 Beds 2 Baths 1,200 sqft
+MLS #112233
+Property Type: Condominium
+        """
+        listings = self.parser.parse(None, text)
+        assert len(listings) == 1
+        assert listings[0].property_type == "Condo/Co-op"
+
+    def test_property_type_labeled_townhouse(self):
+        """'Type: Townhouse' canonicalizes to Townhouse."""
+        text = """
+$850,000 3 Beds 2.5 Baths 2,100 sqft
+MLS #445566
+Type: Townhouse
+        """
+        listings = self.parser.parse(None, text)
+        assert len(listings) == 1
+        assert listings[0].property_type == "Townhouse"
+
+    def test_property_type_labeled_multi_family(self):
+        """'Type: Multi-Family' canonicalizes to Multi-Family."""
+        text = """
+$1,100,000 6 Beds 4 Baths 3,800 sqft
+MLS #778899
+Type: Multi-Family
+        """
+        listings = self.parser.parse(None, text)
+        assert len(listings) == 1
+        assert listings[0].property_type == "Multi-Family"
+
+    def test_property_type_standalone_single_family(self):
+        """Standalone line 'Single Family' on its own line is picked up."""
+        text = """
+$1,200,000 4 Beds 2.5 Baths 3,034 sqft
+31 Lalli Dr, Katonah, NY 10536
+Single Family
+        """
+        listings = self.parser.parse(None, text)
+        assert len(listings) == 1
+        assert listings[0].property_type == "Single Family Residential"
+
+    def test_property_type_not_extracted_when_absent(self):
+        """Listings without type info should have property_type=None."""
+        text = """
+$1,200,000 4 Beds 2.5 Baths 3,034 sqft
+31 Lalli Dr, Katonah, NY 10536
+        """
+        listings = self.parser.parse(None, text)
+        assert len(listings) == 1
+        assert listings[0].property_type is None
+
+    # --- list_date extraction ---
+
+    def test_list_date_us_format(self):
+        """'Listed: 01/15/2025' parses to ISO date."""
+        text = """
+$1,200,000 4 Beds 2.5 Baths 3,034 sqft
+31 Lalli Dr, Katonah, NY 10536
+Listed: 01/15/2025
+        """
+        listings = self.parser.parse(None, text)
+        assert len(listings) == 1
+        assert listings[0].list_date == "2025-01-15"
+
+    def test_list_date_long_month_format(self):
+        """'Date Listed: January 15, 2025' parses to ISO date."""
+        text = """
+$1,400,000 5 Beds 3 Baths 3,274 sqft
+7 Dickson Ln, Bedford Corners, NY 10549
+Date Listed: January 15, 2025
+        """
+        listings = self.parser.parse(None, text)
+        assert len(listings) == 1
+        assert listings[0].list_date == "2025-01-15"
+
+    def test_list_date_active_since_abbreviated_month(self):
+        """'Active since: Feb 3, 2025' parses to ISO date."""
+        text = """
+$900,000 3 Beds 2 Baths 2,100 sqft
+MLS #123456
+Active since: Feb 3, 2025
+        """
+        listings = self.parser.parse(None, text)
+        assert len(listings) == 1
+        assert listings[0].list_date == "2025-02-03"
+
+    def test_list_date_iso_format(self):
+        """'Listed on 2025-03-10' already ISO, returned as-is."""
+        text = """
+$1,100,000 4 Beds 3 Baths 2,800 sqft
+MLS #654321
+Listed on 2025-03-10
+        """
+        listings = self.parser.parse(None, text)
+        assert len(listings) == 1
+        assert listings[0].list_date == "2025-03-10"
+
+    def test_list_date_not_extracted_when_absent(self):
+        """Listings without date info should have list_date=None."""
+        text = """
+$1,200,000 4 Beds 2.5 Baths 3,034 sqft
+31 Lalli Dr, Katonah, NY 10536
+        """
+        listings = self.parser.parse(None, text)
+        assert len(listings) == 1
+        assert listings[0].list_date is None
+
+    # --- lot_acres extraction ---
+
+    def test_lot_acres_from_email_body(self):
+        """'0.25 acres' in email text sets lot_acres."""
+        text = """
+$1,200,000 4 Beds 2.5 Baths 3,034 sqft
+31 Lalli Dr, Katonah, NY 10536
+0.25 acres lot
+        """
+        listings = self.parser.parse(None, text)
+        assert len(listings) == 1
+        assert listings[0].lot_acres == 0.25
+
+    def test_lot_acres_from_sqft_lot(self):
+        """'10,890 sq ft lot' converts to acres."""
+        text = """
+$1,200,000 4 Beds 2.5 Baths 3,034 sqft
+31 Lalli Dr, Katonah, NY 10536
+10,890 sq ft lot
+        """
+        listings = self.parser.parse(None, text)
+        assert len(listings) == 1
+        # 10890 / 43560 ≈ 0.25
+        assert listings[0].lot_acres is not None
+        assert abs(listings[0].lot_acres - 0.25) < 0.01
+
+    def test_lot_acres_not_extracted_when_absent(self):
+        """Without lot size data, lot_acres should be None."""
+        text = """
+$1,200,000 4 Beds 2.5 Baths 3,034 sqft
+31 Lalli Dr, Katonah, NY 10536
+        """
+        listings = self.parser.parse(None, text)
+        assert len(listings) == 1
+        assert listings[0].lot_acres is None

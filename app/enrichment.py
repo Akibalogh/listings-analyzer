@@ -1522,3 +1522,145 @@ def parse_year_built(description: str | None) -> int | None:
             return year
 
     return None
+
+
+# ---------------------------------------------------------------------------
+# Redfin autocomplete URL resolution
+# ---------------------------------------------------------------------------
+
+_REDFIN_AUTOCOMPLETE_URL = (
+    "https://www.redfin.com/stingray/do/location-autocomplete"
+)
+_REDFIN_AUTOCOMPLETE_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json, text/javascript, */*; q=0.01",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.redfin.com/",
+    "X-Requested-With": "XMLHttpRequest",
+}
+
+
+def fetch_redfin_url(address: str | None, town: str | None, state: str | None) -> str | None:
+    """Look up the canonical Redfin listing URL for an address via autocomplete API.
+
+    Calls Redfin's public location-autocomplete endpoint with the address string.
+    Response is prefixed with '{}&&' before the JSON payload; strips that before
+    parsing. Returns the full https://www.redfin.com URL if an exactMatch or first
+    row result is found, else None.
+
+    Includes a 1-second delay per call to be polite to Redfin's servers.
+    """
+    if not address or not town:
+        return None
+
+    query = f"{address} {town}"
+    if state:
+        query += f" {state}"
+
+    try:
+        time.sleep(1)
+        with httpx.Client(timeout=10.0, follow_redirects=True) as client:
+            resp = client.get(
+                _REDFIN_AUTOCOMPLETE_URL,
+                params={"location": query, "count": "1", "v": "2"},
+                headers=_REDFIN_AUTOCOMPLETE_HEADERS,
+            )
+
+        if resp.status_code != 200:
+            logger.debug(f"Redfin autocomplete returned {resp.status_code} for: {query}")
+            return None
+
+        raw = resp.text.strip()
+        # Redfin responses are prefixed with '{}&&' before the JSON payload
+        if raw.startswith("{}&&"):
+            raw = raw[4:]
+
+        data = json.loads(raw)
+        payload = data.get("payload", {})
+
+        # Prefer exactMatch, fall back to first row in sections
+        url_path: str | None = None
+        exact = payload.get("exactMatch")
+        if exact and exact.get("url"):
+            url_path = exact["url"]
+        else:
+            sections = payload.get("sections", [])
+            for section in sections:
+                rows = section.get("rows", [])
+                if rows and rows[0].get("url"):
+                    url_path = rows[0]["url"]
+                    break
+
+        if not url_path:
+            logger.debug(f"Redfin autocomplete: no URL in response for: {query}")
+            return None
+
+        # Prepend base URL if path is relative
+        if url_path.startswith("/"):
+            return f"https://www.redfin.com{url_path}"
+        return url_path
+
+    except Exception as e:
+        logger.debug(f"Redfin autocomplete error for {query}: {e}")
+        return None
+
+
+def enrich_missing_urls(listings_without_url: list[dict]) -> dict:
+    """Resolve listing URLs for listings that have no listing_url.
+
+    For each listing in the provided list, calls fetch_redfin_url() to find
+    the canonical Redfin page, then updates the DB record. Silently skips
+    listings where Redfin returns nothing or where address/town are missing.
+
+    Args:
+        listings_without_url: list of listing dicts (each must have 'id',
+            'address', 'town', 'state').
+
+    Returns:
+        dict with keys 'checked', 'found', 'errors'.
+    """
+    from app import db as _db
+    from app.db import get_connection
+
+    checked = 0
+    found = 0
+    errors: list[str] = []
+
+    for listing in listings_without_url:
+        lid = listing.get("id")
+        address = listing.get("address")
+        town = listing.get("town")
+        state = listing.get("state")
+
+        if not lid or not address or not town:
+            continue
+
+        checked += 1
+        try:
+            url = fetch_redfin_url(address, town, state)
+            if url:
+                ph = _db._placeholder()
+                with get_connection() as conn:
+                    cur = conn.cursor()
+                    cur.execute(
+                        f"UPDATE listings SET listing_url = {ph} WHERE id = {ph} AND (listing_url IS NULL OR listing_url = '')",
+                        (url, lid),
+                    )
+                found += 1
+                logger.info(
+                    f"Resolved Redfin URL for listing #{lid} ({address}, {town}): {url}"
+                )
+            else:
+                logger.debug(f"No Redfin URL found for listing #{lid} ({address}, {town})")
+        except Exception as e:
+            logger.warning(f"enrich_missing_urls: error for listing #{lid}: {e}")
+            errors.append(f"#{lid}: {e}")
+
+    logger.info(
+        f"enrich_missing_urls: checked={checked}, found={found}, errors={len(errors)}"
+    )
+    return {"checked": checked, "found": found, "errors": errors}
