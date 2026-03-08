@@ -356,6 +356,10 @@
   .card:hover {
     box-shadow: var(--shadow);
   }
+  .card-ai-failed {
+    border-left: 3px solid #fde047;
+    opacity: 0.85;
+  }
 
   /* Compact summary row — always visible */
   .card-summary {
@@ -1918,12 +1922,14 @@ function buildCard(l) {
   var beds = l.bedrooms != null ? String(l.bedrooms) : '?';
   var baths = l.bathrooms != null ? String(l.bathrooms) : '?';
   var address = l.address || 'Unknown Address';
-  var displayVerdict = (l.evaluation_method === 'ai_failed') ? 'Pending' : l.verdict;
+  var aiFailed = l.evaluation_method === 'ai_failed';
+  var displayVerdict = aiFailed ? 'Pending' : l.verdict;
   var verdictClass = 'verdict ' + verdictCSSClass(displayVerdict);
-  var scoreColor = scoreBarColor(l.score || 0, displayVerdict);
+  var scoreColor = aiFailed ? 'var(--text-faint)' : scoreBarColor(l.score || 0, displayVerdict);
+  var scoreDisplay = aiFailed ? '?' : (l.score != null ? String(l.score) : '?');
   var priceSqft = (l.price && l.sqft) ? '$' + Math.round(l.price / l.sqft).toLocaleString() : null;
 
-  var card = el('div', {className: 'card', id: 'card-' + l.id});
+  var card = el('div', {className: 'card' + (aiFailed ? ' card-ai-failed' : ''), id: 'card-' + l.id});
 
   /* === Compact summary row (always visible) === */
   var summary = el('div', {className: 'card-summary', onclick: function(e) {
@@ -1933,7 +1939,7 @@ function buildCard(l) {
   }});
 
   /* Score number */
-  summary.appendChild(el('span', {className: 'card-score', style: 'color:' + scoreColor}, l.score != null ? String(l.score) : '?'));
+  summary.appendChild(el('span', {className: 'card-score', style: 'color:' + scoreColor}, scoreDisplay));
 
   /* Address + compact meta line */
   var info = el('div', {className: 'card-info'});
@@ -2000,6 +2006,17 @@ function buildCard(l) {
     actionsRow.appendChild(tourBtn);
     actionsRow.appendChild(passedBtn);
     actionsRow.appendChild(soldBtn);
+    if (aiFailed) {
+      var retryBtn = el('button', {
+        className: 'sold-btn',
+        style: 'background: #fef08a; color: #713f12; border-color: #fde047;',
+        onclick: function(e) {
+          e.stopPropagation();
+          retryScoring(l.id, retryBtn);
+        }
+      }, '\u21bb Retry scoring');
+      actionsRow.appendChild(retryBtn);
+    }
     detailInner.appendChild(actionsRow);
   }
 
@@ -2823,6 +2840,40 @@ async function markSold(listingId) {
     }
   } catch (e) {
     showToast('Network error');
+  }
+}
+
+/* ==== Retry AI Scoring ==== */
+async function retryScoring(listingId, btn) {
+  btn.disabled = true;
+  btn.textContent = 'Retrying\u2026';
+  try {
+    var res = await fetch('/listings/' + listingId + '/rescore', {method: 'POST'});
+    if (res.ok) {
+      var data = await res.json();
+      var msg = 'Rescored: ' + (data.verdict || '?') + ' (' + (data.score != null ? data.score : '?') + ')';
+      showToast(msg);
+      /* Update in-memory listing and re-render card */
+      var idx = allListings.findIndex(function(l) { return l.id === listingId; });
+      if (idx !== -1) {
+        allListings[idx] = Object.assign(allListings[idx], {
+          score: data.score,
+          verdict: data.verdict,
+          evaluation_method: data.evaluation_method || 'ai',
+          scored_at: data.scored_at || new Date().toISOString()
+        });
+      }
+      loadListings();
+    } else {
+      var err = await res.json().catch(function() { return {}; });
+      showToast('Rescore failed: ' + (err.detail || res.status));
+      btn.disabled = false;
+      btn.textContent = '\u21bb Retry scoring';
+    }
+  } catch (e) {
+    showToast('Network error');
+    btn.disabled = false;
+    btn.textContent = '\u21bb Retry scoring';
   }
 }
 
