@@ -645,6 +645,8 @@ async def add_listing_from_url(request: Request):
         score = _rescore_one_listing(saved, criteria)
         result_info["score"] = score.score
         result_info["verdict"] = score.verdict
+        from app.notifier import notify_new_listing
+        notify_new_listing(saved, score.score, score.verdict, score.evaluation_method)
 
     return result_info
 
@@ -687,6 +689,27 @@ def rescore_status():
         state["stuck"] = elapsed > 1800 and state.get("completed", 0) == 0
     state.pop("started_at", None)  # don't expose raw timestamp
     return state
+
+
+@app.post("/manage/notify-test")
+def notify_test(request: Request):
+    """Send a test Slack notification using the highest-scored listing."""
+    key = request.headers.get("x-manage-key", "")
+    if not (settings.manage_key and key == settings.manage_key):
+        _require_auth(request)
+    from app.notifier import notify_new_listing, NOTIFY_VERDICTS
+    if not settings.slack_webhook_url:
+        raise HTTPException(status_code=400, detail="slack_webhook_url not configured")
+    listings = db.get_all_listings()
+    top = sorted(
+        [l for l in listings if l.get("verdict") in NOTIFY_VERDICTS],
+        key=lambda l: l.get("score", 0), reverse=True
+    )
+    if not top:
+        raise HTTPException(status_code=404, detail="No Worth Touring+ listings found")
+    listing = top[0]
+    notify_new_listing(listing, listing["score"], listing["verdict"], listing.get("evaluation_method", "ai"))
+    return {"sent": True, "listing": listing.get("address"), "verdict": listing.get("verdict")}
 
 
 # --- Background re-scoring ---

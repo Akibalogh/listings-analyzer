@@ -34,6 +34,9 @@ class Settings(BaseSettings):
     # Management API key (for sync-criteria endpoint)
     manage_key: str = ""
 
+    # Slack webhook URL for listing notifications
+    slack_webhook_url: str = ""
+
     # AI evaluation model
     ai_eval_model: str = "claude-opus-4-6"
 
