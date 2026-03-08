@@ -7,6 +7,8 @@ All notable changes to Listings Analyzer are documented here.
 ## [Unreleased]
 
 ### Added
+- **AI failure retry + `ai_failed` flag** — `ai_score_listing()` now retries once on `JSONDecodeError` before giving up. On persistent failure uses `evaluation_method='ai_failed'` instead of `'deterministic'`; `_should_skip()` always forces rescore for `ai_failed` listings. Dashboard shows a ⚠ Score pending badge on affected cards; data confidence tooltip includes count of pending listings.
+- **Sqft hard requirement lowered to 2,200 sqft** — criteria v55. Hard reject threshold changed from 2,400 → 2,200 sqft. 2,200–2,400 sqft range carries a severe soft penalty (-12 to -15) to avoid missed borderline listings while still strongly discouraging small homes.
 - **CI test gate** — GitHub Actions workflow updated to run `pytest tests/ -x -q` before deploying. Deploy job requires test job to pass. Uses `uv sync --dev` + mock env vars for API keys.
 - **Hide pending/sold toggle** — third display preference in settings: "Hide pending/sold listings" (default OFF) excludes listings where `listing_status` is Pending, Sold, Under Contract, or Closed from All view. Filter counts respect this preference.
 - **"Active" filter chip** — renamed from "Non-Reject" to "Active" (clearer label; same behavior: excludes Reject verdict listings).
