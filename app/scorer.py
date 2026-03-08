@@ -423,7 +423,8 @@ def ai_score_listing(
     system_prompt = _build_system_prompt()
     user_content = _build_user_message(instructions, listing_data, image_urls)
 
-    try:
+    def _call_ai() -> tuple[ScoringResult, str | None]:
+        """Single AI call attempt — raises on failure."""
         client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
         response = client.messages.create(
             model=settings.ai_eval_model,
@@ -437,7 +438,6 @@ def ai_score_listing(
         # Parse JSON — strip markdown fences if model included them despite instructions
         cleaned = response_text
         if cleaned.startswith("```"):
-            # Remove opening fence (with optional language tag)
             first_newline = cleaned.index("\n")
             cleaned = cleaned[first_newline + 1:]
         if cleaned.endswith("```"):
@@ -446,8 +446,10 @@ def ai_score_listing(
 
         ai_data = json.loads(cleaned)
         result = _validate_ai_response(ai_data)
+        return result, result.reasoning
 
-        reasoning = result.reasoning
+    try:
+        result, reasoning = _call_ai()
         logger.info(
             f"AI evaluation: score={result.score}, verdict={result.verdict}, "
             f"confidence={result.confidence}"
@@ -455,15 +457,23 @@ def ai_score_listing(
         return result, reasoning
 
     except json.JSONDecodeError as e:
-        logger.error(f"AI evaluation returned invalid JSON: {e}")
-        result = ScoringResult(
-            verdict="Weak Match",
-            score=0,
-            confidence="low",
-            concerns=["AI evaluation returned invalid response — using fallback"],
-            evaluation_method="deterministic",
-        )
-        return result, None
+        logger.warning(f"AI evaluation returned invalid JSON (attempt 1): {e} — retrying once")
+        try:
+            result, reasoning = _call_ai()
+            logger.info(
+                f"AI evaluation retry succeeded: score={result.score}, verdict={result.verdict}"
+            )
+            return result, reasoning
+        except json.JSONDecodeError as e2:
+            logger.error(f"AI evaluation returned invalid JSON on retry: {e2} — marking ai_failed")
+            result = ScoringResult(
+                verdict="Weak Match",
+                score=0,
+                confidence="low",
+                concerns=["AI evaluation returned invalid response after retry"],
+                evaluation_method="ai_failed",
+            )
+            return result, None
 
     except anthropic.APIError as e:
         logger.error(f"Anthropic API error during evaluation: {e}")
@@ -471,8 +481,8 @@ def ai_score_listing(
             verdict="Weak Match",
             score=0,
             confidence="low",
-            concerns=["AI evaluation API error — using fallback"],
-            evaluation_method="deterministic",
+            concerns=["AI evaluation API error — will retry on next rescore"],
+            evaluation_method="ai_failed",
         )
         return result, None
 
@@ -482,8 +492,8 @@ def ai_score_listing(
             verdict="Weak Match",
             score=0,
             confidence="low",
-            concerns=["AI evaluation failed — using fallback"],
-            evaluation_method="deterministic",
+            concerns=["AI evaluation failed — will retry on next rescore"],
+            evaluation_method="ai_failed",
         )
         return result, None
 

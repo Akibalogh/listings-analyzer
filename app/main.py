@@ -843,6 +843,8 @@ def _should_skip(listing_row: dict, score_meta: dict | None, criteria_version: i
     """
     if not score_meta or score_meta.get("criteria_version") != criteria_version:
         return False  # different criteria → must rescore
+    if score_meta.get("evaluation_method") == "ai_failed":
+        return False  # previous AI parse failure → always retry
     scored_at = score_meta.get("scored_at")
     if not scored_at:
         return False  # never properly scored (placeholder/deterministic) → must rescore

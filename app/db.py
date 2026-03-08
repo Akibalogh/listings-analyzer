@@ -881,23 +881,28 @@ def get_all_listing_ids() -> list[int]:
 def get_all_score_metadata() -> dict[int, dict]:
     """Get score metadata for all listings (for skip-unchanged logic).
 
-    Returns {listing_id: {"criteria_version": int, "scored_at": str}} for
-    every listing that has a score. Used to determine which listings can
+    Returns {listing_id: {"criteria_version": int, "scored_at": str, "evaluation_method": str}}
+    for every listing that has a score. Used to determine which listings can
     be skipped during a rescore.
     """
     with get_connection() as conn:
         cur = conn.cursor()
-        cur.execute("SELECT listing_id, criteria_version, scored_at FROM scores")
+        cur.execute("SELECT listing_id, criteria_version, scored_at, evaluation_method FROM scores")
         rows = cur.fetchall()
         result = {}
         if settings.is_postgres:
             for row in rows:
-                result[row[0]] = {"criteria_version": row[1], "scored_at": row[2]}
+                result[row[0]] = {
+                    "criteria_version": row[1],
+                    "scored_at": row[2],
+                    "evaluation_method": row[3],
+                }
         else:
             for row in rows:
                 result[row["listing_id"]] = {
                     "criteria_version": row["criteria_version"],
                     "scored_at": row["scored_at"],
+                    "evaluation_method": row["evaluation_method"],
                 }
         return result
 
