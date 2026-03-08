@@ -7,6 +7,9 @@ All notable changes to Listings Analyzer are documented here.
 ## [Unreleased]
 
 ### Added
+- **CI test gate** — GitHub Actions workflow updated to run `pytest tests/ -x -q` before deploying. Deploy job requires test job to pass. Uses `uv sync --dev` + mock env vars for API keys.
+- **Hide pending/sold toggle** — third display preference in settings: "Hide pending/sold listings" (default OFF) excludes listings where `listing_status` is Pending, Sold, Under Contract, or Closed from All view. Filter counts respect this preference.
+- **"Active" filter chip** — renamed from "Non-Reject" to "Active" (clearer label; same behavior: excludes Reject verdict listings).
 - **Settings modal with display preferences** — gear icon (⚙) in top nav (auth-only) opens a redesigned settings modal with a "Display Preferences" section above the AI Criteria editor. Preferences are persisted to `localStorage` and apply immediately: "Hide passed listings" toggle (default ON), "Default filter on load" dropdown (All / Non-Reject), "Default sort" dropdown (all existing sort options). Filter counts respect the hide-passed preference.
 - **Hide passed listings from default views** — passed listings are now excluded from All, Non-Reject, Toured, and Want to Go views by default. They remain visible via the dedicated "Passed" filter chip. Controlled by the "Hide passed" display preference (default ON).
 - **Tests for `parse_list_date()`** — `TestParseListDate` (11 tests): None input, empty string, no-date description, ISO date after "listed on", ISO date after "date listed", US date after "listed", US date after "on market since", long-form month, abbreviated month, update-date non-match, return format validation.
