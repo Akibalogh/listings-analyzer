@@ -1615,7 +1615,7 @@ class TestManageUpdateListing:
         assert data["listing_id"] == 62
         assert data["updated"]["year_built"] == 1994
         assert data["message"] == "OK"
-        mock_update.assert_called_once_with(62, year_built=1994)
+        mock_update.assert_called_once_with(62, force=False, year_built=1994)
 
     @patch("app.main.db.update_listing_fields_by_id")
     @patch("app.main.db.get_listing_by_id")
