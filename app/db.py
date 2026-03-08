@@ -290,10 +290,11 @@ _INTEGER_COLUMNS = {"price", "sqft", "bedrooms", "bathrooms", "commute_minutes",
 _NUMERIC_COLUMNS = _INTEGER_COLUMNS | {"lot_acres"}  # columns where IS NULL check is required
 
 
-def update_listing_fields_by_id(listing_id: int, **fields):
+def update_listing_fields_by_id(listing_id: int, force: bool = False, **fields):
     """Update arbitrary listing columns by listing ID.
 
-    Only updates fields whose current DB value is NULL or empty.
+    By default only updates fields whose current DB value is NULL or empty.
+    Pass force=True to overwrite existing values.
     """
     if not fields:
         return
@@ -302,8 +303,9 @@ def update_listing_fields_by_id(listing_id: int, **fields):
     ph = _placeholder()
     for col, val in fields.items():
         if val is not None:
-            # Numeric columns (int/float): only check IS NULL (comparing to '' fails in Postgres)
-            if col in _NUMERIC_COLUMNS:
+            if force:
+                updates.append(f"{col} = {ph}")
+            elif col in _NUMERIC_COLUMNS:
                 updates.append(
                     f"{col} = CASE WHEN {col} IS NULL THEN {ph} ELSE {col} END"
                 )

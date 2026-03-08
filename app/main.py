@@ -1198,8 +1198,9 @@ def sync_criteria(request: Request):
 def manage_update_listing(request: Request, body: dict = {}):
     """Update specific fields on a listing by ID.
 
-    Body: {"listing_id": 62, "year_built": 1994}
-    Allowed fields: year_built, price, sqft, bedrooms, bathrooms, address, town, state, zip_code
+    Body: {"listing_id": 62, "year_built": 1994, "force": true}
+    Allowed fields: year_built, price, sqft, bedrooms, bathrooms, address, town, state, zip_code, property_type, lot_acres
+    Add "force": true to overwrite existing values (default: only fills null/empty fields).
     Protected by MANAGE_KEY env var.
     """
     key = request.headers.get("x-manage-key", "")
@@ -1210,12 +1211,13 @@ def manage_update_listing(request: Request, body: dict = {}):
     if not listing_id:
         raise HTTPException(status_code=400, detail="Provide listing_id in JSON body")
 
-    ALLOWED = {"year_built", "price", "sqft", "bedrooms", "bathrooms", "address", "town", "state", "zip_code"}
+    force = bool(body.get("force", False))
+    ALLOWED = {"year_built", "price", "sqft", "bedrooms", "bathrooms", "address", "town", "state", "zip_code", "property_type", "lot_acres"}
     fields = {k: v for k, v in body.items() if k in ALLOWED and v is not None}
     if not fields:
         raise HTTPException(status_code=400, detail=f"No valid fields provided. Allowed: {sorted(ALLOWED)}")
 
-    db.update_listing_fields_by_id(listing_id, **fields)
+    db.update_listing_fields_by_id(listing_id, force=force, **fields)
     listing = db.get_listing_by_id(listing_id)
     if not listing:
         raise HTTPException(status_code=404, detail=f"Listing #{listing_id} not found")
@@ -2010,6 +2012,221 @@ def manage_enrich_status():
     return {
         "in_progress": _enrich_state["in_progress"],
         "result": _enrich_state["result"],
+    }
+
+
+# --- Redfin Jina Scraper ---
+
+import re as _re
+
+_JINA_PROPERTY_TYPE_RE = _re.compile(
+    r"(Single-family|Multi-family|Condo|Townhouse|Mobile[/ ]home|Co-op|Land|Commercial|Residential)\s*\n?Property Type",
+    _re.IGNORECASE,
+)
+_JINA_GARAGE_RE = _re.compile(r"(\d+)\s+(?:car\s+)?garage\s+spaces?\s*\n?Parking", _re.IGNORECASE)
+_JINA_TAX_RE = _re.compile(r"Tax Annual Amount:\s*\$([\d,]+(?:\.\d+)?)", _re.IGNORECASE)
+_JINA_HOA_RE = _re.compile(r"\$([\d,]+(?:\.\d+)?)\s*/\s*(?:month|mo)\s*HOA", _re.IGNORECASE)
+_JINA_LOT_ACRES_RE = _re.compile(r"([\d.]+)\s+acres?\s*\n?Lot Size", _re.IGNORECASE)
+_JINA_LOT_SQFT_RE = _re.compile(r"([\d,]+)\s+sq\s*ft\s*\n?Lot Size", _re.IGNORECASE)
+_JINA_PRICE_RE = _re.compile(r"FOR SALE\s*\n\s*\$([\d,]+)", _re.IGNORECASE)
+_JINA_SQFT_RE = _re.compile(r"([\d,]+)\s*\n?sq ft\s*\n?(\d+\s+bd|$)", _re.IGNORECASE)
+_JINA_LIST_DATE_RE = _re.compile(
+    r"(?:Listed:|Date Listed:|Active since:|On market since:)\s*([\w]+ \d+, \d{4}|\d{1,2}/\d{1,2}/\d{2,4})",
+    _re.IGNORECASE,
+)
+_JINA_DAYS_ON_MARKET_RE = _re.compile(r"(\d+)\s+days?\s+on\s+Redfin", _re.IGNORECASE)
+
+_PROPERTY_TYPE_JINA_MAP = {
+    "single-family": "Single Family Residential",
+    "multi-family": "Multi-Family",
+    "condo": "Condo",
+    "townhouse": "Townhouse",
+    "mobile home": "Mobile/Manufactured Home",
+    "mobile/home": "Mobile/Manufactured Home",
+    "co-op": "Co-op",
+    "land": "Land",
+    "commercial": "Commercial",
+    "residential": "Residential",
+}
+
+
+def _parse_jina_redfin(text: str) -> dict:
+    """Extract structured fields from Jina-rendered Redfin text."""
+    result: dict = {}
+
+    # Property type
+    pt_match = _JINA_PROPERTY_TYPE_RE.search(text)
+    if pt_match:
+        raw = pt_match.group(1).strip().lower()
+        result["property_type"] = _PROPERTY_TYPE_JINA_MAP.get(raw, pt_match.group(1).strip().title())
+
+    # Garage count
+    g_match = _JINA_GARAGE_RE.search(text)
+    if g_match:
+        result["garage_count"] = int(g_match.group(1))
+        result["garage_type"] = "attached"  # assume attached for Redfin listings
+
+    # Property tax (annual)
+    tax_match = _JINA_TAX_RE.search(text)
+    if tax_match:
+        try:
+            annual_tax = float(tax_match.group(1).replace(",", ""))
+            result["property_tax_json"] = json.dumps({"annual": annual_tax, "source": "redfin_jina"})
+        except ValueError:
+            pass
+
+    # HOA
+    hoa_match = _JINA_HOA_RE.search(text)
+    if hoa_match:
+        try:
+            result["hoa_monthly"] = int(float(hoa_match.group(1).replace(",", "")))
+        except ValueError:
+            pass
+
+    # Lot acres
+    lot_match = _JINA_LOT_ACRES_RE.search(text)
+    if lot_match:
+        try:
+            val = float(lot_match.group(1))
+            if 0.01 <= val <= 1000:
+                result["lot_acres"] = round(val, 4)
+        except ValueError:
+            pass
+    if "lot_acres" not in result:
+        sqft_match = _JINA_LOT_SQFT_RE.search(text)
+        if sqft_match:
+            try:
+                sqft = float(sqft_match.group(1).replace(",", ""))
+                acres = sqft / 43560
+                if 0.01 <= acres <= 1000:
+                    result["lot_acres"] = round(acres, 4)
+            except ValueError:
+                pass
+
+    # Price (only if clearly marked FOR SALE)
+    price_match = _JINA_PRICE_RE.search(text)
+    if price_match:
+        try:
+            price = int(price_match.group(1).replace(",", ""))
+            if price >= 100000:
+                result["price"] = price
+        except ValueError:
+            pass
+
+    # List date
+    ld_match = _JINA_LIST_DATE_RE.search(text)
+    if ld_match:
+        result["list_date"] = ld_match.group(1).strip()
+
+    return result
+
+
+@app.post("/manage/scrape-redfin")
+def manage_scrape_redfin(request: Request):
+    """Scrape all Redfin listing URLs via Jina reader to backfill missing fields.
+
+    Extracts: property_type, lot_acres, property_tax, garage_count, hoa_monthly,
+    list_date, and price (if current value looks wrong).
+
+    Protected by MANAGE_KEY env var.
+    """
+    import httpx as _httpx
+
+    key = request.headers.get("x-manage-key", "")
+    if not settings.manage_key or key != settings.manage_key:
+        raise HTTPException(status_code=403, detail="Invalid or missing management key")
+
+    listing_ids = db.get_all_listing_ids()
+    updated = 0
+    skipped = 0
+    errors = []
+    results = []
+
+    for lid in listing_ids:
+        listing = db.get_listing_by_id(lid)
+        if not listing:
+            continue
+
+        url = listing.get("listing_url", "")
+        if not url or "redfin.com" not in url:
+            skipped += 1
+            continue
+
+        # Strip tracking query params
+        clean_url = url.split("?")[0]
+
+        try:
+            resp = _httpx.get(
+                f"https://r.jina.ai/{clean_url}",
+                headers={"Accept": "text/plain", "X-Return-Format": "text"},
+                timeout=20,
+                follow_redirects=True,
+            )
+            text = resp.text
+        except Exception as e:
+            logger.error(f"Jina fetch failed for listing #{lid}: {e}")
+            errors.append(f"#{lid}: {e}")
+            continue
+
+        if not text or len(text) < 100:
+            errors.append(f"#{lid}: empty Jina response")
+            continue
+
+        parsed = _parse_jina_redfin(text)
+        if not parsed:
+            skipped += 1
+            continue
+
+        # Split into enrichment vs listing fields
+        enrichment_fields = {"property_tax_json", "garage_count", "garage_type", "hoa_monthly", "list_date"}
+        listing_fields = {"property_type", "lot_acres", "price", "sqft"}
+
+        enrich = {k: v for k, v in parsed.items() if k in enrichment_fields}
+        fields = {k: v for k, v in parsed.items() if k in listing_fields}
+
+        # Only update price if current value looks bogus (< $100k for a home)
+        if "price" in fields:
+            current_price = listing.get("price") or 0
+            if current_price >= 100000:
+                del fields["price"]  # current price looks fine
+
+        changed = False
+        if enrich:
+            # Only set fields not already present (except property_tax which was 0/44)
+            enrich_needed = {}
+            for k, v in enrich.items():
+                if listing.get(k) is None:
+                    enrich_needed[k] = v
+                elif k == "property_tax_json" and not listing.get("property_tax_json"):
+                    enrich_needed[k] = v
+            if enrich_needed:
+                db.update_listing_enrichment(lid, enrich_needed)
+                changed = True
+
+        if fields:
+            # Force-update price if current value looks bogus (< $100k)
+            bogus_price = "price" in parsed and (listing.get("price") or 0) < 100000
+            non_price_fields = {k: v for k, v in fields.items() if k != "price" and listing.get(k) is None}
+            if non_price_fields:
+                db.update_listing_fields_by_id(lid, **non_price_fields)
+                changed = True
+            if bogus_price:
+                db.update_listing_fields_by_id(lid, force=True, price=parsed["price"])
+                changed = True
+
+        if changed:
+            updated += 1
+            results.append({"id": lid, "address": listing.get("address"), "updated": {**enrich, **fields}})
+            logger.info(f"Scrape-redfin: updated listing #{lid} with {list(parsed.keys())}")
+        else:
+            skipped += 1
+
+    return {
+        "total": len(listing_ids),
+        "updated": updated,
+        "skipped": skipped,
+        "errors": errors,
+        "results": results,
     }
 
 
