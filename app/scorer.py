@@ -145,6 +145,8 @@ ENRICHMENT DATA:
   Mention commute time in your property_summary.
 - If age_condition is provided, apply the age_adjustment and condition_adjustment directly
   to your score. Note the age_tier and any keywords_matched in your reasoning.
+  If renovation_signal is "strong" or "moderate", the age_adjustment has already been
+  reduced to account for renovations — mention this in your property_summary.
 - If price_per_sqft_signal is provided, factor the signal (below_market/at_market/above_market)
   and ratio into your price assessment.
 - If property_tax is provided (NYC only), use assessed_value and market_value to contextualize

@@ -805,6 +805,74 @@ def _extract_property_stats(html: str) -> dict | None:
             except ValueError:
                 pass
 
+    # --- Property type extraction ---
+    # OneKey MLS pages often contain "Property Type: Single Family" or similar
+    _PROPERTY_TYPE_PATTERNS = [
+        (re.compile(r"(?:property\s+type|type\s+of\s+home|home\s+type)\s*[:]\s*(single[\s-]?family|condo(?:minium)?|townhouse|townhome|co[\s-]?op|cooperative|multi[\s-]?family)", re.IGNORECASE), None),
+        (re.compile(r"\b(single[\s-]?family(?:\s+(?:residence|home|house))?)\b", re.IGNORECASE), "Single Family"),
+        (re.compile(r"\b(SFH|SFR)\b"), "Single Family"),
+        (re.compile(r"\b(condo(?:minium)?)\b", re.IGNORECASE), "Condo"),
+        (re.compile(r"\b(townhouse|townhome)\b", re.IGNORECASE), "Townhouse"),
+        (re.compile(r"\b(co[\s-]?op(?:erative)?)\b", re.IGNORECASE), "Co-op"),
+        (re.compile(r"\b(multi[\s-]?family)\b", re.IGNORECASE), "Multi Family"),
+    ]
+    if "property_type" not in result:
+        for pattern, label in _PROPERTY_TYPE_PATTERNS:
+            m = pattern.search(text)
+            if m:
+                if label:
+                    result["property_type"] = label
+                else:
+                    # Normalize the captured group
+                    raw = m.group(1).strip().lower()
+                    if "single" in raw:
+                        result["property_type"] = "Single Family"
+                    elif "condo" in raw:
+                        result["property_type"] = "Condo"
+                    elif "townho" in raw:
+                        result["property_type"] = "Townhouse"
+                    elif "co-op" in raw or "co op" in raw or "cooperative" in raw:
+                        result["property_type"] = "Co-op"
+                    elif "multi" in raw:
+                        result["property_type"] = "Multi Family"
+                break
+
+    # --- Garage type extraction ---
+    # OneKey MLS pages: "Garage: Attached", "2-Car Attached", "Garage Type: Detached"
+    _GARAGE_TYPE_RE = re.compile(
+        r"(?:garage\s*(?:type)?\s*[:]\s*(?:\d[\s-]*car\s+)?(attached|detached))"
+        r"|(?:(\d)[\s-]*car\s+(attached|detached)\s*garage)"
+        r"|(?:(attached|detached)\s+(?:\d[\s-]*car\s+)?garage)",
+        re.IGNORECASE,
+    )
+    if "garage_type" not in result:
+        gm = _GARAGE_TYPE_RE.search(text)
+        if gm:
+            gtype = next((g for g in gm.groups() if g and g.lower() in ("attached", "detached")), None)
+            if gtype:
+                result["garage_type"] = gtype.lower()
+
+    # --- Basement type extraction ---
+    # OneKey MLS: "Basement: Full, Finished", "Basement Description: Finished", etc.
+    _BASEMENT_MLS_RE = re.compile(
+        r"basement\s*(?:description|type)?\s*[:]\s*([^\n.]{3,60})",
+        re.IGNORECASE,
+    )
+    if "basement_type" not in result:
+        bm = _BASEMENT_MLS_RE.search(text)
+        if bm:
+            btext = bm.group(1).lower()
+            if "walk" in btext and "out" in btext:
+                result["basement_type"] = "walk_out"
+            elif "partial" in btext and "finish" in btext:
+                result["basement_type"] = "partially_finished"
+            elif "finish" in btext and "un" not in btext:
+                result["basement_type"] = "finished"
+            elif "unfinish" in btext:
+                result["basement_type"] = "unfinished"
+            elif "full" in btext:
+                result["basement_type"] = "unfinished"  # "Full" without "finished" = unfinished
+
     return result if result else None
 
 

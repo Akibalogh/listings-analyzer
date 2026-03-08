@@ -11,6 +11,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from app import db
+from app.alerts import send_score_alert
 from app.auth import (
     create_session_cookie,
     is_allowed_email,
@@ -19,6 +20,7 @@ from app.auth import (
 )
 from app.config import settings
 from app.poller import poll_once
+from app.models import HardResult, ScoringResult
 from app.scorer import ai_score_listing, build_batch_request, parse_batch_result
 
 logger = logging.getLogger(__name__)
@@ -32,7 +34,7 @@ _BATCH_CHUNK_SIZE = 5
 
 
 def _scheduled_poll_loop(interval_hours: int):
-    """Background thread: poll Gmail and prune sold listings on a fixed interval."""
+    """Background thread: poll Gmail on a fixed interval."""
     interval_secs = interval_hours * 3600
     logger.info(f"Scheduled poller started (every {interval_hours}h)")
     while True:
@@ -43,7 +45,17 @@ def _scheduled_poll_loop(interval_hours: int):
         except Exception:
             logger.exception("Scheduled poll failed")
 
-        # Prune sold/off-market listings
+
+def _scheduled_prune_loop(interval_hours: int = 12):
+    """Background thread: prune sold/off-market listings on its own schedule.
+
+    Runs independently of the poll loop on a 12-hour interval.
+    """
+    interval_secs = interval_hours * 3600
+    logger.info(f"Scheduled prune loop started (every {interval_hours}h)")
+    # Wait for the first interval before running (don't prune on startup)
+    time.sleep(interval_secs)
+    while True:
         try:
             report = _prune_sold_listings(fix=True)
             if report["sold_count"] > 0 or report.get("pending_count", 0) > 0:
@@ -56,6 +68,7 @@ def _scheduled_poll_loop(interval_hours: int):
                 logger.info(f"Scheduled prune: no sold/pending found (checked {report['checked']})")
         except Exception:
             logger.exception("Scheduled prune-sold failed")
+        time.sleep(interval_secs)
 
 
 @asynccontextmanager
@@ -70,6 +83,11 @@ async def lifespan(app: FastAPI):
         t.start()
     else:
         logger.info("Scheduled polling disabled (POLL_INTERVAL_HOURS=0)")
+
+    # Start independent prune loop (12h interval, always runs)
+    prune_thread = threading.Thread(target=_scheduled_prune_loop, args=(12,), daemon=True)
+    prune_thread.start()
+    logger.info("Scheduled prune loop started (every 12h)")
 
     yield
 
@@ -275,6 +293,8 @@ def reprocess_emails(request: Request):
 @app.get("/want-to-go", response_class=HTMLResponse)
 @app.get("/toured", response_class=HTMLResponse)
 @app.get("/passed", response_class=HTMLResponse)
+@app.get("/pending", response_class=HTMLResponse)
+@app.get("/loved", response_class=HTMLResponse)
 @app.get("/non-reject", response_class=HTMLResponse)
 def filtered_dashboard():
     """Serve the dashboard — JS reads the URL path to set the initial filter."""
@@ -426,6 +446,23 @@ async def toggle_passed(request: Request, listing_id: int):
     return {"listing_id": listing_id, "passed": passed}
 
 
+# --- Loved status ---
+
+
+@app.post("/listings/{listing_id}/loved")
+async def toggle_loved(request: Request, listing_id: int):
+    """Flag or un-flag a listing as loved (post-tour favorite). Requires auth."""
+    _require_auth(request)
+    listing = db.get_listing_by_id(listing_id)
+    if not listing:
+        raise HTTPException(status_code=404, detail=f"Listing #{listing_id} not found")
+
+    body = await request.json()
+    loved = bool(body.get("loved", True))
+    db.mark_listing_loved(listing_id, loved)
+    return {"listing_id": listing_id, "loved": loved}
+
+
 # --- Mark as sold (delete) ---
 
 
@@ -502,6 +539,49 @@ async def scrape_listing(request: Request, listing_id: int):
 
     return result_info
 
+
+
+
+# --- Live status check ---
+
+
+@app.get("/listings/{listing_id}/live-status")
+def live_status_check(listing_id: int):
+    """Background-check current listing status from OneKey MLS.
+
+    Best-effort: returns {"status": "unknown"} on any error.
+    Used by the frontend when a card is expanded to detect status changes.
+    """
+    from datetime import datetime, timezone
+
+    try:
+        listing = db.get_listing_by_id(listing_id)
+        if not listing:
+            return {"listing_id": listing_id, "status": "unknown", "checked_at": datetime.now(timezone.utc).isoformat()}
+
+        address = listing.get("address")
+        town = listing.get("town")
+        state = listing.get("state")
+        zip_code = listing.get("zip_code")
+
+        if not address or not town:
+            return {"listing_id": listing_id, "status": "unknown", "checked_at": datetime.now(timezone.utc).isoformat()}
+
+        from app.parsers.onehome import check_listing_status
+        status = check_listing_status(address, town, state, zip_code)
+
+        if not status:
+            return {"listing_id": listing_id, "status": "unknown", "checked_at": datetime.now(timezone.utc).isoformat()}
+
+        return {
+            "listing_id": listing_id,
+            "status": status,
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as e:
+        logger.warning(f"Live status check failed for listing #{listing_id}: {e}")
+        from datetime import datetime, timezone
+        return {"listing_id": listing_id, "status": "unknown", "checked_at": datetime.now(timezone.utc).isoformat()}
 
 # --- Add listing from URL ---
 
@@ -749,9 +829,7 @@ def _build_listing_data(listing_row: dict) -> dict:
         except (json.JSONDecodeError, TypeError):
             pass
 
-    # Lot size (acres)
-    if listing_row.get("lot_acres") is not None:
-        listing_data["lot_acres"] = listing_row["lot_acres"]
+    # Note: lot_acres is already included in the initial listing_data dict above.
 
     # Power line proximity (stored JSON if previously fetched)
     if listing_row.get("power_line_json"):
@@ -813,8 +891,71 @@ def _get_image_urls(listing_row: dict) -> list[str] | None:
     return None
 
 
+def _lot_size_precheck(listing_row: dict) -> "ScoringResult | None":
+    """Deterministic pre-check: reject listings with lot size below hard floor.
+
+    Returns a Reject ScoringResult if lot_acres < 0.25 (too small, neighbors
+    too close). Returns None if the listing passes (proceed to AI scoring).
+    """
+    lot_acres = listing_row.get("lot_acres")
+    if lot_acres is None:
+        return None  # unknown lot size — let AI handle with criteria-based penalty
+
+    if lot_acres < 0.25:
+        return ScoringResult(
+            score=0,
+            verdict="Reject",
+            hard_results=[
+                HardResult(
+                    criterion="Lot Size",
+                    passed=False,
+                    value=f"{lot_acres:.2f} acres",
+                    reason=f"Lot is {lot_acres:.2f} acres, below 0.25-acre hard floor. "
+                           "Too small — neighbors too close.",
+                ),
+            ],
+            soft_points={},
+            concerns=[
+                f"Lot size ({lot_acres:.2f} acres) is below the 0.25-acre minimum. "
+                "Properties this small have inadequate privacy and neighbor separation."
+            ],
+            confidence="high",
+            reasoning=f"Deterministic reject: lot size {lot_acres:.2f} acres < 0.25 acre hard floor.",
+            property_summary=(
+                f"Reject — 0/100\n\n"
+                f"❌ Lot Size: {lot_acres:.2f} acres — below 0.25-acre hard floor. "
+                f"Neighbors too close for consideration."
+            ),
+            evaluation_method="deterministic",
+        )
+
+    return None  # lot size >= 0.25 — proceed to AI scoring
+
+
 def _rescore_one_listing(listing_row: dict, criteria: dict) -> "ScoringResult":
-    """Re-score a single listing dict using AI evaluation."""
+    """Re-score a single listing dict using AI evaluation.
+
+    Runs deterministic pre-checks first (lot size hard floor). If a pre-check
+    triggers a reject, the listing is scored immediately without calling the AI.
+    """
+    # Deterministic pre-check: lot size hard floor
+    precheck_result = _lot_size_precheck(listing_row)
+    if precheck_result is not None:
+        precheck_result.criteria_version = criteria["version"]
+        db.update_score(
+            listing_id=listing_row["id"],
+            score=precheck_result,
+            method=precheck_result.evaluation_method,
+            criteria_version=criteria["version"],
+            reasoning=precheck_result.reasoning,
+            property_summary=precheck_result.property_summary,
+        )
+        logger.info(
+            f"Listing #{listing_row['id']} rejected by lot size pre-check "
+            f"({listing_row.get('lot_acres')} acres)"
+        )
+        return precheck_result
+
     listing_data = _build_listing_data(listing_row)
     image_urls = _get_image_urls(listing_row)
 
@@ -833,6 +974,10 @@ def _rescore_one_listing(listing_row: dict, criteria: dict) -> "ScoringResult":
         reasoning=reasoning,
         property_summary=score.property_summary,
     )
+
+    # Send email alert for high-scoring listings
+    send_score_alert(listing_row, score.score, property_summary=score.property_summary)
+
     return score
 
 
@@ -969,6 +1114,14 @@ def _rescore_all(criteria_version: int, instructions: str):
                             reasoning=reasoning,
                             property_summary=score_result.property_summary,
                         )
+                        # Send email alert for high-scoring listings
+                        listing_row = db.get_listing_by_id(lid)
+                        if listing_row:
+                            send_score_alert(
+                                listing_row,
+                                score_result.score,
+                                property_summary=score_result.property_summary,
+                            )
                     else:
                         logger.warning(f"Batch result for listing #{lid} could not be parsed")
 
@@ -1597,6 +1750,13 @@ def manage_scrape_descriptions(request: Request):
                                     updates["list_date"] = stats["list_date"]
                                 if needs_lot_acres and stats.get("lot_acres") is not None:
                                     updates["lot_acres"] = stats["lot_acres"]
+                                # Backfill property_type, garage_type, basement_type from MLS page
+                                if not listing.get("property_type") and stats.get("property_type"):
+                                    updates["property_type"] = stats["property_type"]
+                                if not listing.get("garage_type") and stats.get("garage_type"):
+                                    updates["garage_type"] = stats["garage_type"]
+                                if not listing.get("basement_type") and stats.get("basement_type"):
+                                    updates["basement_type"] = stats["basement_type"]
             except Exception as e:
                 logger.error(f"Year built / lot acres backfill failed for listing #{lid}: {e}")
                 errors.append(f"#{lid} year_built/lot_acres: {e}")
@@ -1642,7 +1802,7 @@ def _enrich_all(clear_bogus: bool = False, clear_bogus_commute: bool = False):
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    from app.enrichment import fetch_commute_time, fetch_school_data, normalize_address, fetch_property_tax, fetch_property_tax_orpts, fetch_power_line_proximity, fetch_flood_zone, fetch_station_proximity, parse_garage_count, parse_hoa_amount, parse_pool_flag, parse_basement, parse_year_built, _geocode_address
+    from app.enrichment import fetch_commute_time, fetch_school_data, normalize_address, fetch_property_tax, fetch_property_tax_orpts, fetch_property_tax_nj, fetch_property_tax_ct, fetch_power_line_proximity, fetch_flood_zone, fetch_station_proximity, parse_garage_count, parse_hoa_amount, parse_pool_flag, parse_basement, parse_year_built, _geocode_address, infer_property_type
 
     try:
         listing_ids = db.get_all_listing_ids()
@@ -1740,7 +1900,7 @@ def _enrich_all(clear_bogus: bool = False, clear_bogus_commute: bool = False):
                     logger.error(f"Failed to enrich listing #{lid}: {e}")
                     errors.append(f"#{lid}: {e}")
 
-            # Property tax: try NYC SODA first, then NY State ORPTS for non-NYC
+            # Property tax: try NYC SODA → NY State ORPTS → NJ Parcels → CT OPM
             if not listing.get("property_tax_json"):
                 tax_data = fetch_property_tax(
                     listing.get("address"),
@@ -1752,6 +1912,19 @@ def _enrich_all(clear_bogus: bool = False, clear_bogus_commute: bool = False):
                         listing.get("address"),
                         town=listing.get("town"),
                     )
+                if not tax_data:
+                    # NJ fallback
+                    state_raw = (listing.get("state") or "").strip().upper()
+                    if state_raw in ("NJ", "NEW JERSEY"):
+                        tax_data = fetch_property_tax_nj(
+                            listing.get("address"),
+                            town=listing.get("town"),
+                        )
+                    elif state_raw in ("CT", "CONNECTICUT"):
+                        tax_data = fetch_property_tax_ct(
+                            listing.get("address"),
+                            town=listing.get("town"),
+                        )
                 if tax_data:
                     enrichment["property_tax_json"] = json.dumps(tax_data)
                     changed = True
@@ -1843,6 +2016,39 @@ def _enrich_all(clear_bogus: bool = False, clear_bogus_commute: bool = False):
                     yb = parse_year_built(desc)
                     if yb is not None:
                         enrichment["year_built"] = yb
+                        changed = True
+
+            # Property type backfill: infer from description + attributes
+            if not listing.get("property_type") and not enrichment.get("property_type"):
+                inferred_type = infer_property_type(listing)
+                if inferred_type:
+                    enrichment["property_type"] = inferred_type
+                    changed = True
+
+            # Garage type default: if garage exists but type unknown, default to "attached"
+            # (statistically dominant for Westchester SFH; only if description lacks "detached")
+            effective_garage_count = enrichment.get("garage_count", listing.get("garage_count"))
+            effective_garage_type = enrichment.get("garage_type", listing.get("garage_type"))
+            if effective_garage_count and effective_garage_count > 0 and not effective_garage_type:
+                desc_lower = (listing.get("description") or "").lower()
+                if "detached" not in desc_lower:
+                    enrichment["garage_type"] = "attached"
+                    changed = True
+
+            # NJ/CT property tax fallback (after ORPTS fails)
+            if not listing.get("property_tax_json") and not enrichment.get("property_tax_json"):
+                state_raw = (listing.get("state") or "").strip().upper()
+                town_val = listing.get("town")
+                addr_val = listing.get("address")
+                if state_raw in ("NJ", "NEW JERSEY") and addr_val and town_val:
+                    nj_tax = fetch_property_tax_nj(addr_val, town_val)
+                    if nj_tax:
+                        enrichment["property_tax_json"] = json.dumps(nj_tax)
+                        changed = True
+                elif state_raw in ("CT", "CONNECTICUT") and addr_val and town_val:
+                    ct_tax = fetch_property_tax_ct(addr_val, town_val)
+                    if ct_tax:
+                        enrichment["property_tax_json"] = json.dumps(ct_tax)
                         changed = True
 
             # Save any enrichment changes from this phase

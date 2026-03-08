@@ -866,6 +866,43 @@
     flex-shrink: 0;
   }
 
+  /* Pending badge */
+  .pending-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 4px 10px;
+    border-radius: 100px;
+    font-size: 10px;
+    font-weight: 700;
+    white-space: nowrap;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    background: #fff7ed;
+    color: #ea580c;
+    border: 1px solid #fed7aa;
+    flex-shrink: 0;
+  }
+
+  /* Live status banner (shown when status changes on expand) */
+  .status-banner {
+    padding: 8px 12px;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    margin-bottom: 12px;
+  }
+  .status-banner.pending {
+    background: #fff7ed;
+    border: 1px solid #fed7aa;
+    color: #ea580c;
+  }
+  .status-banner.sold {
+    background: #fef2f2;
+    border: 1px solid #fecaca;
+    color: #dc2626;
+  }
+
   /* Passed button (in expanded detail) */
   .passed-btn {
     background: transparent;
@@ -882,6 +919,41 @@
   .passed-btn:hover { border-color: var(--yellow); color: var(--yellow); }
   .passed-btn.passed { background: var(--yellow-bg); border-color: #fde68a; color: var(--yellow); }
   .passed-btn.passed:hover { background: #fef2f2; border-color: #fecaca; color: #dc2626; }
+
+  /* Loved badge */
+  .loved-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 4px 10px;
+    border-radius: 100px;
+    font-size: 10px;
+    font-weight: 700;
+    white-space: nowrap;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    background: #fdf2f8;
+    color: #db2777;
+    border: 1px solid #f9a8d4;
+    flex-shrink: 0;
+  }
+
+  /* Loved button (in expanded detail) */
+  .loved-btn {
+    background: transparent;
+    border: 1.5px solid var(--border);
+    color: var(--text-muted);
+    padding: 6px 12px;
+    border-radius: 8px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s;
+    white-space: nowrap;
+  }
+  .loved-btn:hover { border-color: #db2777; color: #db2777; }
+  .loved-btn.loved { background: #fdf2f8; border-color: #f9a8d4; color: #db2777; }
+  .loved-btn.loved:hover { background: #fef2f2; border-color: #fecaca; color: #dc2626; }
 
   /* Sold button (in expanded detail) */
   .sold-btn {
@@ -1220,7 +1292,9 @@
     <button class="filter-chip" data-filter="not-reject">Non-Reject</button>
     <button class="filter-chip" data-filter="Toured">Toured</button>
     <button class="filter-chip" data-filter="Want to Go">Want to Go</button>
+    <button class="filter-chip" data-filter="Loved">Loved</button>
     <button class="filter-chip" data-filter="Passed">Passed</button>
+    <button class="filter-chip" data-filter="Pending">Pending</button>
     <select class="sort-select" id="sortSelect" onchange="applySort()">
       <option value="score-desc">Score (high-low)</option>
       <option value="score-asc">Score (low-high)</option>
@@ -1272,7 +1346,9 @@ var allListings = [];
 var _filterRoutes = {
   '/want-to-go': 'Want to Go',
   '/toured': 'Toured',
+  '/loved': 'Loved',
   '/passed': 'Passed',
+  '/pending': 'Pending',
   '/non-reject': 'not-reject',
 };
 var _routeByFilter = {};
@@ -1496,12 +1572,14 @@ window.addEventListener('popstate', function() {
 });
 
 function updateFilterCounts() {
-  var counts = { all: allListings.length, 'not-reject': 0, 'Toured': 0, 'Want to Go': 0, 'Passed': 0 };
+  var counts = { all: allListings.length, 'not-reject': 0, 'Toured': 0, 'Want to Go': 0, 'Loved': 0, 'Passed': 0, 'Pending': 0 };
   allListings.forEach(function(l) {
     if (l.verdict !== 'Reject') counts['not-reject']++;
     if (l.toured) counts['Toured']++;
     if (l.tour_requested) counts['Want to Go']++;
+    if (l.loved) counts['Loved']++;
     if (l.passed) counts['Passed']++;
+    if ((l.listing_status || '').toLowerCase() === 'pending') counts['Pending']++;
   });
   document.querySelectorAll('.filter-chip').forEach(function(chip) {
     var f = chip.dataset.filter;
@@ -1523,8 +1601,12 @@ function render() {
     items = items.filter(function(l) { return l.toured; });
   } else if (activeFilter === 'Want to Go') {
     items = items.filter(function(l) { return l.tour_requested; });
+  } else if (activeFilter === 'Loved') {
+    items = items.filter(function(l) { return l.loved; });
   } else if (activeFilter === 'Passed') {
     items = items.filter(function(l) { return l.passed; });
+  } else if (activeFilter === 'Pending') {
+    items = items.filter(function(l) { return (l.listing_status || '').toLowerCase() === 'pending'; });
   }
 
   var sortVal = document.getElementById('sortSelect').value;
@@ -1588,7 +1670,13 @@ function buildCard(l) {
   var summary = el('div', {className: 'card-summary', onclick: function(e) {
     /* Don't toggle if clicking a link */
     if (e.target.tagName === 'A') return;
+    var wasExpanded = card.classList.contains('expanded');
     card.classList.toggle('expanded');
+    /* Live status check on first expand */
+    if (!wasExpanded && !card._statusChecked) {
+      card._statusChecked = true;
+      checkLiveStatus(l.id, l.listing_status, card);
+    }
   }});
 
   /* Score number */
@@ -1616,9 +1704,17 @@ function buildCard(l) {
   if (l.tour_requested) {
     summary.appendChild(el('span', {className: 'want-to-go-badge'}, 'Want to Go'));
   }
+  /* Loved badge (visible in compact row) */
+  if (l.loved) {
+    summary.appendChild(el('span', {className: 'loved-badge'}, '\u2764 Loved'));
+  }
   /* Passed badge (visible in compact row) */
   if (l.passed) {
     summary.appendChild(el('span', {className: 'passed-badge'}, 'Passed'));
+  }
+  /* Pending badge (visible in compact row) */
+  if ((l.listing_status || '').toLowerCase() === 'pending') {
+    summary.appendChild(el('span', {className: 'pending-badge'}, 'Pending'));
   }
   /* Expand arrow */
   summary.appendChild(el('span', {className: 'card-expand-arrow'}, '\u25BC'));
@@ -1638,6 +1734,10 @@ function buildCard(l) {
       className: 'tour-request-btn' + (l.tour_requested ? ' requested' : ''),
       onclick: function(e) { e.stopPropagation(); toggleTourRequest(l.id, l.tour_requested, tourReqBtn); }
     }, l.tour_requested ? '\u2713 Want to Go \u2014 click to cancel' : 'Want to Go');
+    var lovedBtn = el('button', {
+      className: 'loved-btn' + (l.loved ? ' loved' : ''),
+      onclick: function(e) { e.stopPropagation(); toggleLoved(l.id, l.loved, lovedBtn); }
+    }, l.loved ? '\u2764 Loved \u2014 click to undo' : '\u2764 Love');
     var passedBtn = el('button', {
       className: 'passed-btn' + (l.passed ? ' passed' : ''),
       onclick: function(e) { e.stopPropagation(); togglePassed(l.id, l.passed, passedBtn); }
@@ -1648,6 +1748,7 @@ function buildCard(l) {
     }, 'Mark as Sold');
     actionsRow.appendChild(tourReqBtn);
     actionsRow.appendChild(tourBtn);
+    actionsRow.appendChild(lovedBtn);
     actionsRow.appendChild(passedBtn);
     actionsRow.appendChild(soldBtn);
     detailInner.appendChild(actionsRow);
@@ -2307,6 +2408,43 @@ async function togglePassed(listingId, currentVal, btn) {
   }
 }
 
+/* ==== Toggle Loved ==== */
+async function toggleLoved(listingId, currentVal, btn) {
+  var newVal = !currentVal;
+  try {
+    var res = await fetch('/listings/' + listingId + '/loved', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({loved: newVal})
+    });
+    if (res.ok) {
+      var listing = allListings.find(function(l) { return l.id === listingId; });
+      if (listing) listing.loved = newVal;
+      btn.textContent = newVal ? '\u2764 Loved \u2014 click to undo' : '\u2764 Love';
+      btn.className = 'loved-btn' + (newVal ? ' loved' : '');
+      var card = document.getElementById('card-' + listingId);
+      if (card) {
+        var summary = card.querySelector('.card-summary');
+        var existingBadge = summary ? summary.querySelector('.loved-badge') : null;
+        if (newVal && !existingBadge && summary) {
+          var arrow = summary.querySelector('.card-expand-arrow');
+          var badge = el('span', {className: 'loved-badge'}, '\u2764 Loved');
+          summary.insertBefore(badge, arrow);
+        } else if (!newVal && existingBadge) {
+          existingBadge.remove();
+        }
+      }
+      updateFilterCounts();
+      showToast(newVal ? 'Marked as Loved' : 'Loved removed');
+    } else {
+      var err = await res.json();
+      showToast('Error: ' + (err.detail || 'failed'));
+    }
+  } catch (e) {
+    showToast('Network error');
+  }
+}
+
 /* ==== Mark as Sold ==== */
 async function markSold(listingId) {
   if (!confirm('Remove this listing as sold?')) return;
@@ -2384,6 +2522,30 @@ function updateLastPolled() {
   h = h % 12 || 12;
   var timeStr = h + ':' + (m < 10 ? '0' : '') + m + ' ' + ampm;
   document.getElementById('lastPolled').textContent = 'Last checked: ' + timeStr;
+}
+
+
+/* ==== Live Status Check ==== */
+async function checkLiveStatus(listingId, currentStatus, cardEl) {
+  try {
+    var res = await fetch('/listings/' + listingId + '/live-status');
+    if (!res.ok) return;
+    var data = await res.json();
+    if (data.status === 'unknown') return;
+    var newStatus = data.status.toLowerCase();
+    var oldStatus = (currentStatus || '').toLowerCase();
+    if (newStatus !== 'active' && newStatus !== oldStatus) {
+      var detailInner = cardEl.querySelector('.card-detail-inner');
+      if (detailInner) {
+        var bannerClass = 'status-banner ' + (newStatus === 'sold' || newStatus === 'closed' ? 'sold' : 'pending');
+        var bannerText = '\u26A0\uFE0F Status updated: Now ' + data.status;
+        var banner = el('div', {className: bannerClass}, bannerText);
+        detailInner.insertBefore(banner, detailInner.firstChild);
+      }
+    }
+  } catch (e) {
+    /* Best-effort — ignore errors */
+  }
 }
 
 /* ==== Init ==== */

@@ -422,38 +422,122 @@ _CONDITION_KEYWORDS: list[tuple[str, int]] = [
 ]
 
 
+def _detect_renovation_signal(description: str | None) -> tuple[str, list[str]]:
+    """Detect renovation signal strength from listing description.
+
+    Returns:
+        Tuple of (signal_level, matched_keywords) where signal_level is one of:
+          - "strong": gut/full renovation, new construction on old lot
+          - "moderate": partial renovation, updated kitchen/bath
+          - "none": no renovation signal detected
+    """
+    if not description:
+        return "none", []
+
+    desc_lower = description.lower()
+    matched: list[str] = []
+
+    # Strong renovation signals — major whole-house renovation
+    _STRONG_RENOVATION = [
+        "gut renovated",
+        "gut renovation",
+        "fully renovated",
+        "completely renovated",
+        "totally renovated",
+        "top to bottom renovation",
+        "top-to-bottom renovation",
+        "down to the studs",
+        "new construction",
+        "newly built",
+        "rebuilt",
+        "ground-up renovation",
+    ]
+    for kw in _STRONG_RENOVATION:
+        if kw in desc_lower:
+            matched.append(kw)
+    if matched:
+        return "strong", matched
+
+    # Moderate renovation signals — partial or system-level updates
+    _MODERATE_RENOVATION = [
+        "recently renovated",
+        "recently updated",
+        "renovated kitchen",
+        "renovated bath",
+        "updated kitchen",
+        "updated bath",
+        "updated bathroom",
+        "new kitchen",
+        "new bath",
+        "new bathroom",
+        "new roof",
+        "new hvac",
+        "new windows",
+        "new floors",
+        "renovated",
+        "move-in ready",
+        "turnkey",
+    ]
+    for kw in _MODERATE_RENOVATION:
+        if kw in desc_lower:
+            matched.append(kw)
+    if matched:
+        return "moderate", matched
+
+    return "none", []
+
+
 def score_age_condition(year_built: int | None, description: str | None) -> dict:
     """Compute an age/condition score adjustment from year_built and listing description.
 
+    Age penalties are softened relative to earlier versions (pre-1940 was -22, now -12).
+    Renovation keywords in the description can further reduce the age penalty:
+      - Strong renovation signal: age penalty reduced by 70%
+      - Moderate renovation signal: age penalty reduced by 40%
+
     Returns:
         dict with keys:
-          - age_adjustment (int): point delta from age tier (-22 to 0)
+          - age_adjustment (int): point delta from age tier after renovation override
           - condition_adjustment (int): point delta from keyword scan (clamped -25 to +15)
           - age_tier (str): human-readable tier label
           - keywords_matched (list[str]): matched condition keywords
+          - renovation_signal (str): "strong", "moderate", or "none"
+          - renovation_keywords (list[str]): renovation keywords matched
+          - raw_age_adjustment (int): age penalty before renovation override
     """
-    # --- Age tier ---
+    # --- Age tier (softened penalties) ---
     if year_built is None:
         age_adj = 0
         tier = "unknown"
     elif year_built < 1940:
-        age_adj = -22
+        age_adj = -12
         tier = "pre-1940"
     elif year_built < 1960:
-        age_adj = -18
+        age_adj = -10
         tier = "1940-1959"
     elif year_built < 1975:
-        age_adj = -12
+        age_adj = -8
         tier = "1960-1974"
     elif year_built < 1990:
         age_adj = -6
         tier = "1975-1989"
     elif year_built < 2005:
-        age_adj = -2
+        age_adj = -3
         tier = "1990-2004"
     else:
         age_adj = 0
         tier = "2005+"
+
+    raw_age_adj = age_adj
+
+    # --- Renovation override: reduce age penalty based on renovation signals ---
+    renovation_signal, renovation_keywords = _detect_renovation_signal(description)
+    if age_adj < 0 and renovation_signal == "strong":
+        # Strong renovation: reduce age penalty by 70% (e.g. pre-1940 -12 → -4)
+        age_adj = round(age_adj * 0.3)
+    elif age_adj < 0 and renovation_signal == "moderate":
+        # Moderate renovation: reduce age penalty by 40% (e.g. pre-1940 -12 → -7)
+        age_adj = round(age_adj * 0.6)
 
     # --- Condition keywords ---
     condition_adj = 0
@@ -473,6 +557,9 @@ def score_age_condition(year_built: int | None, description: str | None) -> dict
         "condition_adjustment": condition_adj,
         "age_tier": tier,
         "keywords_matched": matched,
+        "renovation_signal": renovation_signal,
+        "renovation_keywords": renovation_keywords,
+        "raw_age_adjustment": raw_age_adj,
     }
 
 
@@ -740,25 +827,16 @@ _geocode_cache: dict[str, dict | None] = {}
 _power_line_cache: dict[str, dict | None] = {}
 
 
-def _geocode_address(address: str | None, town: str | None, state: str | None) -> dict | None:
-    """Geocode an address using Nominatim (free OSM geocoder).
+def _nominatim_query(query: str) -> dict | None:
+    """Execute a single Nominatim geocoding request with rate limiting.
 
-    Returns {"lat": float, "lon": float} or None on failure.
-    Rate-limited to 1 req/s per Nominatim ToS.
+    Returns {"lat": float, "lon": float} or None.
     """
     global _nominatim_last_call
-    if not address or not town:
-        return None
-    cache_key = f"{(address or '').lower()}|{(town or '').lower()}|{(state or '').lower()}"
-    if cache_key in _geocode_cache:
-        return _geocode_cache[cache_key]
-
-    # Rate limit
     elapsed = time.time() - _nominatim_last_call
     if elapsed < _NOMINATIM_RATE_LIMIT:
         time.sleep(_NOMINATIM_RATE_LIMIT - elapsed)
 
-    query = f"{address}, {town}, {state or 'NY'}"
     try:
         with httpx.Client(timeout=10) as client:
             resp = client.get(
@@ -770,14 +848,90 @@ def _geocode_address(address: str | None, town: str | None, state: str | None) -
             resp.raise_for_status()
             results = resp.json()
             if results:
-                result = {"lat": float(results[0]["lat"]), "lon": float(results[0]["lon"])}
-                _geocode_cache[cache_key] = result
-                return result
+                return {"lat": float(results[0]["lat"]), "lon": float(results[0]["lon"])}
     except Exception as e:
         logger.debug(f"Nominatim geocoding failed for {query}: {e}")
-
-    _geocode_cache[cache_key] = None
     return None
+
+
+_GOOGLE_GEOCODE_URL = "https://maps.googleapis.com/maps/api/geocode/json"
+
+
+def _google_geocode(address: str, town: str, state: str | None) -> dict | None:
+    """Fallback geocoder using Google Geocoding API.
+
+    Only called when Nominatim fails. Requires settings.google_maps_api_key.
+    Returns {"lat": float, "lon": float} or None.
+    """
+    if not settings.google_maps_api_key:
+        return None
+
+    query = f"{address}, {town}, {state or 'NY'}"
+    try:
+        with httpx.Client(timeout=10) as client:
+            resp = client.get(
+                _GOOGLE_GEOCODE_URL,
+                params={
+                    "address": query,
+                    "key": settings.google_maps_api_key,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+        results = data.get("results", [])
+        if results:
+            location = results[0].get("geometry", {}).get("location", {})
+            lat = location.get("lat")
+            lng = location.get("lng")
+            if lat is not None and lng is not None:
+                logger.info(f"Google geocoded: {query} → ({lat}, {lng})")
+                return {"lat": float(lat), "lon": float(lng)}
+    except Exception as e:
+        logger.debug(f"Google geocoding failed for {query}: {e}")
+    return None
+
+
+def _geocode_address(address: str | None, town: str | None, state: str | None) -> dict | None:
+    """Geocode an address using Nominatim (free OSM geocoder) with fallbacks.
+
+    Strategy:
+    1. Nominatim: "{address}, {town}, {state}"
+    2. Nominatim retry: "{address}, {town}, NY" (force NY)
+    3. Nominatim fallback: "{town}, {state}" (town centroid)
+    4. Google Geocoding API fallback (if API key configured)
+
+    Returns {"lat": float, "lon": float} or None on failure.
+    Rate-limited to 1 req/s per Nominatim ToS.
+    """
+    if not address or not town:
+        return None
+    cache_key = f"{(address or '').lower()}|{(town or '').lower()}|{(state or '').lower()}"
+    if cache_key in _geocode_cache:
+        return _geocode_cache[cache_key]
+
+    # Try 1: Full address with provided state
+    query1 = f"{address}, {town}, {state or 'NY'}"
+    result = _nominatim_query(query1)
+
+    # Try 2: Force NY state (common case for Westchester)
+    if not result and state and state.upper() != "NY":
+        query2 = f"{address}, {town}, NY"
+        result = _nominatim_query(query2)
+
+    # Try 3: Town centroid (better than nothing for distance calculations)
+    if not result:
+        query3 = f"{town}, {state or 'NY'}"
+        result = _nominatim_query(query3)
+        if result:
+            logger.info(f"Geocoded to town centroid: {town}, {state or 'NY'}")
+
+    # Try 4: Google Geocoding API fallback
+    if not result:
+        result = _google_geocode(address, town, state)
+
+    _geocode_cache[cache_key] = result
+    return result
 
 
 def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -1258,28 +1412,51 @@ def parse_garage_count(description: str | None) -> dict:
         return {"garage_count": 1, "garage_type": "carport", "source": "description_parse"}
 
     # Numeric patterns: "2-car garage", "2 car garage", "3-car attached", etc.
+    # Expanded: "attached 2-car", "2 car attached", "detached garage"
     m = re.search(
         r"\b([1-9])\s*[-\u2013]?\s*car\b(?:\s+(?:attached|detached))?\s*garage\b"
         r"|\bgarage\s+(?:with\s+)?([1-9])\s*[-\u2013]?\s*car\b"
-        r"|\b([1-9])\s*[-\u2013]?\s*car\s+(?:attached|detached)\b",
+        r"|\b([1-9])\s*[-\u2013]?\s*car\s+(?:attached|detached)\b"
+        r"|\b(?:attached|detached)\s+([1-9])\s*[-\u2013]?\s*car\b",
         text,
     )
     if m:
         count = int(next(g for g in m.groups() if g is not None))
         garage_type = None
-        if "attached" in text[max(0, m.start() - 20) : m.end() + 20]:
+        # Broader context window (60 chars) for attached/detached detection
+        ctx_start = max(0, m.start() - 40)
+        ctx_end = min(len(text), m.end() + 40)
+        context = text[ctx_start:ctx_end]
+        if "attached" in context:
             garage_type = "attached"
-        elif "detached" in text[max(0, m.start() - 20) : m.end() + 20]:
+        elif "detached" in context:
             garage_type = "detached"
         return {"garage_count": count, "garage_type": garage_type, "source": "description_parse"}
 
     # Generic "garage" without count — assume 1
     if re.search(r"\bgarage\b", text):
         garage_type = None
-        if re.search(r"\battached\b", text):
-            garage_type = "attached"
-        elif re.search(r"\bdetached\b", text):
-            garage_type = "detached"
+        # Search broader context around garage mentions for attached/detached
+        for gm in re.finditer(r"\bgarage\b", text):
+            ctx_start = max(0, gm.start() - 60)
+            ctx_end = min(len(text), gm.end() + 60)
+            context = text[ctx_start:ctx_end]
+            if "attached" in context:
+                garage_type = "attached"
+                break
+            elif "detached" in context:
+                garage_type = "detached"
+                break
+        # If still no type from context, check full description
+        if garage_type is None:
+            if re.search(r"\battached\s+(?:garage|2[\s-]?car|1[\s-]?car|3[\s-]?car)\b", text):
+                garage_type = "attached"
+            elif re.search(r"\bdetached\s+(?:garage|2[\s-]?car|1[\s-]?car|3[\s-]?car)\b", text):
+                garage_type = "detached"
+            elif re.search(r"\battached\b", text) and not re.search(r"\bdetached\b", text):
+                garage_type = "attached"
+            elif re.search(r"\bdetached\b", text) and not re.search(r"\battached\b", text):
+                garage_type = "detached"
         return {"garage_count": 1, "garage_type": garage_type, "source": "description_parse"}
 
     return {"garage_count": None, "garage_type": None, "source": "description_parse"}
@@ -1394,23 +1571,45 @@ def parse_basement(description: str | None) -> dict:
         return {"has_basement": False, "basement_type": None, "source": "description_parse"}
 
     # Walk-out basement (most desirable)
-    if re.search(r"\bwalk[\s-]?out\s+basement\b|\bwalkout\s+basement\b|\bwalk[\s-]?out\s+lower\b", text):
+    if re.search(r"\bwalk[\s-]?out\s+(?:basement|lower)\b|\bwalkout\s+(?:basement|lower)\b|\bbasement.*walk[\s-]?out\b", text):
         return {"has_basement": True, "basement_type": "walk_out", "source": "description_parse"}
 
     # Partially finished (check BEFORE finished to avoid false match on "partially finished")
-    if re.search(r"\bpartially?\s+finished\s+basement\b|\bhalf\s+finished\s+basement\b|\bpartial(?:ly)?\s+finished\s+(?:lower|basement)\b", text):
+    if re.search(r"\bpartially?\s+finished\s+(?:basement|lower)\b|\bhalf\s+finished\s+(?:basement|lower)\b|\bpartial(?:ly)?\s+finished\s+(?:lower|basement)\b", text):
         return {"has_basement": True, "basement_type": "partially_finished", "source": "description_parse"}
 
-    # Finished basement
-    if re.search(r"\bfinished\s+basement\b|\bfully\s+finished\s+(?:lower|basement)\b|\bbasement.*finished\b", text):
+    # Finished basement — expanded patterns
+    if re.search(
+        r"\bfinished\s+basement\b"
+        r"|\bfully\s+finished\s+(?:lower|basement)\b"
+        r"|\bbasement.*finished\b"
+        r"|\bfinished\s+lower\s+level\b"
+        r"|\bfinished\s+lower\b"
+        r"|\blower\s+level\s+(?:family|rec(?:reation)?|play|media|game)\s*room\b"
+        r"|\blower\s+level\s+(?:with|has)\s+(?:full\s+)?bath\b"
+        r"|\blower\s+level\s+bed(?:room)?\b"
+        r"|\b(?:rec(?:reation)?|media|game|theater|theatre)\s+room\s+(?:in\s+)?(?:the\s+)?(?:basement|lower)\b"
+        r"|\bbasement\s+(?:with|has|features?|includes?)\s+(?:.*?)(?:family\s+room|rec\s*room|bed(?:room)?|full\s+bath|play\s*room|media\s+room)\b"
+        r"|\begress\s+window\b"
+        r"|\blegal\s+(?:bed(?:room)?|egress)\b",
+        text,
+    ):
         return {"has_basement": True, "basement_type": "finished", "source": "description_parse"}
 
     # Unfinished basement
     if re.search(r"\bunfinished\s+basement\b|\bfull\s+basement\b|\bbasement\s+(?:with\s+)?(?:utility|storage|laundry|mechanicals)\b", text):
         return {"has_basement": True, "basement_type": "unfinished", "source": "description_parse"}
 
-    # Generic basement mention
-    if re.search(r"\bbasement\b|\blower\s+level\b|\bfinished\s+lower\b", text):
+    # Generic basement mention — try to infer type from context clues
+    if re.search(r"\bbasement\b|\blower\s+level\b", text):
+        # Check for finished signals in broader context
+        if re.search(
+            r"\bbonus\s+room\b|\bextra\s+room\b|\badditional\s+(?:living\s+)?room\b"
+            r"|\bin[\s-]?law\s+(?:suite|apartment)\b|\bau[\s-]?pair\b"
+            r"|\bman\s*cave\b|\bshe\s*shed\b|\bhome\s*(?:office|gym|theater)\b",
+            text,
+        ):
+            return {"has_basement": True, "basement_type": "finished", "source": "description_parse"}
         return {"has_basement": True, "basement_type": None, "source": "description_parse"}
 
     return {"has_basement": None, "basement_type": None, "source": "description_parse"}
@@ -1448,3 +1647,207 @@ def parse_year_built(description: str | None) -> int | None:
             return year
 
     return None
+
+
+# ---------------------------------------------------------------------------
+# Property type inference (no API — heuristic from description + listing data)
+# ---------------------------------------------------------------------------
+
+_PROPERTY_TYPE_PATTERNS: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"\bsingle[\s-]?family(?:\s+(?:residence|home|house))?\b", re.IGNORECASE), "Single Family"),
+    (re.compile(r"\b(?:SFH|SFR)\b"), "Single Family"),
+    (re.compile(r"\bcondo(?:minium)?\b", re.IGNORECASE), "Condo"),
+    (re.compile(r"\btownhouse\b|\btownhome\b", re.IGNORECASE), "Townhouse"),
+    (re.compile(r"\bco[\s-]?op\b|\bcooperative\b", re.IGNORECASE), "Co-op"),
+    (re.compile(r"\bmulti[\s-]?family\b", re.IGNORECASE), "Multi Family"),
+]
+
+
+def infer_property_type(listing_row: dict) -> str | None:
+    """Infer property type from listing description and attributes.
+
+    Strategy:
+    1. Check description for explicit property type keywords.
+    2. Fallback: if bedrooms >= 3 AND sqft >= 1500, infer "Single Family"
+       (statistically dominant for Westchester/suburban search area).
+
+    Args:
+        listing_row: dict with keys like 'description', 'bedrooms', 'sqft', 'property_type'
+
+    Returns:
+        Inferred property type string or None if cannot determine.
+    """
+    desc = listing_row.get("description") or ""
+    if desc:
+        desc_lower = desc.lower()
+        for pattern, label in _PROPERTY_TYPE_PATTERNS:
+            if pattern.search(desc_lower):
+                return label
+
+    # Fallback heuristic: suburban SFH inference for Westchester area
+    bedrooms = listing_row.get("bedrooms")
+    sqft = listing_row.get("sqft")
+    if bedrooms is not None and sqft is not None:
+        if bedrooms >= 3 and sqft >= 1500:
+            return "Single Family"
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# NJ property tax (MOD-IV / NJ Parcels ArcGIS)
+# ---------------------------------------------------------------------------
+
+_NJ_PARCELS_URL = (
+    "https://services2.arcgis.com/XVOqAjTOJ5P6ngMu/arcgis/rest/services/"
+    "NJ_Parcels/FeatureServer/0/query"
+)
+
+
+def fetch_property_tax_nj(
+    address: str | None,
+    town: str | None,
+) -> dict | None:
+    """Fetch NJ property tax data from NJ GIS parcel layer (ArcGIS REST).
+
+    Free, no API key required. Covers all NJ municipalities.
+
+    Args:
+        address: Street address (e.g. "123 Main St")
+        town: Municipality name (e.g. "Ridgewood")
+
+    Returns dict with:
+      - assessed_value (int | None): taxable value
+      - property_use (str | None): property use code description
+      - building_desc (str | None): building description
+      - address (str): matched address
+      - municipality (str): matched municipality
+      - source (str): "nj_parcels"
+    Or None if not found.
+    """
+    if not address or not town:
+        return None
+
+    cache_key = f"nj:{address}|{town}"
+    if cache_key in _tax_cache:
+        return _tax_cache[cache_key]
+
+    # Parse street number for matching
+    addr_upper = address.strip().upper()
+    town_upper = town.strip().upper()
+
+    try:
+        where = f"PROP_LOC LIKE '{addr_upper}%' AND MUNI_NAME='{town_upper}'"
+        params = {
+            "where": where,
+            "outFields": "PROP_LOC,TAXABLE_VA,PROP_USE,BLDG_DESC,MUNI_NAME",
+            "f": "json",
+            "resultRecordCount": 1,
+        }
+
+        with httpx.Client(timeout=10.0) as client:
+            resp = client.get(_NJ_PARCELS_URL, params=params)
+            resp.raise_for_status()
+            data = resp.json()
+
+        features = data.get("features", [])
+        if not features:
+            _tax_cache[cache_key] = None
+            return None
+
+        attrs = features[0].get("attributes", {})
+        result = {
+            "assessed_value": int(attrs.get("TAXABLE_VA") or 0) or None,
+            "property_use": attrs.get("PROP_USE"),
+            "building_desc": attrs.get("BLDG_DESC"),
+            "address": attrs.get("PROP_LOC"),
+            "municipality": attrs.get("MUNI_NAME"),
+            "source": "nj_parcels",
+        }
+        _tax_cache[cache_key] = result
+        logger.info(f"NJ parcel data found for {address}, {town}: assessed={result['assessed_value']}")
+        return result
+
+    except Exception as e:
+        logger.debug(f"NJ property tax lookup failed for {address}, {town}: {e}")
+        _tax_cache[cache_key] = None
+        return None
+
+
+# ---------------------------------------------------------------------------
+# CT property tax (OPM grand list data via data.ct.gov)
+# ---------------------------------------------------------------------------
+
+_CT_OPM_URL = "https://data.ct.gov/resource/hc7c-93kq.json"
+
+
+def fetch_property_tax_ct(
+    address: str | None,
+    town: str | None,
+) -> dict | None:
+    """Fetch CT property tax data from CT OPM grand list (data.ct.gov SODA API).
+
+    Free, no API key required. Covers all CT municipalities.
+
+    Args:
+        address: Street address (e.g. "45 Oak Ave")
+        town: Town name (e.g. "Greenwich")
+
+    Returns dict with:
+      - assessed_value (int | None): assessed value
+      - gross_building_value (int | None): gross building value
+      - address (str): matched address
+      - town (str): matched town
+      - source (str): "ct_opm"
+    Or None if not found.
+    """
+    if not address or not town:
+        return None
+
+    cache_key = f"ct:{address}|{town}"
+    if cache_key in _tax_cache:
+        return _tax_cache[cache_key]
+
+    # Parse street number and street name from address
+    addr_parts = address.strip().split(None, 1)
+    if len(addr_parts) < 2:
+        return None
+    number = addr_parts[0]
+    street = addr_parts[1].upper()
+    town_upper = town.strip().upper()
+
+    try:
+        where = (
+            f"street_address like '{number} {street}%'"
+            f" AND upper(town)='{town_upper}'"
+        )
+        params = {
+            "$where": where,
+            "$limit": 1,
+        }
+
+        with httpx.Client(timeout=10.0) as client:
+            resp = client.get(_CT_OPM_URL, params=params)
+            resp.raise_for_status()
+            data = resp.json()
+
+        if not data:
+            _tax_cache[cache_key] = None
+            return None
+
+        row = data[0]
+        result = {
+            "assessed_value": int(float(row.get("assessed_value") or 0)) or None,
+            "gross_building_value": int(float(row.get("gross_building_value") or 0)) or None,
+            "address": row.get("street_address"),
+            "town": row.get("town"),
+            "source": "ct_opm",
+        }
+        _tax_cache[cache_key] = result
+        logger.info(f"CT OPM tax data found for {address}, {town}: assessed={result['assessed_value']}")
+        return result
+
+    except Exception as e:
+        logger.debug(f"CT property tax lookup failed for {address}, {town}: {e}")
+        _tax_cache[cache_key] = None
+        return None

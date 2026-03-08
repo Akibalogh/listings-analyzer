@@ -543,6 +543,7 @@ def _migrate_add_columns():
         ("listings", "enriched_at", "TEXT"),
         ("listings", "tour_requested", "BOOLEAN DEFAULT FALSE"),
         ("listings", "passed", "BOOLEAN DEFAULT FALSE"),
+        ("listings", "loved", "BOOLEAN DEFAULT FALSE"),
         ("listings", "year_built", "INTEGER"),
         ("listings", "list_date", "TEXT"),
         ("listings", "property_tax_json", "TEXT"),
@@ -564,6 +565,7 @@ def _migrate_add_columns():
         ("scores", "ai_reasoning", "TEXT"),
         ("scores", "property_summary", "TEXT"),
         ("scores", "scored_at", "TEXT"),
+        ("listings", "alerted_at", "TEXT"),
     ]
     for table, column, col_type in alterations:
         try:
@@ -867,6 +869,17 @@ def mark_listing_passed(listing_id: int, passed: bool):
         )
 
 
+def mark_listing_loved(listing_id: int, loved: bool):
+    """Mark (or un-mark) a listing as loved (post-tour favorite)."""
+    ph = _placeholder()
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            f"UPDATE listings SET loved = {ph} WHERE id = {ph}",
+            (loved, listing_id),
+        )
+
+
 # --- Listing queries for re-scoring ---
 
 
@@ -915,3 +928,33 @@ def get_listing_by_id(listing_id: int) -> dict | None:
             columns = [desc[0] for desc in cur.description]
             return dict(zip(columns, row))
         return dict(row)
+
+
+# --- Email alert dedup ---
+
+
+def is_listing_alerted(listing_id: int) -> bool:
+    """Check if an alert has already been sent for this listing."""
+    ph = _placeholder()
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            f"SELECT alerted_at FROM listings WHERE id = {ph}", (listing_id,)
+        )
+        row = cur.fetchone()
+        if not row:
+            return False
+        val = row[0] if settings.is_postgres else row["alerted_at"]
+        return val is not None
+
+
+def mark_alerted(listing_id: int):
+    """Set the alerted_at timestamp for a listing (marks alert as sent)."""
+    ph = _placeholder()
+    now = datetime.now(timezone.utc).isoformat()
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            f"UPDATE listings SET alerted_at = {ph} WHERE id = {ph}",
+            (now, listing_id),
+        )
