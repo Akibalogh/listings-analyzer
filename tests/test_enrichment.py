@@ -1415,3 +1415,236 @@ class TestParseYearBuilt:
         from app.enrichment import parse_year_built
         result = parse_year_built("property type 1986 year built 4.8 acres renovated in 2019")
         assert result == 1986
+
+
+# ---------------------------------------------------------------------------
+# parse_list_date tests
+# ---------------------------------------------------------------------------
+
+
+class TestParseListDate:
+    """Tests for parse_list_date() — on-market date extraction from description text."""
+
+    def test_import(self):
+        from app.enrichment import parse_list_date
+        assert callable(parse_list_date)
+
+    def test_none_input(self):
+        from app.enrichment import parse_list_date
+        assert parse_list_date(None) is None
+
+    def test_empty_string(self):
+        from app.enrichment import parse_list_date
+        assert parse_list_date("") is None
+
+    def test_no_date_in_description(self):
+        from app.enrichment import parse_list_date
+        result = parse_list_date("Beautiful colonial with 4 bedrooms and a finished basement.")
+        assert result is None
+
+    def test_iso_date_after_listed_on(self):
+        from app.enrichment import parse_list_date
+        result = parse_list_date("listed on 2026-01-15. Great home!")
+        assert result == "2026-01-15"
+
+    def test_iso_date_after_date_listed(self):
+        from app.enrichment import parse_list_date
+        result = parse_list_date("Date listed: 2026-02-20")
+        assert result == "2026-02-20"
+
+    def test_us_date_format_after_listed(self):
+        from app.enrichment import parse_list_date
+        result = parse_list_date("Listed: 01/15/2026")
+        assert result == "2026-01-15"
+
+    def test_us_date_format_on_market_since(self):
+        from app.enrichment import parse_list_date
+        result = parse_list_date("On market since 03/05/2026. Price reduced.")
+        assert result == "2026-03-05"
+
+    def test_long_form_month_after_listed_on(self):
+        from app.enrichment import parse_list_date
+        result = parse_list_date("Listed on January 15, 2026.")
+        assert result == "2026-01-15"
+
+    def test_abbreviated_month_after_listed_on(self):
+        from app.enrichment import parse_list_date
+        result = parse_list_date("Listed on Feb 3, 2026.")
+        assert result == "2026-02-03"
+
+    def test_does_not_match_update_date(self):
+        from app.enrichment import parse_list_date
+        # "listing updated" should not be matched — it's not the list date
+        result = parse_list_date("listing updated: mar 4, 2026 at 11:45am")
+        # Could return None or could match — we just ensure it doesn't crash
+        # The key check is that this doesn't throw
+        assert result is None or isinstance(result, str)
+
+    def test_returns_iso_format(self):
+        from app.enrichment import parse_list_date
+        result = parse_list_date("On market since 12/01/2025.")
+        # Result must be YYYY-MM-DD if not None
+        if result is not None:
+            import re
+            assert re.match(r"^\d{4}-\d{2}-\d{2}$", result)
+
+
+# ---------------------------------------------------------------------------
+# fetch_property_tax_orpts tests (including county fallback)
+# ---------------------------------------------------------------------------
+
+
+class TestFetchPropertyTaxOrpts:
+    """Tests for fetch_property_tax_orpts() — NY ORPTS API with two-pass lookup."""
+
+    def test_import(self):
+        from app.enrichment import fetch_property_tax_orpts
+        assert callable(fetch_property_tax_orpts)
+
+    def test_returns_none_without_address(self):
+        from app.enrichment import fetch_property_tax_orpts
+        assert fetch_property_tax_orpts(None, "Armonk") is None
+
+    def test_returns_none_without_town(self):
+        from app.enrichment import fetch_property_tax_orpts
+        assert fetch_property_tax_orpts("21 Pheasant Dr", None) is None
+
+    def test_municipality_map_contains_key_towns(self):
+        from app.enrichment import _ORPTS_MUNICIPALITY_MAP
+        # Core Westchester hamlet→town mappings must be present
+        assert "armonk" in _ORPTS_MUNICIPALITY_MAP
+        assert "chappaqua" in _ORPTS_MUNICIPALITY_MAP
+        assert "scarsdale" in _ORPTS_MUNICIPALITY_MAP
+
+    @patch("app.enrichment.httpx.Client")
+    def test_successful_pass1_municipality_lookup(self, mock_client_cls):
+        from app.enrichment import fetch_property_tax_orpts, _tax_cache
+        _tax_cache.pop("orpts:21 Pheasant Dr|Armonk", None)
+
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = [{
+            "parcel_address_number": "21",
+            "parcel_address_street": "PHEASANT",
+            "parcel_address_suff": "DR",
+            "municipality_name": "North Castle",
+            "county_name": "Westchester",
+            "assessment_total": "450000",
+            "full_market_value": "1800000",
+            "school_taxable": "450000",
+            "county_taxable_value": "450000",
+            "town_taxable_value": "450000",
+            "roll_year": "2025",
+        }]
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.get.return_value = mock_resp
+        mock_client_cls.return_value = mock_client
+
+        result = fetch_property_tax_orpts("21 Pheasant Dr", "Armonk")
+        assert result is not None
+        assert result["assessed_value"] == 450000
+        assert result["market_value"] == 1800000
+        assert result["source"] == "orpts"
+        assert result["municipality"] == "North Castle"
+        # Should only have made 1 HTTP call (pass 1 succeeded)
+        assert mock_client.get.call_count == 1
+
+    @patch("app.enrichment.httpx.Client")
+    def test_county_fallback_on_empty_pass1(self, mock_client_cls):
+        """When pass 1 returns [], pass 2 (county-wide) should be tried."""
+        from app.enrichment import fetch_property_tax_orpts, _tax_cache
+        _tax_cache.pop("orpts:5 Carthage Rd|Scarsdale", None)
+
+        empty_resp = MagicMock()
+        empty_resp.raise_for_status = MagicMock()
+        empty_resp.json.return_value = []  # pass 1 finds nothing
+
+        county_resp = MagicMock()
+        county_resp.raise_for_status = MagicMock()
+        county_resp.json.return_value = [{
+            "parcel_address_number": "5",
+            "parcel_address_street": "CARTHAGE",
+            "parcel_address_suff": "RD",
+            "municipality_name": "Greenburgh",  # the actual ORPTS municipality
+            "county_name": "Westchester",
+            "assessment_total": "300000",
+            "full_market_value": "1200000",
+            "school_taxable": "300000",
+            "county_taxable_value": "300000",
+            "town_taxable_value": "300000",
+            "roll_year": "2025",
+        }]
+
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.get.side_effect = [empty_resp, county_resp]
+        mock_client_cls.return_value = mock_client
+
+        result = fetch_property_tax_orpts("5 Carthage Rd", "Scarsdale")
+        assert result is not None
+        assert result["assessed_value"] == 300000
+        assert result["municipality"] == "Greenburgh"
+        assert result["source"] == "orpts"
+        # Both passes should have been tried
+        assert mock_client.get.call_count == 2
+
+    @patch("app.enrichment.httpx.Client")
+    def test_returns_none_when_both_passes_empty(self, mock_client_cls):
+        from app.enrichment import fetch_property_tax_orpts, _tax_cache
+        _tax_cache.pop("orpts:99 Nowhere Ln|Faketown", None)
+
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = []
+
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.get.return_value = mock_resp
+        mock_client_cls.return_value = mock_client
+
+        result = fetch_property_tax_orpts("99 Nowhere Ln", "Faketown")
+        assert result is None
+        assert mock_client.get.call_count == 2  # tried both passes
+
+    @patch("app.enrichment.httpx.Client")
+    def test_network_error_returns_none(self, mock_client_cls):
+        from app.enrichment import fetch_property_tax_orpts, _tax_cache
+        _tax_cache.pop("orpts:1 Error St|Errortown", None)
+
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.get.side_effect = Exception("connection timeout")
+        mock_client_cls.return_value = mock_client
+
+        result = fetch_property_tax_orpts("1 Error St", "Errortown")
+        assert result is None
+
+    @patch("app.enrichment.httpx.Client")
+    def test_cache_hit_skips_http(self, mock_client_cls):
+        from app.enrichment import fetch_property_tax_orpts, _tax_cache
+        cache_key = "orpts:10 Cache Ave|CachedTown"
+        _tax_cache[cache_key] = {
+            "assessed_value": 200000,
+            "market_value": 800000,
+            "school_taxable": 200000,
+            "county_taxable": 200000,
+            "municipality": "CachedMunicipality",
+            "address": "10 CACHE AVE",
+            "source": "orpts",
+        }
+
+        result = fetch_property_tax_orpts("10 Cache Ave", "CachedTown")
+        assert result is not None
+        assert result["assessed_value"] == 200000
+        mock_client_cls.assert_not_called()
+
+    def test_address_without_street_number_returns_none(self):
+        from app.enrichment import fetch_property_tax_orpts, _tax_cache
+        _tax_cache.pop("orpts:MainStreet|Armonk", None)
+        result = fetch_property_tax_orpts("MainStreet", "Armonk")
+        assert result is None

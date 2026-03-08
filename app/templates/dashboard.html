@@ -203,16 +203,15 @@
     background: rgba(139,92,246,0.15);
     border: 1px solid rgba(139,92,246,0.3);
     color: #c4b5fd;
-    padding: 7px 14px;
+    padding: 6px 10px;
     border-radius: 8px;
-    font-size: 13px;
-    font-weight: 600;
+    font-size: 20px;
+    line-height: 1;
     cursor: pointer;
     transition: all 0.2s;
     display: flex;
     align-items: center;
-    gap: 6px;
-    white-space: nowrap;
+    justify-content: center;
   }
   .settings-btn:hover { color: #fff; background: rgba(139,92,246,0.25); border-color: rgba(139,92,246,0.5); }
   .settings-btn:active { transform: scale(0.97); }
@@ -1415,7 +1414,7 @@
       <div class="pref-row">
         <div class="pref-label">
           Hide passed listings
-          <small>Passed homes won't appear in All, Non-Reject, or other views</small>
+          <small>Passed homes are hidden from All view; still visible via the Passed chip</small>
         </div>
         <label class="toggle-switch">
           <input type="checkbox" id="prefHidePassed" onchange="saveDisplayPrefs()">
@@ -1424,11 +1423,14 @@
       </div>
 
       <div class="pref-row">
-        <div class="pref-label">Default filter on load</div>
-        <select class="pref-select" id="prefDefaultFilter" onchange="saveDisplayPrefs()">
-          <option value="all">All</option>
-          <option value="not-reject">Non-Reject</option>
-        </select>
+        <div class="pref-label">
+          Hide low-scoring listings
+          <small>Weak Match and Reject listings won't appear by default</small>
+        </div>
+        <label class="toggle-switch">
+          <input type="checkbox" id="prefHideLowScore" onchange="saveDisplayPrefs()">
+          <span class="toggle-track"></span>
+        </label>
       </div>
 
       <div class="pref-row">
@@ -1489,7 +1491,7 @@ var currentUser = null;
 var googleClientId = null;
 
 /* ==== DISPLAY PREFERENCES (localStorage) ==== */
-var _displayPrefs = { hidePassed: true, defaultFilter: 'all', defaultSort: 'score-desc' };
+var _displayPrefs = { hidePassed: true, hideLowScore: false, defaultSort: 'score-desc' };
 
 function loadDisplayPrefs() {
   try {
@@ -1499,18 +1501,13 @@ function loadDisplayPrefs() {
       _displayPrefs = Object.assign(_displayPrefs, parsed);
     }
   } catch(e) {}
-  /* Apply defaults on first load (no URL-driven filter override) */
-  var urlFilter = _filterRoutes[location.pathname];
-  if (!urlFilter && _displayPrefs.defaultFilter !== 'all') {
-    activeFilter = _displayPrefs.defaultFilter;
-  }
   var sortEl = document.getElementById('sortSelect');
   if (sortEl) sortEl.value = _displayPrefs.defaultSort;
 }
 
 function saveDisplayPrefs() {
   _displayPrefs.hidePassed = document.getElementById('prefHidePassed').checked;
-  _displayPrefs.defaultFilter = document.getElementById('prefDefaultFilter').value;
+  _displayPrefs.hideLowScore = document.getElementById('prefHideLowScore').checked;
   _displayPrefs.defaultSort = document.getElementById('prefDefaultSort').value;
   try { localStorage.setItem('la_display_prefs', JSON.stringify(_displayPrefs)); } catch(e) {}
   render();
@@ -1518,10 +1515,10 @@ function saveDisplayPrefs() {
 
 function syncPrefsUI() {
   var hp = document.getElementById('prefHidePassed');
-  var df = document.getElementById('prefDefaultFilter');
+  var hls = document.getElementById('prefHideLowScore');
   var ds = document.getElementById('prefDefaultSort');
   if (hp) hp.checked = _displayPrefs.hidePassed;
-  if (df) df.value = _displayPrefs.defaultFilter;
+  if (hls) hls.checked = _displayPrefs.hideLowScore;
   if (ds) ds.value = _displayPrefs.defaultSort;
 }
 
@@ -1768,6 +1765,9 @@ function render() {
   } else {
     if (_displayPrefs.hidePassed) {
       items = items.filter(function(l) { return !l.passed; });
+    }
+    if (_displayPrefs.hideLowScore) {
+      items = items.filter(function(l) { return l.verdict !== 'Reject' && l.verdict !== 'Weak Match'; });
     }
     if (activeFilter === 'not-reject') {
       items = items.filter(function(l) { return l.verdict !== 'Reject'; });

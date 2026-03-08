@@ -231,13 +231,14 @@ Mobile-first single-page app served at `/` (`app/templates/dashboard.html`).
 
 ### Auth Model
 - **Public (no login required):** view listings, scores, filter/sort, expand card details, view AI criteria (read-only)
-- **Auth-required (Google sign-in):** Check Email, edit AI Criteria, Reprocess, Mark as Toured, Want to Go, Mark as Sold, Add Listing, Scrape & Score
-- Unauthenticated users see a "Sign in" button in the header; action buttons are hidden
-- AI Criteria panel: always accessible (read-only for anonymous, editable for authed); "Save & Re-score All" and Maintenance section hidden when not logged in
+- **Auth-required (Google sign-in):** Check Email, Settings (gear icon), edit AI Criteria, Reprocess, Mark as Toured, Want to Go, Mark as Sold, Add Listing, Scrape & Score
+- Unauthenticated users see a "Sign in" button in the header; action buttons and settings are hidden
+- AI Criteria panel: read-only for anonymous (accessible via old entry point if URL known), editable for authed; "Save & Re-score All" and Maintenance section hidden when not logged in
 
 ### Header
 - App title
-- "✨ AI Criteria" button → settings overlay *(always visible — read-only when not logged in)*
+- Data confidence pill (e.g. "93% data") — weighted composite of 9 enrichment fields; color-coded green/amber/red; mouseover shows per-field breakdown tooltip
+- ⚙ gear icon → settings modal *(auth-only)*
 - "Check Email" button → triggers `POST /poll` *(auth-only)*
 - "Sign out" button *(auth-only)* / "Sign in" button *(unauthenticated)*
 
@@ -265,13 +266,19 @@ Mobile-first single-page app served at `/` (`app/templates/dashboard.html`).
 - Sort: Score (high→low), Price (low→high), $/sqft (low→high)
 - Filter counts shown on chips
 
-### Settings Panel (overlay)
-- Textarea with current AI evaluation instructions *(always visible; read-only for anonymous, editable for authed)*
-- Version indicator (version number + created_by)
-- "Save & Re-score All" button
-- Re-score progress bar (polls `GET /rescore/status` every 2s)
-- **Version history** — lists all past versions with date and preview; click any row to load into textarea; "Current" badge on active version; one-click restore before saving
-- Maintenance section: "Reprocess Emails" button
+### Settings Panel (overlay, auth-only via ⚙ gear icon)
+- **Display Preferences** section (top):
+  - "Hide passed listings" toggle (default ON) — excludes passed listings from All and other views; still visible via Passed filter chip
+  - "Default filter on load" — All or Non-Reject
+  - "Default sort" — all existing sort options
+  - Preferences persisted to `localStorage`
+- **Evaluation Criteria** section (below preferences):
+  - Textarea with current AI evaluation instructions *(read-only for anonymous, editable for authed)*
+  - Version indicator (version number + created_by)
+  - "Save & Re-score All" button
+  - Re-score progress bar (polls `GET /rescore/status` every 2s)
+  - **Version history** — lists all past versions with date and preview; click any row to load into textarea; "Current" badge on active version; one-click restore before saving
+  - Maintenance section: "Reprocess Emails" button
 
 ### Add Listing from URL
 - "**+ Add Listing**" bar at top of dashboard *(auth-only)* — paste any listing URL (Redfin, short redf.in links, etc.)
