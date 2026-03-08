@@ -8,9 +8,10 @@ All notable changes to Listings Analyzer are documented here.
 
 ### Added
 - **`/manage/scrape-redfin` endpoint** — scrapes all Redfin listing URLs via Jina reader to backfill missing fields: `property_type`, `lot_acres`, `property_tax_json` (annual amount), `garage_count`, `garage_type`, `hoa_monthly`, `list_date`, and `price` (force-corrected when current value < $100k, indicating a data error). Runs synchronously; returns per-listing results.
-- **`property_type` and `lot_acres` in `manage/update-listing`** — these fields now accepted by the manage update endpoint (previously only numeric/address fields were allowed).
+- **`property_type`, `lot_acres`, `list_date` in `manage/update-listing`** — these fields now accepted by the manage update endpoint (previously only numeric/address fields were allowed).
 - **`force` param in `manage/update-listing`** — pass `"force": true` in the JSON body to overwrite existing field values (default behavior still only fills null/empty fields).
 - **`force` param in `db.update_listing_fields_by_id()`** — internal DB helper now accepts `force=True` to unconditionally overwrite columns.
+- **`list_date` via "X days on Redfin"** — `scrape-redfin` now falls back to calculating list date from "X days on Redfin" text in Jina output when no explicit date label is found.
 
 ### Added (previous)
 - **Split Display Settings / AI Criteria panels** — ⚙ gear now opens Display Settings only (auto-saves on toggle, no Save button). ✨ AI Criteria button opens a separate overlay for the criteria editor, version history, rescore progress, and maintenance. Prevents accidental criteria saves when changing display prefs.

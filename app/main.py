@@ -1199,7 +1199,7 @@ def manage_update_listing(request: Request, body: dict = {}):
     """Update specific fields on a listing by ID.
 
     Body: {"listing_id": 62, "year_built": 1994, "force": true}
-    Allowed fields: year_built, price, sqft, bedrooms, bathrooms, address, town, state, zip_code, property_type, lot_acres
+    Allowed fields: year_built, price, sqft, bedrooms, bathrooms, address, town, state, zip_code, property_type, lot_acres, list_date
     Add "force": true to overwrite existing values (default: only fills null/empty fields).
     Protected by MANAGE_KEY env var.
     """
@@ -1212,7 +1212,7 @@ def manage_update_listing(request: Request, body: dict = {}):
         raise HTTPException(status_code=400, detail="Provide listing_id in JSON body")
 
     force = bool(body.get("force", False))
-    ALLOWED = {"year_built", "price", "sqft", "bedrooms", "bathrooms", "address", "town", "state", "zip_code", "property_type", "lot_acres"}
+    ALLOWED = {"year_built", "price", "sqft", "bedrooms", "bathrooms", "address", "town", "state", "zip_code", "property_type", "lot_acres", "list_date"}
     fields = {k: v for k, v in body.items() if k in ALLOWED and v is not None}
     if not fields:
         raise HTTPException(status_code=400, detail=f"No valid fields provided. Allowed: {sorted(ALLOWED)}")
@@ -2113,10 +2113,16 @@ def _parse_jina_redfin(text: str) -> dict:
         except ValueError:
             pass
 
-    # List date
+    # List date — try explicit label first, then calculate from "X days on Redfin"
     ld_match = _JINA_LIST_DATE_RE.search(text)
     if ld_match:
         result["list_date"] = ld_match.group(1).strip()
+    else:
+        days_match = _JINA_DAYS_ON_MARKET_RE.search(text)
+        if days_match:
+            from datetime import date as _date, timedelta as _timedelta
+            days = int(days_match.group(1))
+            result["list_date"] = str(_date.today() - _timedelta(days=days))
 
     return result
 
