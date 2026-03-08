@@ -266,20 +266,20 @@ Mobile-first single-page app served at `/` (`app/templates/dashboard.html`).
 - Sort: Score (high→low/low→high), Price, Sqft, $/sqft, Newest first, Commute, Schools
 - Filter counts shown on chips (respect display preferences for passed/pending hiding)
 
-### Settings Panel (overlay, auth-only via ⚙ gear icon)
-- **Display Preferences** section (top):
-  - "Hide passed listings" toggle (default ON) — excludes passed from All/Active/Toured/Want to Go; still visible via Passed chip
-  - "Hide pending/sold listings" toggle (default OFF) — excludes listings with status Pending/Sold/Under Contract/Closed
-  - "Hide low-scoring listings" toggle (default OFF) — excludes Weak Match and Reject verdicts
-  - "Default sort" dropdown — persisted across sessions
-  - All preferences saved to `localStorage`
-- **Evaluation Criteria** section (below preferences):
-  - Textarea with current AI evaluation instructions *(read-only for anonymous, editable for authed)*
-  - Version indicator (version number + created_by)
-  - "Save & Re-score All" button
-  - Re-score progress bar (polls `GET /rescore/status` every 2s)
-  - **Version history** — lists all past versions with date and preview; click any row to load into textarea; "Current" badge on active version; one-click restore before saving
-  - Maintenance section: "Reprocess Emails" button
+### Display Settings Panel (overlay, auth-only via ⚙ gear icon)
+- "Hide passed listings" toggle (default ON) — excludes passed from All/Active/Toured/Want to Go; still visible via Passed chip
+- "Hide pending/sold listings" toggle (default OFF) — excludes listings with status Pending/Sold/Under Contract/Closed
+- "Hide low-scoring listings" toggle (default OFF) — excludes Weak Match and Reject verdicts
+- "Default sort" dropdown — persisted across sessions
+- All preferences auto-saved to `localStorage` on toggle change (no Save button)
+
+### AI Criteria Panel (overlay, auth-only via ✨ AI Criteria button)
+- Textarea with current AI evaluation instructions *(read-only for anonymous, editable for authed)*
+- Version indicator (version number + created_by)
+- "Save & Re-score All" button — saves new criteria version and triggers background rescore
+- Re-score progress bar (polls `GET /rescore/status` every 2s)
+- **Version history** — lists all past versions with date and preview; click any row to load into textarea; "Current" badge on active version; one-click restore before saving
+- Maintenance section: "Reprocess Emails" button
 
 ### Add Listing from URL
 - "**+ Add Listing**" bar at top of dashboard *(auth-only)* — paste any listing URL (Redfin, short redf.in links, etc.)

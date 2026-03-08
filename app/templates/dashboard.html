@@ -426,6 +426,7 @@
   .verdict-weak-match { background: var(--gray-bg); color: var(--gray); }
   .verdict-reject { background: var(--red-bg); color: var(--red); }
   .verdict-unscored { background: #f0f0f0; color: #999; font-style: italic; }
+  .verdict-pending { background: #fefce8; color: #a16207; font-style: italic; }
 
   /* Listing status tag */
   .listing-status-tag {
@@ -1917,7 +1918,7 @@ function buildCard(l) {
   var beds = l.bedrooms != null ? String(l.bedrooms) : '?';
   var baths = l.bathrooms != null ? String(l.bathrooms) : '?';
   var address = l.address || 'Unknown Address';
-  var displayVerdict = (!l.evaluation_method && l.score === 0) ? 'Unscored' : l.verdict;
+  var displayVerdict = (l.evaluation_method === 'ai_failed') ? 'Pending' : l.verdict;
   var verdictClass = 'verdict ' + verdictCSSClass(displayVerdict);
   var scoreColor = scoreBarColor(l.score || 0, displayVerdict);
   var priceSqft = (l.price && l.sqft) ? '$' + Math.round(l.price / l.sqft).toLocaleString() : null;
