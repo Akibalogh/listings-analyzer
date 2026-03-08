@@ -1589,12 +1589,13 @@ window.addEventListener('popstate', function() {
 });
 
 function updateFilterCounts() {
-  var counts = { all: allListings.length, 'not-reject': 0, 'Toured': 0, 'Want to Go': 0, 'Passed': 0 };
+  var counts = { all: 0, 'not-reject': 0, 'Toured': 0, 'Want to Go': 0, 'Passed': 0 };
   allListings.forEach(function(l) {
+    if (l.passed) { counts['Passed']++; return; }
+    counts['all']++;
     if (l.verdict !== 'Reject') counts['not-reject']++;
     if (l.toured) counts['Toured']++;
     if (l.tour_requested) counts['Want to Go']++;
-    if (l.passed) counts['Passed']++;
   });
   document.querySelectorAll('.filter-chip').forEach(function(chip) {
     var f = chip.dataset.filter;
@@ -1610,14 +1611,17 @@ function render() {
   container.textContent = '';
   var items = allListings.slice();
 
-  if (activeFilter === 'not-reject') {
-    items = items.filter(function(l) { return l.verdict !== 'Reject'; });
-  } else if (activeFilter === 'Toured') {
-    items = items.filter(function(l) { return l.toured; });
-  } else if (activeFilter === 'Want to Go') {
-    items = items.filter(function(l) { return l.tour_requested; });
-  } else if (activeFilter === 'Passed') {
+  if (activeFilter === 'Passed') {
     items = items.filter(function(l) { return l.passed; });
+  } else {
+    items = items.filter(function(l) { return !l.passed; });
+    if (activeFilter === 'not-reject') {
+      items = items.filter(function(l) { return l.verdict !== 'Reject'; });
+    } else if (activeFilter === 'Toured') {
+      items = items.filter(function(l) { return l.toured; });
+    } else if (activeFilter === 'Want to Go') {
+      items = items.filter(function(l) { return l.tour_requested; });
+    }
   }
 
   var sortVal = document.getElementById('sortSelect').value;
