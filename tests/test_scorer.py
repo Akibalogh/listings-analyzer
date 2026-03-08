@@ -616,14 +616,15 @@ class TestAiScoreListingErrorPaths:
         from app.scorer import ai_score_listing
         import anthropic as anthropic_lib
 
+        fake_request = MagicMock(spec=["url", "method", "headers"])
         with patch("app.scorer.settings") as mock_settings:
             mock_settings.anthropic_api_key = "sk-test"
             mock_settings.ai_eval_model = "claude-opus-4-6"
             with patch("app.scorer._build_user_message", return_value=[]):
                 with patch("app.scorer._build_system_prompt", return_value=[]):
                     mock_client = MagicMock()
-                    mock_client.messages.create.side_effect = anthropic_lib.APIStatusError(
-                        "rate limit", response=MagicMock(status_code=429), body={}
+                    mock_client.messages.create.side_effect = anthropic_lib.APIConnectionError(
+                        message="Connection refused", request=fake_request
                     )
                     with patch("app.scorer.anthropic.Anthropic", return_value=mock_client):
                         result, reasoning = ai_score_listing({"address": "Test"}, "Criteria")
@@ -636,7 +637,13 @@ class TestAiScoreListingErrorPaths:
         from unittest.mock import patch, MagicMock
         from app.scorer import ai_score_listing
         import anthropic as anthropic_lib
-        import json
+
+        fake_request = MagicMock(spec=["url", "method", "headers"])
+        first_response = MagicMock()
+        first_response.content = [MagicMock(text="not valid json")]
+        second_exception = anthropic_lib.APIConnectionError(
+            message="Server error", request=fake_request
+        )
 
         with patch("app.scorer.settings") as mock_settings:
             mock_settings.anthropic_api_key = "sk-test"
@@ -644,20 +651,7 @@ class TestAiScoreListingErrorPaths:
             with patch("app.scorer._build_user_message", return_value=[]):
                 with patch("app.scorer._build_system_prompt", return_value=[]):
                     mock_client = MagicMock()
-                    # First call: invalid JSON; second call: API error
-                    mock_client.messages.create.side_effect = [
-                        MagicMock(content=[MagicMock(text="not json")]),
-                        anthropic_lib.APIStatusError(
-                            "server error", response=MagicMock(status_code=500), body={}
-                        ),
-                    ]
-                    # First call returns invalid JSON (raises in json.loads)
-                    # We need the first call to return a response, not raise
-                    first_response = MagicMock()
-                    first_response.content = [MagicMock(text="not valid json")]
-                    second_exception = anthropic_lib.APIStatusError(
-                        "server error", response=MagicMock(status_code=500), body={}
-                    )
+                    # First call: invalid JSON response; second call: API error
                     mock_client.messages.create.side_effect = [first_response, second_exception]
                     with patch("app.scorer.anthropic.Anthropic", return_value=mock_client):
                         result, reasoning = ai_score_listing({"address": "Test"}, "Criteria")
