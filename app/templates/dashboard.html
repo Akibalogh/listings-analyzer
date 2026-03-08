@@ -138,6 +138,20 @@
     text-align: right;
     margin-top: 2px;
   }
+  .data-confidence {
+    font-size: 11px;
+    font-weight: 600;
+    color: rgba(255,255,255,0.5);
+    background: rgba(255,255,255,0.07);
+    border-radius: 6px;
+    padding: 4px 9px;
+    white-space: nowrap;
+    cursor: default;
+    letter-spacing: 0.2px;
+  }
+  .data-confidence.high { color: rgba(134,239,172,0.85); }
+  .data-confidence.medium { color: rgba(253,186,116,0.85); }
+  .data-confidence.low { color: rgba(252,165,165,0.85); }
   .logout-btn {
     background: rgba(255,255,255,0.06);
     border: none;
@@ -1242,6 +1256,7 @@
       </div>
       <div class="header-actions">
         <span class="user-email auth-only" id="userEmail"></span>
+        <span class="data-confidence" id="dataConfidence" style="display:none" title="Composite data completeness across all listings"></span>
         <button class="settings-btn" onclick="openSettings()" title="AI Scoring Criteria">&#10024; AI Criteria</button>
         <button class="poll-btn auth-only" id="pollBtn" onclick="pollNow()">
           Check Email
@@ -1484,6 +1499,7 @@ async function loadListings() {
     document.getElementById('count').textContent = '(' + allListings.length + ')';
     updateFilterCounts();
     render();
+    updateDataConfidence();
   } catch (err) {
     showToast('Failed to load listings');
   }
@@ -2273,6 +2289,40 @@ function parseJSON(str, fallback) {
   if (!str) return fallback;
   try { return JSON.parse(str); }
   catch(e) { return fallback; }
+}
+
+function updateDataConfidence() {
+  var el2 = document.getElementById('dataConfidence');
+  if (!el2 || allListings.length === 0) return;
+
+  /* Weighted fields: [key, weight, hasValue fn] */
+  var weights = [
+    ['description',      0.20, function(l) { return !!l.description; }],
+    ['images',           0.15, function(l) { var imgs = parseJSON(l.image_urls_json, []); return imgs.length > 0; }],
+    ['school_data_json', 0.15, function(l) { return !!l.school_data_json; }],
+    ['commute_minutes',  0.15, function(l) { return l.commute_minutes != null; }],
+    ['year_built',       0.10, function(l) { return l.year_built != null; }],
+    ['lot_acres',        0.08, function(l) { return l.lot_acres != null; }],
+    ['has_basement',     0.07, function(l) { return l.has_basement != null; }],
+    ['property_tax_json',0.05, function(l) { return !!l.property_tax_json; }],
+    ['garage_count',     0.05, function(l) { return l.garage_count != null; }],
+  ];
+
+  /* Compute average weighted completeness across all listings */
+  var totalScore = 0;
+  allListings.forEach(function(l) {
+    var score = 0;
+    weights.forEach(function(w) { if (w[2](l)) score += w[1]; });
+    totalScore += score;
+  });
+  var avg = Math.round((totalScore / allListings.length) * 100);
+
+  var tier = avg >= 80 ? 'high' : avg >= 60 ? 'medium' : 'low';
+  el2.textContent = avg + '% data';
+  el2.className = 'data-confidence ' + tier;
+  el2.title = 'Composite data completeness across ' + allListings.length + ' listings (' + avg + '%). ' +
+    'Covers: description, images, schools, commute, year built, lot size, basement, tax, garage.';
+  el2.style.display = '';
 }
 
 function showToast(msg) {

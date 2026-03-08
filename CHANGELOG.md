@@ -7,6 +7,7 @@ All notable changes to Listings Analyzer are documented here.
 ## [Unreleased]
 
 ### Added
+- **Data confidence indicator in top nav** — weighted composite score (0–100%) shown as a pill in the dark header bar. Covers 9 fields weighted by scoring impact: description 20%, images 15%, schools 15%, commute 15%, year built 10%, lot size 8%, basement 7%, property tax 5%, garage 5%. Color-coded green/amber/red (≥80%/60–79%/<60%). Tooltip shows field list on hover.
 - **Property Details section in expanded card** — new `buildPropertyDetails()` JS function renders enriched data not previously shown in the UI: lot size (acres or sqft), garage count/type, HOA fee (or "None"), pool, basement type, assessed value (ORPTS/SODA), FEMA flood zone (with ⚠️ if SFHA), power line proximity, and nearest Metro-North station + walk time. Displayed as a compact 2-column grid below the commute/schools section.
 
 ### Removed
