@@ -1686,7 +1686,7 @@ def _enrich_all(clear_bogus: bool = False, clear_bogus_commute: bool = False):
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    from app.enrichment import fetch_commute_time, fetch_school_data, normalize_address, fetch_property_tax, fetch_property_tax_orpts, fetch_power_line_proximity, fetch_flood_zone, fetch_station_proximity, parse_garage_count, parse_hoa_amount, parse_pool_flag, parse_basement, parse_year_built, parse_list_date, _geocode_address, enrich_missing_urls
+    from app.enrichment import fetch_commute_time, fetch_school_data, normalize_address, fetch_property_tax, fetch_property_tax_orpts, fetch_power_line_proximity, fetch_flood_zone, fetch_station_proximity, parse_garage_count, parse_hoa_amount, parse_pool_flag, parse_basement, parse_year_built, parse_list_date, _geocode_address, enrich_missing_urls, fetch_lot_acres_parcel
 
     try:
         listing_ids = db.get_all_listing_ids()
@@ -1914,6 +1914,24 @@ def _enrich_all(clear_bogus: bool = False, clear_bogus_commute: bool = False):
                     if ld is not None:
                         enrichment["list_date"] = ld
                         changed = True
+
+            # Lot acreage via NYS GIS parcel service (fallback when description has no lot data)
+            if listing.get("lot_acres") is None:
+                try:
+                    parcel_acres = fetch_lot_acres_parcel(
+                        listing.get("address"),
+                        listing.get("town"),
+                        listing.get("state"),
+                    )
+                    if parcel_acres is not None and 0.01 <= parcel_acres <= 1000:
+                        enrichment["lot_acres"] = parcel_acres
+                        changed = True
+                        logger.info(
+                            f"Parcel lot_acres for #{lid} ({listing.get('address')}, "
+                            f"{listing.get('town')}): {parcel_acres}"
+                        )
+                except Exception as e:
+                    logger.warning(f"Parcel lot_acres lookup failed for #{lid}: {e}")
 
             # Save any enrichment changes from this phase
             if changed:
@@ -2235,6 +2253,69 @@ def manage_fix_lot_acres(request: Request):
         "fixed": fixed,
         "cleared": cleared,
         "skipped": skipped,
+        "results": results,
+    }
+
+
+@app.post("/manage/enrich-lot-acres")
+def manage_enrich_lot_acres(request: Request):
+    """Look up lot_acres from NYS GIS Tax Parcels for listings where lot_acres is NULL.
+
+    Uses the free NYS GIS Tax Parcels public ArcGIS REST service to resolve lot size
+    from official assessor parcel records. Covers Westchester and most NY counties.
+    Does not modify listings that already have a lot_acres value.
+
+    Protected by MANAGE_KEY env var.
+    """
+    from app.enrichment import fetch_lot_acres_parcel
+
+    key = request.headers.get("x-manage-key", "")
+    if key != settings.manage_key:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    listing_ids = db.get_all_listing_ids()
+    found = 0
+    skipped = 0
+    not_found = 0
+    results = []
+
+    for lid in listing_ids:
+        listing = db.get_listing_by_id(lid)
+        if not listing:
+            continue
+
+        if listing.get("lot_acres") is not None:
+            skipped += 1
+            continue
+
+        address = listing.get("address")
+        town = listing.get("town")
+        state = listing.get("state")
+
+        try:
+            acres = fetch_lot_acres_parcel(address, town, state)
+            if acres is not None and 0.01 <= acres <= 1000:
+                db.update_listing_fields_by_id(lid, lot_acres=acres)
+                found += 1
+                results.append({
+                    "id": lid,
+                    "address": address,
+                    "town": town,
+                    "acres": acres,
+                })
+                logger.info(f"Parcel lot_acres for #{lid} ({address}, {town}): {acres}")
+            else:
+                not_found += 1
+        except Exception as e:
+            logger.warning(f"enrich-lot-acres failed for #{lid} ({address}, {town}): {e}")
+            not_found += 1
+
+    return {
+        "total": len(listing_ids),
+        "found": found,
+        "not_found": not_found,
+        "skipped_already_set": skipped,
         "results": results,
     }
 

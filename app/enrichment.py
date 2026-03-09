@@ -985,6 +985,250 @@ def fetch_flood_zone(
 
 
 # ---------------------------------------------------------------------------
+# Parcel lot size lookup (NYS GIS Tax Parcels — free, no key required)
+# ---------------------------------------------------------------------------
+
+_NYS_PARCELS_URL = (
+    "https://gisservices.its.ny.gov/arcgis/rest/services"
+    "/NYS_Tax_Parcels_Public/FeatureServer/1/query"
+)
+
+# Cache: "address|town|state" → acres (float) or None
+_parcel_cache: dict[str, float | None] = {}
+
+# Rate limit: NYS GIS service handles ~1 req/s comfortably
+_parcel_last_call: float = 0.0
+_PARCEL_MIN_INTERVAL = 1.2  # seconds between calls
+
+# Suffix expansions for compound street names (e.g. "LAKESHORE" → "LAKE SHORE")
+_STREET_COMPOUNDS = [
+    ("LAKESHORE", "LAKE SHORE"),
+    ("LAKESIDE", "LAKE SIDE"),
+    ("LAKEVIEW", "LAKE VIEW"),
+    ("BROOKSIDE", "BROOK SIDE"),
+    ("HILLSIDE", "HILL SIDE"),
+    ("HILLCREST", "HILL CREST"),
+    ("RIDGEWOOD", "RIDGE WOOD"),
+    ("RIDGEWAY", "RIDGE WAY"),
+    ("WOODSIDE", "WOOD SIDE"),
+    ("CLIFFSIDE", "CLIFF SIDE"),
+    ("PARKWAY", "PARK WAY"),
+]
+
+# NY county name → COUNTY_NAME value in NYS parcel service
+_NY_COUNTY_MAP = {
+    "ny": "Westchester",  # default for NY addresses
+    "nj": None,            # NJ not in NYS service
+    "ct": None,            # CT not in NYS service
+}
+
+# Override county for known out-of-Westchester NYS listings
+_TOWN_TO_COUNTY: dict[str, str] = {
+    "new rochelle": "Westchester",
+    "mamaroneck": "Westchester",
+    "larchmont": "Westchester",
+    "scarsdale": "Westchester",
+    "white plains": "Westchester",
+    "harrison": "Westchester",
+    "rye": "Westchester",
+    "greenwich": "Fairfield",  # CT — not in NYS service
+    "basking ridge": None,     # NJ
+    "bernardsville": None,     # NJ
+    "harding township": None,  # NJ
+    "morristown": None,        # NJ
+    "bernards twp.": None,     # NJ
+    "bernardsville boro": None,  # NJ
+    "beacon": "Dutchess",
+    "highland": "Ulster",
+    "ossining": "Westchester",
+    "briarcliff manor": "Westchester",
+    "sleepy hollow": "Westchester",
+    "tarrytown": "Westchester",
+    "irvington": "Westchester",
+    "dobbs ferry": "Westchester",
+    "ardsley": "Westchester",
+    "elmsford": "Westchester",
+    "hartsdale": "Westchester",
+    "hastings-on-hudson": "Westchester",
+    "pleasantville": "Westchester",
+    "mount pleasant": "Westchester",
+    "chappaqua": "Westchester",
+    "armonk": "Westchester",
+    "bedford": "Westchester",
+    "mount kisco": "Westchester",
+    "katonah": "Westchester",
+    "bedford hills": "Westchester",
+    "pound ridge": "Westchester",
+    "south salem": "Westchester",
+    "north salem": "Westchester",
+    "lewisboro": "Westchester",
+    "cross river": "Westchester",
+    "somers": "Westchester",
+    "yorktown": "Westchester",
+    "yorktown heights": "Westchester",
+    "cortlandt": "Westchester",
+    "cortlandt manor": "Westchester",
+    "peekskill": "Westchester",
+    "eastchester": "Westchester",
+    "tuckahoe": "Westchester",
+    "pelham": "Westchester",
+    "pelham manor": "Westchester",
+    "valhalla": "Westchester",
+    "thornwood": "Westchester",
+    "hawthorne": "Westchester",
+    "croton-on-hudson": "Westchester",
+    "croton on hudson": "Westchester",
+    "yonkers": "Westchester",
+    "new rochelle": "Westchester",
+    "bronxville": "Westchester",
+    "larchmont": "Westchester",
+    "mamaroneck": "Westchester",
+}
+
+
+def _nys_parcel_query(county: str, st_nbr: str, street_prefix: str) -> list[dict]:
+    """Run one NYS parcels query and return features list."""
+    global _parcel_last_call
+    import urllib.parse
+    import urllib.request
+
+    # Rate limit
+    elapsed = time.time() - _parcel_last_call
+    if _parcel_last_call > 0 and elapsed < _PARCEL_MIN_INTERVAL:
+        time.sleep(_PARCEL_MIN_INTERVAL - elapsed)
+
+    params = {
+        "where": (
+            f"COUNTY_NAME='{county}'"
+            f" AND LOC_ST_NBR='{st_nbr}'"
+            f" AND UPPER(LOC_STREET) LIKE '{street_prefix.upper()}%'"
+        ),
+        "outFields": "PARCEL_ADDR,LOC_ST_NBR,LOC_STREET,ACRES,CALC_ACRES,CITYTOWN_NAME,MUNI_NAME",
+        "f": "json",
+        "returnGeometry": "false",
+    }
+    data = urllib.parse.urlencode(params).encode()
+    req = urllib.request.Request(
+        _NYS_PARCELS_URL,
+        data=data,
+        headers={"User-Agent": "listings-analyzer/1.0 (contact: aki@bitsafe.finance)"},
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        result = json.loads(resp.read())
+    _parcel_last_call = time.time()
+    return result.get("features", [])
+
+
+def fetch_lot_acres_parcel(
+    address: str | None,
+    town: str | None,
+    state: str | None,
+) -> float | None:
+    """Look up parcel lot size (acres) from NYS GIS Tax Parcels public service.
+
+    Free, no API key required. Covers all NY counties that have authorized
+    NYS GIS to share their data, including Westchester.
+
+    NYS service is NOT available for NJ or CT addresses — returns None for those.
+
+    Args:
+        address: Street address (e.g. "9 Irving Pl")
+        town: Town/village name (e.g. "Irvington")
+        state: State abbreviation or name (e.g. "NY")
+
+    Returns:
+        float: lot size in acres (from ACRES field; CALC_ACRES used as fallback)
+        None: if not found, unsupported state, or API error
+    """
+    if not address or not town:
+        return None
+
+    cache_key = f"parcel:{(address or '').lower()}|{(town or '').lower()}|{(state or '').lower()}"
+    if cache_key in _parcel_cache:
+        return _parcel_cache[cache_key]
+
+    # Resolve county — skip non-NY states
+    state_norm = (state or "").strip().upper()[:2]
+    if state_norm in ("NJ", "CT", "PA", "MA"):
+        _parcel_cache[cache_key] = None
+        return None
+
+    town_lower = (town or "").lower().strip()
+    county = _TOWN_TO_COUNTY.get(town_lower, "Westchester")
+    if county is None:
+        # Explicitly excluded (NJ/CT town)
+        _parcel_cache[cache_key] = None
+        return None
+
+    # Parse street number and first word of street name
+    parts = address.strip().split(None, 1)
+    if len(parts) < 2:
+        _parcel_cache[cache_key] = None
+        return None
+    st_nbr = parts[0]
+    street_raw = parts[1].upper().strip()
+    # Use first word of street as prefix (e.g. "OLD ARMY RD" → "OLD")
+    street_first_word = street_raw.split()[0] if street_raw.split() else street_raw
+
+    def _pick_best(features: list[dict]) -> float | None:
+        """From a list of candidate features, pick the one matching town and return acres."""
+        town_upper = town.upper().strip() if town else ""
+        # Score each feature: prefer MUNI_NAME match, then CITYTOWN_NAME match
+        candidates = []
+        for f in features:
+            a = f.get("attributes", {})
+            muni = (a.get("MUNI_NAME") or "").upper()
+            citytown = (a.get("CITYTOWN_NAME") or "").upper()
+            score = 0
+            if town_upper in muni or muni in town_upper:
+                score = 2
+            elif town_upper in citytown or citytown in town_upper:
+                score = 1
+            candidates.append((score, a))
+
+        # Sort by score descending; take highest-scoring match
+        candidates.sort(key=lambda x: -x[0])
+        for score, a in candidates:
+            acres = a.get("ACRES")
+            calc = a.get("CALC_ACRES")
+            # Use ACRES if non-zero; fall back to CALC_ACRES
+            if acres and acres > 0:
+                return round(float(acres), 4)
+            if calc and calc > 0:
+                return round(float(calc), 4)
+        return None
+
+    try:
+        # Attempt 1: query with first word of street name
+        features = _nys_parcel_query(county, st_nbr, street_first_word)
+
+        # Attempt 2: if no results and street name is a compound word, try split form
+        if not features:
+            for compound, expanded in _STREET_COMPOUNDS:
+                if street_raw.startswith(compound):
+                    expanded_first = expanded.split()[0]
+                    features = _nys_parcel_query(county, st_nbr, expanded_first)
+                    if features:
+                        break
+
+        if not features:
+            logger.debug(f"NYS parcel: no results for {address}, {town}, {county}")
+            _parcel_cache[cache_key] = None
+            return None
+
+        result = _pick_best(features)
+        _parcel_cache[cache_key] = result
+        if result:
+            logger.info(f"NYS parcel: {address}, {town} → {result} acres")
+        return result
+
+    except Exception as e:
+        logger.warning(f"NYS parcel lookup failed for {address}, {town}: {e}")
+        _parcel_cache[cache_key] = None
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Property tax (NY Open Data SODA API — free, no key required)
 # ---------------------------------------------------------------------------
 
