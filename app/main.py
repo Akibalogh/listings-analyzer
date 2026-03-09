@@ -562,70 +562,15 @@ async def add_listing_from_url(request: Request):
     else:
         address_key = None
 
-    # Scrape the page for description + images + structured data
-    description, image_urls = scrape_listing_description(
-        resolved_url, address=address, town=town, state=state, zip_code=zip_code,
-    )
-
-    # Try to extract structured data from the page
-    price = beds = baths = sqft = year_built = list_date = lot_acres = None
-    try:
-        with httpx.Client(timeout=10, follow_redirects=True, headers={
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-        }) as client:
-            page_resp = client.get(resolved_url)
-            if page_resp.status_code == 200:
-                stats = _extract_property_stats(page_resp.text)
-                if stats:
-                    price = stats.get("price")
-                    beds = stats.get("bedrooms")
-                    baths = stats.get("bathrooms")
-                    sqft = stats.get("sqft")
-                    year_built = stats.get("year_built")
-                    list_date = stats.get("list_date")
-                    lot_acres = stats.get("lot_acres")
-    except Exception:
-        pass
-
-    # Create the listing
-    listing = ParsedListing(
-        source_format="manual",
-        address=address,
-        town=town,
-        state=state,
-        zip_code=zip_code,
-        price=price,
-        bedrooms=beds,
-        bathrooms=baths,
-        sqft=sqft,
-        year_built=year_built,
-        list_date=list_date,
-        lot_acres=lot_acres,
-        listing_url=resolved_url,
-        description=description,
-    )
-
-    # Placeholder score — will rescore below
+    # Save immediately with URL-extracted fields only — all slow I/O runs in background
     placeholder_score = ScoringResult(
         score=0, verdict="Reject", hard_results=[], soft_points={},
-        concerns=["Pending scoring"], confidence="low",
+        concerns=["Pending enrichment"], confidence="low",
     )
-
-    # Enrichment
-    enrichment = {}
+    enrichment_initial = {}
     if address_key:
-        enrichment["address_key"] = address_key
-    if zip_code:
-        school_json = fetch_school_data(zip_code, state)
-        if school_json:
-            enrichment["school_data_json"] = school_json
-    if address and town:
-        commute = fetch_commute_time(address, town, state, zip_code)
-        if commute:
-            enrichment["commute_minutes"] = commute.get("commute_minutes")
-            enrichment["commute_data_json"] = commute.get("commute_data_json")
+        enrichment_initial["address_key"] = address_key
 
-    # Save a dummy email record
     email_id = db.save_processed_email(
         gmail_id=f"manual-{resolved_url}",
         message_id="",
@@ -635,33 +580,112 @@ async def add_listing_from_url(request: Request):
         listings_found=1,
     )
 
-    listing_id = db.save_listing(listing, placeholder_score, email_id, enrichment)
-    if image_urls:
-        db.add_listing_images(listing_id, image_urls)
+    listing = ParsedListing(
+        source_format="manual",
+        address=address,
+        town=town,
+        state=state,
+        zip_code=zip_code,
+        listing_url=resolved_url,
+    )
+    listing_id = db.save_listing(listing, placeholder_score, email_id, enrichment_initial)
 
-    # Score with AI in a background thread to avoid Fly proxy timeout (60s)
-    def _score_in_background(lid: int):
-        criteria = db.get_active_criteria()
-        if not criteria:
-            return
-        saved = db.get_listing_by_id(lid)
-        if not saved:
-            return
+    # All slow I/O (scrape, structured data, enrichment, AI score) runs in background
+    def _enrich_and_score(lid: int, _url: str, _address: str | None, _town: str | None,
+                          _state: str | None, _zip: str | None, _address_key: str | None):
         try:
-            score = _rescore_one_listing(saved, criteria)
-            from app.notifier import notify_new_listing
-            notify_new_listing(saved, score.score, score.verdict, score.evaluation_method)
-        except Exception as exc:
-            logger.error(f"Background scoring failed for listing #{lid}: {exc}")
+            # Scrape description + images
+            desc, imgs = scrape_listing_description(
+                _url, address=_address, town=_town, state=_state, zip_code=_zip,
+            )
 
-    threading.Thread(target=_score_in_background, args=(listing_id,), daemon=True).start()
+            # Extract structured data
+            price = beds = baths = sqft = year_built = list_date = lot_acres = None
+            try:
+                with httpx.Client(timeout=10, follow_redirects=True, headers={
+                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+                }) as client:
+                    page_resp = client.get(_url)
+                    if page_resp.status_code == 200:
+                        stats = _extract_property_stats(page_resp.text)
+                        if stats:
+                            price = stats.get("price")
+                            beds = stats.get("bedrooms")
+                            baths = stats.get("bathrooms")
+                            sqft = stats.get("sqft")
+                            year_built = stats.get("year_built")
+                            list_date = stats.get("list_date")
+                            lot_acres = stats.get("lot_acres")
+            except Exception:
+                pass
+
+            # Update listing with scraped data
+            fields = {k: v for k, v in {
+                "price": price, "bedrooms": beds, "bathrooms": baths,
+                "sqft": sqft, "year_built": year_built, "list_date": list_date,
+                "lot_acres": lot_acres,
+            }.items() if v is not None}
+            if desc or fields:
+                with db.get_connection() as conn:
+                    cur = conn.cursor()
+                    ph = db._placeholder()
+                    if desc:
+                        cur.execute(f"UPDATE listings SET description = {ph} WHERE id = {ph}", (desc, lid))
+                    for col, val in fields.items():
+                        cur.execute(f"UPDATE listings SET {col} = {ph} WHERE id = {ph}", (val, lid))
+                    conn.commit()
+            if imgs:
+                db.add_listing_images(lid, imgs)
+
+            # Enrichment
+            enrichment = {}
+            if _zip:
+                school_json = fetch_school_data(_zip, _state)
+                if school_json:
+                    enrichment["school_data_json"] = school_json
+            if _address and _town:
+                commute = fetch_commute_time(_address, _town, _state, _zip)
+                if commute:
+                    enrichment["commute_minutes"] = commute.get("commute_minutes")
+                    enrichment["commute_data_json"] = commute.get("commute_data_json")
+            if enrichment:
+                db.update_listing_fields_by_id(lid, force=True, **{
+                    k: v for k, v in enrichment.items()
+                    if k in {"commute_minutes"}
+                })
+                with db.get_connection() as conn:
+                    cur = conn.cursor()
+                    ph = db._placeholder()
+                    if "school_data_json" in enrichment:
+                        cur.execute(f"UPDATE listings SET school_data_json = {ph} WHERE id = {ph}",
+                                    (json.dumps(enrichment["school_data_json"]) if isinstance(enrichment["school_data_json"], dict) else enrichment["school_data_json"], lid))
+                    if "commute_data_json" in enrichment:
+                        cur.execute(f"UPDATE listings SET commute_data_json = {ph} WHERE id = {ph}",
+                                    (enrichment["commute_data_json"], lid))
+                    conn.commit()
+
+            # AI score
+            criteria = db.get_active_criteria()
+            if criteria:
+                saved = db.get_listing_by_id(lid)
+                if saved:
+                    score = _rescore_one_listing(saved, criteria)
+                    from app.notifier import notify_new_listing
+                    notify_new_listing(saved, score.score, score.verdict, score.evaluation_method)
+        except Exception as exc:
+            logger.error(f"Background enrich/score failed for listing #{lid}: {exc}")
+
+    threading.Thread(
+        target=_enrich_and_score,
+        args=(listing_id, resolved_url, address, town, state, zip_code, address_key),
+        daemon=True,
+    ).start()
 
     return {
         "listing_id": listing_id,
         "address": address,
         "town": town,
         "url": resolved_url,
-        "description_found": description is not None,
         "scoring": "pending",
     }
 
