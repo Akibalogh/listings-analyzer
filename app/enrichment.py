@@ -1171,24 +1171,52 @@ def fetch_lot_acres_parcel(
     street_first_word = street_raw.split()[0] if street_raw.split() else street_raw
 
     def _pick_best(features: list[dict]) -> float | None:
-        """From a list of candidate features, pick the one matching town and return acres."""
+        """From a list of candidate features, pick the best match and return acres.
+
+        Scoring priority:
+          3 — PARCEL_ADDR matches input address (street number + first street word)
+          2 — MUNI_NAME matches town name
+          1 — CITYTOWN_NAME matches town name
+          0 — no geographic match (only used when there's exactly 1 result)
+        """
         town_upper = town.upper().strip() if town else ""
-        # Score each feature: prefer MUNI_NAME match, then CITYTOWN_NAME match
+        # Normalize input address for comparison
+        addr_upper = address.upper().strip()
+
         candidates = []
         for f in features:
             a = f.get("attributes", {})
             muni = (a.get("MUNI_NAME") or "").upper()
             citytown = (a.get("CITYTOWN_NAME") or "").upper()
+            parcel_addr = (a.get("PARCEL_ADDR") or "").upper()
+
             score = 0
-            if town_upper in muni or muni in town_upper:
-                score = 2
-            elif town_upper in citytown or citytown in town_upper:
-                score = 1
+            # Highest priority: parcel address matches input address
+            # Compare by stripping suffix words (RD, ST, DR, etc.) and comparing core
+            addr_words = addr_upper.split()
+            parcel_words = parcel_addr.split()
+            # Match if at least 2 words overlap (number + first street word)
+            if len(addr_words) >= 2 and len(parcel_words) >= 2:
+                if addr_words[0] == parcel_words[0] and addr_words[1] == parcel_words[1]:
+                    score = 3
+
+            if score < 3:
+                if town_upper in muni or muni in town_upper:
+                    score = max(score, 2)
+                elif town_upper in citytown or citytown in town_upper:
+                    score = max(score, 1)
+
             candidates.append((score, a))
 
         # Sort by score descending; take highest-scoring match
         candidates.sort(key=lambda x: -x[0])
+
+        # Only accept score=0 candidates when there's exactly 1 result
+        min_score = 0 if len(features) == 1 else 1
+
         for score, a in candidates:
+            if score < min_score:
+                break
             acres = a.get("ACRES")
             calc = a.get("CALC_ACRES")
             # Use ACRES if non-zero; fall back to CALC_ACRES
