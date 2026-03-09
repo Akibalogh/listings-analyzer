@@ -538,9 +538,14 @@ async def add_listing_from_url(request: Request):
     except Exception:
         resolved_url = url
 
+    # If the resolved URL was ratelimited/redirected away, fall back to original for address parsing
+    url_for_address = resolved_url
+    if not REDFIN_URL_ADDR_RE.search(resolved_url) and REDFIN_URL_ADDR_RE.search(url):
+        url_for_address = url
+
     # Extract address from Redfin URL path
     address = town = state = zip_code = None
-    redfin_match = REDFIN_URL_ADDR_RE.search(resolved_url)
+    redfin_match = REDFIN_URL_ADDR_RE.search(url_for_address)
     if redfin_match:
         state = redfin_match.group(1).upper()
         town = redfin_match.group(2).replace("-", " ").title()
