@@ -520,7 +520,11 @@ async def add_listing_from_url(request: Request):
     from app.enrichment import normalize_address, fetch_commute_time, fetch_school_data
     from app.models import ParsedListing, ScoringResult
 
-    _require_auth(request)
+    key = request.headers.get("x-manage-key", "")
+    if settings.manage_key and key == settings.manage_key:
+        pass  # manage key auth OK
+    else:
+        _require_auth(request)
     body = await request.json()
     url = (body.get("url") or "").strip()
     if not url or not url.startswith(("http://", "https://")):
@@ -3008,3 +3012,4 @@ def manage_rescrape_unknowns(request: Request):
         "errors": len(errors),
         "error_details": errors[:10],  # First 10 errors
     }
+
