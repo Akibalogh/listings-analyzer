@@ -7,6 +7,11 @@ All notable changes to Listings Analyzer are documented here.
 ## [Unreleased]
 
 ### Added
+- **NYS GIS parcel lot_acres lookup** — `fetch_lot_acres_parcel()` in `enrichment.py` queries the free NYS GIS Tax Parcels public ArcGIS REST service to backfill `lot_acres` for listings where the description contains no lot size data. Covers all Westchester (and other NY) county parcels; NJ/CT addresses are skipped. Address matching uses a 3-word prefix comparison against PARCEL_ADDR (number + first 2 street words) to disambiguate similar streets (e.g. "8 Old Roaring Brook Rd" vs "8 Old Farm Ln"). Falls back to MUNI_NAME/CITYTOWN_NAME town matching when address words are ambiguous. Rate-limited at 1.2s between calls. Wired into the `_enrich_all()` backfill pipeline for automatic coverage on new listings.
+- **`POST /manage/enrich-lot-acres` endpoint** — one-shot backfill that runs the parcel lookup for all listings with `lot_acres=NULL`. Returns `{total, found, not_found, skipped_already_set}`. Authenticated via `x-manage-key`.
+- **15 tests for `fetch_lot_acres_parcel`** — `TestFetchLotAcresParcel` in `test_enrichment.py`: import, missing address/town, NJ/CT state skip, NJ town skip, single-result ACRES, CALC_ACRES fallback, multi-result 3-word addr match, multi-result MUNI_NAME match, no results, network error, cache hit, town map spot-check, rounding to 4dp. 522 total tests passing.
+
+### Added (previous)
 - **`/manage/scrape-redfin` endpoint** — scrapes all Redfin listing URLs via Jina reader to backfill missing fields: `property_type`, `lot_acres`, `property_tax_json` (annual amount), `garage_count`, `garage_type`, `hoa_monthly`, `list_date`, and `price` (force-corrected when current value < $100k, indicating a data error). Runs synchronously; returns per-listing results.
 - **`property_type`, `lot_acres`, `list_date` in `manage/update-listing`** — these fields now accepted by the manage update endpoint (previously only numeric/address fields were allowed).
 - **`force` param in `manage/update-listing`** — pass `"force": true` in the JSON body to overwrite existing field values (default behavior still only fills null/empty fields).

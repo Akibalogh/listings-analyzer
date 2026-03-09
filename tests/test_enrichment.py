@@ -1648,3 +1648,190 @@ class TestFetchPropertyTaxOrpts:
         _tax_cache.pop("orpts:MainStreet|Armonk", None)
         result = fetch_property_tax_orpts("MainStreet", "Armonk")
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# fetch_lot_acres_parcel — NYS GIS Tax Parcels lookup
+# ---------------------------------------------------------------------------
+
+
+def _make_nys_response(features: list[dict]) -> MagicMock:
+    """Build a mock urllib.request.urlopen context manager returning NYS JSON."""
+    import json as _json
+
+    payload = _json.dumps({"features": features}).encode()
+    mock_resp = MagicMock()
+    mock_resp.read.return_value = payload
+    mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+    mock_resp.__exit__ = MagicMock(return_value=False)
+    return mock_resp
+
+
+def _nys_feature(parcel_addr, acres, calc_acres=None, muni=None, citytown=None):
+    """Convenience helper to build a NYS parcel feature dict."""
+    return {
+        "attributes": {
+            "PARCEL_ADDR": parcel_addr,
+            "ACRES": acres,
+            "CALC_ACRES": calc_acres,
+            "MUNI_NAME": muni or "",
+            "CITYTOWN_NAME": citytown or "",
+        }
+    }
+
+
+class TestFetchLotAcresParcel:
+    """Tests for fetch_lot_acres_parcel() — NYS GIS Tax Parcels lookup."""
+
+    def _clear_cache(self, address, town, state="NY"):
+        from app.enrichment import _parcel_cache
+        key = f"parcel:{address.lower()}|{town.lower()}|{state.lower()}"
+        _parcel_cache.pop(key, None)
+
+    def test_import(self):
+        from app.enrichment import fetch_lot_acres_parcel
+        assert callable(fetch_lot_acres_parcel)
+
+    def test_returns_none_without_address(self):
+        from app.enrichment import fetch_lot_acres_parcel
+        assert fetch_lot_acres_parcel(None, "Armonk", "NY") is None
+
+    def test_returns_none_without_town(self):
+        from app.enrichment import fetch_lot_acres_parcel
+        assert fetch_lot_acres_parcel("21 Pheasant Dr", None, "NY") is None
+
+    def test_nj_state_skipped(self):
+        """NJ addresses should return None without any HTTP call."""
+        from app.enrichment import fetch_lot_acres_parcel
+        with patch("urllib.request.urlopen") as mock_open:
+            result = fetch_lot_acres_parcel("58 S Brook Dr", "Harding Township", "NJ")
+        assert result is None
+        mock_open.assert_not_called()
+
+    def test_ct_state_skipped(self):
+        from app.enrichment import fetch_lot_acres_parcel
+        with patch("urllib.request.urlopen") as mock_open:
+            result = fetch_lot_acres_parcel("10 Maple Ave", "Greenwich", "CT")
+        assert result is None
+        mock_open.assert_not_called()
+
+    def test_nj_town_in_map_skipped(self):
+        """Town explicitly mapped to None (NJ) should be skipped even with state=NY."""
+        from app.enrichment import fetch_lot_acres_parcel
+        with patch("urllib.request.urlopen") as mock_open:
+            result = fetch_lot_acres_parcel("5 Oak Rd", "Morristown", "NJ")
+        assert result is None
+        mock_open.assert_not_called()
+
+    def test_single_result_returns_acres(self):
+        """Single result with ACRES set — return it directly."""
+        from app.enrichment import fetch_lot_acres_parcel
+        self._clear_cache("9 Irving Pl", "Irvington")
+
+        feature = _nys_feature("9 IRVING PL", acres=0.75, muni="IRVINGTON")
+        mock_resp = _make_nys_response([feature])
+
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            result = fetch_lot_acres_parcel("9 Irving Pl", "Irvington", "NY")
+
+        assert result == 0.75
+
+    def test_falls_back_to_calc_acres_when_acres_zero(self):
+        """When ACRES=0, CALC_ACRES should be used as fallback."""
+        from app.enrichment import fetch_lot_acres_parcel
+        self._clear_cache("15 Mill Rd", "Scarsdale")
+
+        feature = _nys_feature("15 MILL RD", acres=0.0, calc_acres=1.23, muni="SCARSDALE")
+        mock_resp = _make_nys_response([feature])
+
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            result = fetch_lot_acres_parcel("15 Mill Rd", "Scarsdale", "NY")
+
+        assert result == 1.23
+
+    def test_multiple_results_picks_parcel_addr_match(self):
+        """With multiple results, 3-word PARCEL_ADDR match should win."""
+        from app.enrichment import fetch_lot_acres_parcel
+        self._clear_cache("8 Old Roaring Brook Rd", "Mount Kisco")
+
+        features = [
+            _nys_feature("8 OLD FARM LN", acres=0.45, muni="NEW CASTLE"),
+            _nys_feature("8 OLD ROARING BROOK RD", acres=0.23, muni="NEW CASTLE"),
+            _nys_feature("8 OLD CHURCH RD", acres=1.10, muni="NEW CASTLE"),
+        ]
+        mock_resp = _make_nys_response(features)
+
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            result = fetch_lot_acres_parcel("8 Old Roaring Brook Rd", "Mount Kisco", "NY")
+
+        assert result == 0.23
+
+    def test_multiple_results_no_addr_match_uses_muni(self):
+        """With multiple results and no 3-word addr match, MUNI_NAME match wins."""
+        from app.enrichment import fetch_lot_acres_parcel
+        self._clear_cache("5 Main St", "Armonk")
+
+        features = [
+            _nys_feature("5 MAIN ST", acres=0.5, muni="NORTH CASTLE", citytown="ARMONK"),
+            _nys_feature("5 MAIN ST", acres=0.9, muni="HARRISON", citytown="HARRISON"),
+        ]
+        mock_resp = _make_nys_response(features)
+
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            result = fetch_lot_acres_parcel("5 Main St", "North Castle", "NY")
+
+        # MUNI_NAME "NORTH CASTLE" matches town "North Castle" → score 2
+        assert result == 0.5
+
+    def test_no_results_returns_none(self):
+        from app.enrichment import fetch_lot_acres_parcel
+        self._clear_cache("99 Fake St", "Chappaqua")
+
+        mock_resp = _make_nys_response([])
+
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            result = fetch_lot_acres_parcel("99 Fake St", "Chappaqua", "NY")
+
+        assert result is None
+
+    def test_network_error_returns_none(self):
+        from app.enrichment import fetch_lot_acres_parcel
+        self._clear_cache("10 Ridge Rd", "Bedford")
+
+        with patch("urllib.request.urlopen", side_effect=OSError("timeout")):
+            result = fetch_lot_acres_parcel("10 Ridge Rd", "Bedford", "NY")
+
+        assert result is None
+
+    def test_cache_hit_skips_http(self):
+        """Second call with same address must not make another HTTP request."""
+        from app.enrichment import fetch_lot_acres_parcel
+        self._clear_cache("6 Killington St", "Chappaqua")
+
+        feature = _nys_feature("6 KILLINGTON ST", acres=2.1, muni="NEW CASTLE")
+        mock_resp = _make_nys_response([feature])
+
+        with patch("urllib.request.urlopen", return_value=mock_resp) as mock_open:
+            fetch_lot_acres_parcel("6 Killington St", "Chappaqua", "NY")
+            fetch_lot_acres_parcel("6 Killington St", "Chappaqua", "NY")
+
+        assert mock_open.call_count == 1
+
+    def test_town_to_county_map_has_key_towns(self):
+        """Spot-check that _TOWN_TO_COUNTY covers expected Westchester towns."""
+        from app.enrichment import _TOWN_TO_COUNTY
+        for town in ("armonk", "chappaqua", "scarsdale", "mount kisco", "irvington"):
+            assert town in _TOWN_TO_COUNTY, f"{town} missing from _TOWN_TO_COUNTY"
+            assert _TOWN_TO_COUNTY[town] == "Westchester"
+
+    def test_result_rounded_to_4_decimal_places(self):
+        from app.enrichment import fetch_lot_acres_parcel
+        self._clear_cache("3 Valley Rd", "Pleasantville")
+
+        feature = _nys_feature("3 VALLEY RD", acres=0.333333333, muni="PLEASANTVILLE")
+        mock_resp = _make_nys_response([feature])
+
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            result = fetch_lot_acres_parcel("3 Valley Rd", "Pleasantville", "NY")
+
+        assert result == round(0.333333333, 4)
