@@ -1174,7 +1174,7 @@ def fetch_lot_acres_parcel(
         """From a list of candidate features, pick the best match and return acres.
 
         Scoring priority:
-          3 — PARCEL_ADDR matches input address (street number + first street word)
+          3 — PARCEL_ADDR matches input address (first 3 words: number + 2 street words)
           2 — MUNI_NAME matches town name
           1 — CITYTOWN_NAME matches town name
           0 — no geographic match (only used when there's exactly 1 result)
@@ -1191,13 +1191,14 @@ def fetch_lot_acres_parcel(
             parcel_addr = (a.get("PARCEL_ADDR") or "").upper()
 
             score = 0
-            # Highest priority: parcel address matches input address
-            # Compare by stripping suffix words (RD, ST, DR, etc.) and comparing core
+            # Highest priority: parcel address matches input address.
+            # Compare the first N significant words: street number + first 2 street words
+            # (3 total). This disambiguates "8 OLD ROARING BROOK RD" from "8 OLD FARM LN".
+            # For short street names (< 3 words total), use MUNI/CITYTOWN match instead.
             addr_words = addr_upper.split()
             parcel_words = parcel_addr.split()
-            # Match if at least 2 words overlap (number + first street word)
-            if len(addr_words) >= 2 and len(parcel_words) >= 2:
-                if addr_words[0] == parcel_words[0] and addr_words[1] == parcel_words[1]:
+            if len(addr_words) >= 3 and len(parcel_words) >= 3:
+                if addr_words[:3] == parcel_words[:3]:
                     score = 3
 
             if score < 3:
