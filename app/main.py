@@ -639,25 +639,31 @@ async def add_listing_from_url(request: Request):
     if image_urls:
         db.add_listing_images(listing_id, image_urls)
 
-    # Score with AI
-    result_info = {
+    # Score with AI in a background thread to avoid Fly proxy timeout (60s)
+    def _score_in_background(lid: int):
+        criteria = db.get_active_criteria()
+        if not criteria:
+            return
+        saved = db.get_listing_by_id(lid)
+        if not saved:
+            return
+        try:
+            score = _rescore_one_listing(saved, criteria)
+            from app.notifier import notify_new_listing
+            notify_new_listing(saved, score.score, score.verdict, score.evaluation_method)
+        except Exception as exc:
+            logger.error(f"Background scoring failed for listing #{lid}: {exc}")
+
+    threading.Thread(target=_score_in_background, args=(listing_id,), daemon=True).start()
+
+    return {
         "listing_id": listing_id,
         "address": address,
         "town": town,
         "url": resolved_url,
         "description_found": description is not None,
+        "scoring": "pending",
     }
-
-    criteria = db.get_active_criteria()
-    if criteria:
-        saved = db.get_listing_by_id(listing_id)
-        score = _rescore_one_listing(saved, criteria)
-        result_info["score"] = score.score
-        result_info["verdict"] = score.verdict
-        from app.notifier import notify_new_listing
-        notify_new_listing(saved, score.score, score.verdict, score.evaluation_method)
-
-    return result_info
 
 
 # --- Re-scoring ---
