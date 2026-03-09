@@ -170,7 +170,8 @@ Listing data (address, description, etc.) could contain malicious instructions.
 ### Buyer Criteria (Current — as configured in dashboard)
 
 **Hard Requirements** (any failure = Reject, score 0):
-- >= 2,200 sqft (2,200–2,400 sqft: severe soft penalty -12 to -15; no upper bound — 4,500+ sqft is a slight concern)
+- Location must be in New York State — NJ listings are a hard pass (Reject immediately, do not score)
+- >= 2,200 sqft (2,200–2,400 sqft: mild soft penalty -5 to -7; no upper bound — 4,500+ sqft is a slight concern)
 - 4+ bedrooms (no upper bound — but 6+ is a slight concern: unusual layout)
 - Price: $1.25M–$2M (target range $1.25M–$1.5M; above $1.5M is a concern, not a reject)
 - Must be detached (no townhouse, condo, co-op)

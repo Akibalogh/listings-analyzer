@@ -6,6 +6,9 @@ All notable changes to Listings Analyzer are documented here.
 
 ## [Unreleased]
 
+### Changed
+- **Criteria v60: NJ hard reject + reduced sqft penalty** — NJ listings are now an explicit hard pass (Reject immediately). Borderline sqft penalty reduced from `-12 to -15` → `-5 to -7` for 2,200–2,400 sqft range (no longer "severe"). PRD updated to match.
+
 ### Added
 - **NYS GIS parcel lot_acres lookup** — `fetch_lot_acres_parcel()` in `enrichment.py` queries the free NYS GIS Tax Parcels public ArcGIS REST service to backfill `lot_acres` for listings where the description contains no lot size data. Covers all Westchester (and other NY) county parcels; NJ/CT addresses are skipped. Address matching uses a 3-word prefix comparison against PARCEL_ADDR (number + first 2 street words) to disambiguate similar streets (e.g. "8 Old Roaring Brook Rd" vs "8 Old Farm Ln"). Falls back to MUNI_NAME/CITYTOWN_NAME town matching when address words are ambiguous. Rate-limited at 1.2s between calls. Wired into the `_enrich_all()` backfill pipeline for automatic coverage on new listings.
 - **`POST /manage/enrich-lot-acres` endpoint** — one-shot backfill that runs the parcel lookup for all listings with `lot_acres=NULL`. Returns `{total, found, not_found, skipped_already_set}`. Authenticated via `x-manage-key`.
