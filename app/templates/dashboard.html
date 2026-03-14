@@ -133,10 +133,8 @@
   }
   .last-polled {
     font-size: 11px;
-    color: rgba(255,255,255,0.5);
-    width: 100%;
-    text-align: right;
-    margin-top: 2px;
+    color: rgba(255,255,255,0.45);
+    margin-top: 3px;
   }
   .last-polled .status-dot {
     display: inline-block;
@@ -1431,6 +1429,7 @@
     <div class="header-top">
       <div>
         <h1>Listings Analyzer <span class="count" id="count"></span></h1>
+        <span class="last-polled" id="lastPolled"></span>
       </div>
       <div class="header-actions">
         <span class="user-email auth-only" id="userEmail"></span>
@@ -1442,7 +1441,6 @@
         </button>
         <button class="logout-btn auth-only" onclick="doLogout()">Sign out</button>
         <button class="signin-btn" id="signinBtn" onclick="showLogin()">Sign in</button>
-        <span class="last-polled" id="lastPolled"></span>
       </div>
     </div>
   </div>
