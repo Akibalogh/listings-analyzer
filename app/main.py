@@ -1285,7 +1285,7 @@ def manage_update_listing(request: Request, body: dict = {}):
     """Update specific fields on a listing by ID.
 
     Body: {"listing_id": 62, "year_built": 1994, "force": true}
-    Allowed fields: year_built, price, sqft, bedrooms, bathrooms, address, town, state, zip_code, property_type, lot_acres, list_date
+    Allowed fields: year_built, price, sqft, bedrooms, bathrooms, address, town, state, zip_code, property_type, lot_acres, list_date, listing_status
     Add "force": true to overwrite existing values (default: only fills null/empty fields).
     Protected by MANAGE_KEY env var.
     """
@@ -1298,7 +1298,7 @@ def manage_update_listing(request: Request, body: dict = {}):
         raise HTTPException(status_code=400, detail="Provide listing_id in JSON body")
 
     force = bool(body.get("force", False))
-    ALLOWED = {"year_built", "price", "sqft", "bedrooms", "bathrooms", "address", "town", "state", "zip_code", "property_type", "lot_acres", "list_date"}
+    ALLOWED = {"year_built", "price", "sqft", "bedrooms", "bathrooms", "address", "town", "state", "zip_code", "property_type", "lot_acres", "list_date", "listing_status"}
     fields = {k: v for k, v in body.items() if k in ALLOWED and v is not None}
     if not fields:
         raise HTTPException(status_code=400, detail=f"No valid fields provided. Allowed: {sorted(ALLOWED)}")
