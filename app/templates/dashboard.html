@@ -133,11 +133,22 @@
   }
   .last-polled {
     font-size: 11px;
-    color: rgba(255,255,255,0.35);
+    color: rgba(255,255,255,0.5);
     width: 100%;
     text-align: right;
     margin-top: 2px;
   }
+  .last-polled .status-dot {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    margin-right: 4px;
+    vertical-align: middle;
+  }
+  .last-polled .status-dot.green { background: #22c55e; }
+  .last-polled .status-dot.yellow { background: #eab308; }
+  .last-polled .status-dot.red { background: #ef4444; }
   .data-confidence {
     font-size: 11px;
     font-weight: 600;
@@ -2930,13 +2941,53 @@ document.getElementById('criteriaOverlay').addEventListener('click', function(e)
 
 /* ==== Last polled timestamp ==== */
 function updateLastPolled() {
-  var now = new Date();
-  var h = now.getHours();
-  var m = now.getMinutes();
-  var ampm = h >= 12 ? 'PM' : 'AM';
-  h = h % 12 || 12;
-  var timeStr = h + ':' + (m < 10 ? '0' : '') + m + ' ' + ampm;
-  document.getElementById('lastPolled').textContent = 'Last checked: ' + timeStr;
+  /* Called after manual poll — refresh the server-side status */
+  fetchPollStatus();
+}
+
+async function fetchPollStatus() {
+  try {
+    var res = await fetch('/health');
+    var data = await res.json();
+    var poll = data.poll || {};
+    var el = document.getElementById('lastPolled');
+    if (!poll.last_poll_at) {
+      el.innerHTML = '<span class="status-dot yellow"></span>No poll data yet';
+      return;
+    }
+    var pollDate = new Date(poll.last_poll_at);
+    var now = new Date();
+    var diffMs = now - pollDate;
+    var diffMins = Math.floor(diffMs / 60000);
+    var diffHours = Math.floor(diffMins / 60);
+    var diffDays = Math.floor(diffHours / 24);
+
+    var timeAgo;
+    if (diffMins < 1) timeAgo = 'just now';
+    else if (diffMins < 60) timeAgo = diffMins + 'm ago';
+    else if (diffHours < 24) timeAgo = diffHours + 'h ago';
+    else timeAgo = diffDays + 'd ago';
+
+    /* Color: green < 2h, yellow < 6h, red >= 6h */
+    var color = 'green';
+    if (diffHours >= 6) color = 'red';
+    else if (diffHours >= 2) color = 'yellow';
+
+    var found = poll.listings_found || 0;
+    var src = poll.last_poll_source || '';
+    var extra = found > 0 ? ' · ' + found + ' new' : '';
+    if (poll.last_error) {
+      color = 'red';
+      extra = ' · error';
+    }
+
+    el.innerHTML = '<span class="status-dot ' + color + '"></span>Checked ' + timeAgo + extra;
+    el.title = 'Last poll: ' + pollDate.toLocaleString() + ' (' + src + ')' +
+      (poll.last_error ? '\nError: ' + poll.last_error : '') +
+      '\nConsecutive empty: ' + (poll.consecutive_empty || 0);
+  } catch(e) {
+    /* silently ignore */
+  }
 }
 
 /* ==== Init ==== */
@@ -2945,6 +2996,9 @@ function updateLastPolled() {
   loadGoogleClientId();
   loadListings();
   checkAuth();
+  fetchPollStatus();
+  /* Refresh poll status every 5 minutes */
+  setInterval(fetchPollStatus, 5 * 60 * 1000);
 })();
 </script>
 

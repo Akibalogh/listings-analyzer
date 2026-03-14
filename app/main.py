@@ -30,6 +30,30 @@ TEMPLATES_DIR = Path(__file__).parent / "templates"
 # Fly machine, 5 is safe even if a background poll is still in memory.
 _BATCH_CHUNK_SIZE = 5
 
+# --- Poll status tracking ---
+_poll_status = {
+    "last_poll_at": None,       # ISO timestamp of last completed poll
+    "listings_found": 0,        # listings found in last poll
+    "last_poll_source": None,   # "scheduled", "manual", "manage"
+    "consecutive_empty": 0,     # consecutive polls with 0 new listings
+    "last_error": None,         # last error message, if any
+}
+_poll_lock = threading.Lock()
+
+
+def _record_poll(source: str, count: int, error: str | None = None):
+    """Record the result of a poll cycle."""
+    from datetime import datetime, timezone
+    with _poll_lock:
+        _poll_status["last_poll_at"] = datetime.now(timezone.utc).isoformat()
+        _poll_status["listings_found"] = count
+        _poll_status["last_poll_source"] = source
+        _poll_status["last_error"] = error
+        if count == 0 and error is None:
+            _poll_status["consecutive_empty"] += 1
+        else:
+            _poll_status["consecutive_empty"] = 0
+
 
 def _scheduled_poll_loop(interval_hours: int):
     """Background thread: poll Gmail and prune sold listings on a fixed interval."""
@@ -40,8 +64,10 @@ def _scheduled_poll_loop(interval_hours: int):
         try:
             results = poll_once()
             logger.info(f"Scheduled poll complete: {len(results)} listing(s)")
-        except Exception:
+            _record_poll("scheduled", len(results))
+        except Exception as e:
             logger.exception("Scheduled poll failed")
+            _record_poll("scheduled", 0, error=str(e))
 
         # Prune sold/off-market listings
         try:
@@ -171,7 +197,9 @@ def dashboard():
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    with _poll_lock:
+        poll = dict(_poll_status)
+    return {"status": "ok", "poll": poll}
 
 
 @app.post("/poll")
@@ -179,6 +207,7 @@ def trigger_poll(request: Request):
     """Trigger a Gmail poll cycle. Returns processed listings."""
     _require_auth(request)
     results = poll_once()
+    _record_poll("manual", len(results))
     return {
         "listings_processed": len(results),
         "results": results,
@@ -1275,6 +1304,7 @@ def manage_poll(request: Request):
         raise HTTPException(status_code=403, detail="Invalid or missing management key")
 
     results = poll_once()
+    _record_poll("manage", len(results))
     return {
         "listings_processed": len(results),
         "results": results,
