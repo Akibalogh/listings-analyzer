@@ -68,6 +68,12 @@ CREATE TABLE IF NOT EXISTS evaluation_criteria (
     created_by TEXT,
     created_at TEXT DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS app_state (
+    key TEXT PRIMARY KEY,
+    value TEXT,
+    updated_at TEXT DEFAULT (datetime('now'))
+);
 """
 
 # Postgres-compatible schema (uses SERIAL, TIMESTAMP, etc.)
@@ -123,6 +129,12 @@ CREATE TABLE IF NOT EXISTS evaluation_criteria (
     version INTEGER NOT NULL DEFAULT 1,
     created_by TEXT,
     created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS app_state (
+    key TEXT PRIMARY KEY,
+    value TEXT,
+    updated_at TIMESTAMP DEFAULT NOW()
 );
 """
 
@@ -925,3 +937,40 @@ def get_listing_by_id(listing_id: int) -> dict | None:
             columns = [desc[0] for desc in cur.description]
             return dict(zip(columns, row))
         return dict(row)
+
+
+def get_app_state(key: str) -> str | None:
+    """Read a value from the persistent app_state KV store."""
+    ph = _placeholder()
+    try:
+        with get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(f"SELECT value FROM app_state WHERE key = {ph}", (key,))
+            row = cur.fetchone()
+            if not row:
+                return None
+            return row[0] if settings.is_postgres else row["value"]
+    except Exception:
+        return None
+
+
+def set_app_state(key: str, value: str) -> None:
+    """Write a value to the persistent app_state KV store (upsert)."""
+    ph = _placeholder()
+    try:
+        with get_connection() as conn:
+            cur = conn.cursor()
+            if settings.is_postgres:
+                cur.execute(
+                    f"INSERT INTO app_state (key, value, updated_at) VALUES ({ph}, {ph}, NOW()) "
+                    f"ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()",
+                    (key, value),
+                )
+            else:
+                cur.execute(
+                    f"INSERT INTO app_state (key, value, updated_at) VALUES ({ph}, {ph}, datetime('now')) "
+                    f"ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')",
+                    (key, value),
+                )
+    except Exception:
+        logger.warning(f"set_app_state failed for key={key}", exc_info=True)

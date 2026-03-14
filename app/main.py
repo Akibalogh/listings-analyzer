@@ -41,8 +41,23 @@ _poll_status = {
 _poll_lock = threading.Lock()
 
 
+def _load_poll_status() -> None:
+    """Load persisted poll status from DB into the in-memory dict (called at startup)."""
+    import json
+    raw = db.get_app_state("poll_status")
+    if not raw:
+        return
+    try:
+        saved = json.loads(raw)
+        with _poll_lock:
+            _poll_status.update(saved)
+    except Exception:
+        pass
+
+
 def _record_poll(source: str, count: int, error: str | None = None):
-    """Record the result of a poll cycle."""
+    """Record the result of a poll cycle and persist to DB."""
+    import json
     from datetime import datetime, timezone
     with _poll_lock:
         _poll_status["last_poll_at"] = datetime.now(timezone.utc).isoformat()
@@ -53,6 +68,8 @@ def _record_poll(source: str, count: int, error: str | None = None):
             _poll_status["consecutive_empty"] += 1
         else:
             _poll_status["consecutive_empty"] = 0
+        snapshot = dict(_poll_status)
+    db.set_app_state("poll_status", json.dumps(snapshot))
 
 
 def _scheduled_poll_loop(interval_hours: int):
@@ -88,6 +105,7 @@ def _scheduled_poll_loop(interval_hours: int):
 async def lifespan(app: FastAPI):
     db.init_db()
     logger.info("Database initialized")
+    _load_poll_status()
 
     # Start background poller if configured
     interval = settings.poll_interval_hours
