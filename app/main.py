@@ -479,8 +479,10 @@ async def toggle_passed(request: Request, listing_id: int):
 
 @app.post("/listings/{listing_id}/agent")
 async def set_agent(request: Request, listing_id: int):
-    """Set the agent name for a listing. Requires auth."""
-    _require_auth(request)
+    """Set the agent name for a listing. Requires auth or manage key."""
+    key = request.headers.get("x-manage-key", "")
+    if not (settings.manage_key and key == settings.manage_key):
+        _require_auth(request)
     listing = db.get_listing_by_id(listing_id)
     if not listing:
         raise HTTPException(status_code=404, detail=f"Listing #{listing_id} not found")
