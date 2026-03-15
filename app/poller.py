@@ -135,6 +135,11 @@ def poll_once() -> list[dict]:
             )
             listing_id = db.save_listing(listing, score, email_id, enrichment=enrichment)
 
+            # Tag listing with agent name based on sender email
+            agent_name = settings.resolve_agent_name(sender)
+            if agent_name and listing_id:
+                db.update_listing_fields_by_id(listing_id, force=True, agent_name=agent_name)
+
             # Attach scraped images if found
             if scraped_images and listing_id:
                 db.add_listing_images(listing_id, scraped_images)

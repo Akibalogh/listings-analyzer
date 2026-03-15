@@ -971,6 +971,23 @@
     flex-shrink: 0;
   }
 
+  /* Agent badge */
+  .agent-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 3px 8px;
+    border-radius: 100px;
+    font-size: 10px;
+    font-weight: 600;
+    white-space: nowrap;
+    letter-spacing: 0.2px;
+    background: var(--blue-bg);
+    color: var(--blue);
+    border: 1px solid #bfdbfe;
+    flex-shrink: 0;
+  }
+
   /* Want to Go button (in expanded detail) */
   .tour-request-btn {
     background: transparent;
@@ -1996,6 +2013,10 @@ function buildCard(l) {
   var pendingStatuses = ['Pending', 'Under Contract', 'Closed'];
   if (pendingStatuses.indexOf(l.listing_status || '') >= 0) {
     summary.appendChild(el('span', {className: 'pending-badge'}, l.listing_status));
+  }
+  /* Agent badge */
+  if (l.agent_name) {
+    summary.appendChild(el('span', {className: 'agent-badge'}, l.agent_name));
   }
   /* AI failure badge — score is a placeholder, not a real evaluation */
   if (l.evaluation_method === 'ai_failed') {

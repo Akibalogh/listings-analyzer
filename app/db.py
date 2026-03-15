@@ -198,6 +198,9 @@ def init_db():
     # Remove duplicates that now share the same address_key after recomputation
     _dedup_by_address_key()
 
+    # Backfill agent_name from processed_emails sender using agent_map
+    _backfill_agent_names()
+
     logger.info("Database initialized")
 
 
@@ -576,6 +579,7 @@ def _migrate_add_columns():
         ("listings", "pool_type", "TEXT"),
         ("listings", "has_basement", "BOOLEAN"),
         ("listings", "basement_type", "TEXT"),
+        ("listings", "agent_name", "TEXT"),
         ("scores", "evaluation_method", "TEXT DEFAULT 'deterministic'"),
         ("scores", "criteria_version", "INTEGER"),
         ("scores", "ai_reasoning", "TEXT"),
@@ -678,6 +682,46 @@ def _dedup_by_address_key():
                 cur.execute(f"DELETE FROM listings WHERE id = {ph}", (lid,))
             conn.commit()
         logger.info(f"Deduped {len(delete_ids)} listing(s) by address_key")
+
+
+def _backfill_agent_names():
+    """Backfill agent_name for listings that don't have one yet.
+
+    Looks up the sender from the linked processed_emails record and resolves
+    it to an agent name using the AGENT_MAP config.
+    """
+    from app.config import settings
+
+    if not settings.agent_map.strip():
+        return
+
+    ph = _placeholder()
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT l.id, e.sender FROM listings l "
+            "JOIN processed_emails e ON e.id = l.source_email_id "
+            "WHERE l.agent_name IS NULL"
+        )
+        if settings.is_postgres:
+            rows = [(r[0], r[1]) for r in cur.fetchall()]
+        else:
+            rows = [(r["id"], r["sender"]) for r in cur.fetchall()]
+
+    updated = 0
+    for listing_id, sender in rows:
+        agent_name = settings.resolve_agent_name(sender)
+        if agent_name:
+            with get_connection() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    f"UPDATE listings SET agent_name = {ph} WHERE id = {ph}",
+                    (agent_name, listing_id),
+                )
+                updated += 1
+
+    if updated:
+        logger.info(f"Backfilled agent_name for {updated} listing(s)")
 
 
 # --- Evaluation criteria CRUD ---

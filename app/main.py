@@ -477,6 +477,20 @@ async def toggle_passed(request: Request, listing_id: int):
     return {"listing_id": listing_id, "passed": passed}
 
 
+@app.post("/listings/{listing_id}/agent")
+async def set_agent(request: Request, listing_id: int):
+    """Set the agent name for a listing. Requires auth."""
+    _require_auth(request)
+    listing = db.get_listing_by_id(listing_id)
+    if not listing:
+        raise HTTPException(status_code=404, detail=f"Listing #{listing_id} not found")
+
+    body = await request.json()
+    agent_name = (body.get("agent_name") or "").strip() or None
+    db.update_listing_fields_by_id(listing_id, force=True, agent_name=agent_name)
+    return {"listing_id": listing_id, "agent_name": agent_name}
+
+
 # --- Mark as sold (delete) ---
 
 

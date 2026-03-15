@@ -37,6 +37,10 @@ class Settings(BaseSettings):
     # Slack webhook URL for listing notifications
     slack_webhook_url: str = ""
 
+    # Agent name mapping: "email_or_domain:Agent Name,email_or_domain:Agent Name"
+    # e.g. "jhermoza7@gmail.com:Matt Hermoza,redfin.com:Redfin"
+    agent_map: str = ""
+
     # AI evaluation model
     ai_eval_model: str = "claude-opus-4-6"
 
@@ -92,6 +96,42 @@ class Settings(BaseSettings):
             if key in creds:
                 return creds[key].get("client_id", "")
         return ""
+
+    @property
+    def agent_map_dict(self) -> dict[str, str]:
+        """Parse agent_map into {email_or_domain: agent_name}."""
+        if not self.agent_map.strip():
+            return {}
+        result = {}
+        for entry in self.agent_map.split(","):
+            entry = entry.strip()
+            if ":" in entry:
+                key, name = entry.split(":", 1)
+                result[key.strip().lower()] = name.strip()
+        return result
+
+    def resolve_agent_name(self, sender_email: str) -> str | None:
+        """Resolve an email sender to an agent name using agent_map.
+
+        Matches full email first, then domain.
+        """
+        if not sender_email:
+            return None
+        mapping = self.agent_map_dict
+        if not mapping:
+            return None
+        # Normalize: extract email from "Name <email>" format
+        email = sender_email.lower().strip()
+        if "<" in email:
+            email = email.split("<")[-1].rstrip(">").strip()
+        # Exact email match
+        if email in mapping:
+            return mapping[email]
+        # Domain match
+        domain = email.split("@")[-1] if "@" in email else ""
+        if domain and domain in mapping:
+            return mapping[domain]
+        return None
 
     @property
     def effective_session_secret(self) -> str:
