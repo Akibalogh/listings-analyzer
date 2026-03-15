@@ -1882,6 +1882,10 @@ function render() {
 
   if (activeFilter === 'Passed') {
     items = items.filter(function(l) { return l.passed; });
+  } else if (activeFilter === 'Toured') {
+    items = items.filter(function(l) { return l.toured; });
+  } else if (activeFilter === 'Want to Go') {
+    items = items.filter(function(l) { return l.tour_requested; });
   } else {
     if (_displayPrefs.hidePassed) {
       items = items.filter(function(l) { return !l.passed; });
@@ -1897,10 +1901,6 @@ function render() {
     }
     if (activeFilter === 'not-reject') {
       items = items.filter(function(l) { return l.verdict !== 'Reject'; });
-    } else if (activeFilter === 'Toured') {
-      items = items.filter(function(l) { return l.toured; });
-    } else if (activeFilter === 'Want to Go') {
-      items = items.filter(function(l) { return l.tour_requested; });
     }
   }
 
