@@ -10,8 +10,8 @@ from app.main import app
 
 
 def make_settings(agent_map: str) -> Settings:
-    """Create a Settings instance with only agent_map set, ignoring env files."""
-    return Settings(agent_map=agent_map, _env_file=None)  # type: ignore[call-arg]
+    """Create a Settings instance with only agent_map set, bypassing env/file loading."""
+    return Settings.model_construct(agent_map=agent_map)
 
 
 @pytest.fixture
