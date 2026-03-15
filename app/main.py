@@ -2136,6 +2136,29 @@ def manage_enrich(request: Request):
     return {"status": "started", "clear_bogus": clear_bogus, "clear_bogus_commute": clear_bogus_commute}
 
 
+@app.get("/manage/senders")
+def manage_senders(request: Request):
+    """List distinct email senders and their listing counts. Requires manage key."""
+    key = request.headers.get("x-manage-key", "")
+    if not (settings.manage_key and key == settings.manage_key):
+        _require_auth(request)
+    with db.get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT e.sender, COUNT(l.id) as listing_count
+            FROM processed_emails e
+            LEFT JOIN listings l ON l.source_email_id = e.id
+            GROUP BY e.sender
+            ORDER BY listing_count DESC
+        """)
+        if settings.is_postgres:
+            cols = [d[0] for d in cur.description]
+            rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+        else:
+            rows = [dict(r) for r in cur.fetchall()]
+    return {"senders": rows}
+
+
 @app.get("/manage/enrich/status")
 def manage_enrich_status():
     """Check enrichment status."""
