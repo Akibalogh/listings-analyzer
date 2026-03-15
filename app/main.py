@@ -523,7 +523,9 @@ async def scrape_listing(request: Request, listing_id: int):
     """Set a listing URL, scrape the description, and re-score."""
     from app.parsers.onehome import scrape_listing_description
 
-    _require_auth(request)
+    key = request.headers.get("x-manage-key", "")
+    if not (settings.manage_key and key == settings.manage_key):
+        _require_auth(request)
     body = await request.json()
     url = (body.get("listing_url") or "").strip()
     if not url or not url.startswith(("http://", "https://")):
