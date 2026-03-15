@@ -1,6 +1,6 @@
 """Tests for agent tagging: config resolution, API endpoints, and DB backfill."""
 
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -10,8 +10,13 @@ from app.main import app
 
 
 def make_settings(agent_map: str) -> Settings:
-    """Create a Settings instance with only agent_map set, bypassing env/file loading."""
-    return Settings.model_construct(agent_map=agent_map)
+    """Create a Settings instance with only agent_map set.
+
+    Uses environment variable override to avoid reading from .env files or
+    conflicting env vars while still exercising the real Settings class.
+    """
+    with patch.dict("os.environ", {"AGENT_MAP": agent_map}, clear=False):
+        return Settings()
 
 
 @pytest.fixture
