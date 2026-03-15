@@ -268,9 +268,9 @@ Mobile-first single-page app served at `/` (`app/templates/dashboard.html`).
 - Filter counts shown on chips (respect display preferences for passed/pending hiding)
 
 ### Display Settings Panel (overlay, auth-only via ⚙ gear icon)
-- "Hide passed listings" toggle (default ON) — excludes passed from All/Active/Toured/Want to Go; still visible via Passed chip
-- "Hide pending/sold listings" toggle (default OFF) — excludes listings with status Pending/Sold/Under Contract/Closed
-- "Hide low-scoring listings" toggle (default OFF) — excludes Weak Match and Reject verdicts
+- "Hide passed listings" toggle (default ON) — excludes passed from All/Active view; **does not affect** Passed, Toured, or Want to Go filter chips
+- "Hide pending/sold listings" toggle (default OFF) — excludes Pending/Sold/Under Contract/Closed from All/Active view; **does not affect** Toured or Want to Go filter chips
+- "Hide low-scoring listings" toggle (default OFF) — excludes Weak Match and Reject from All/Active view; **does not affect** Toured or Want to Go filter chips
 - "Default sort" dropdown — persisted across sessions
 - All preferences auto-saved to `localStorage` on toggle change (no Save button)
 
@@ -384,7 +384,9 @@ Mobile-first single-page app served at `/` (`app/templates/dashboard.html`).
 - `POST /manage/enrich` — backfill school data + commute times; `?clear_bogus=true` to re-fetch; runs in background
 - `POST /manage/prune-sold` — check Redfin URLs via Jina Reader for sold/off-market status; dry-run by default, `?fix=true` deletes sold listings
 - `POST /manage/update-criteria` — save new criteria instructions and trigger re-score without Google OAuth session (body: `{"instructions": "...", "created_by": "..."}`, `?sequential=true` for sequential mode)
-- `POST /manage/update-listing` — update individual listing fields by ID without re-scraping (body: `{"listing_id": 62, "year_built": 1994}`); allowed fields: year_built, price, sqft, bedrooms, bathrooms, address, town, state, zip_code
+- `POST /manage/update-listing` — update individual listing fields by ID without re-scraping (body: `{"listing_id": 62, "year_built": 1994}`); allowed fields: year_built, price, sqft, bedrooms, bathrooms, address, town, state, zip_code, property_type, lot_acres, list_date, listing_status; add `"force": true` to overwrite non-null values
+- `POST /listings/{id}/agent` — set agent_name on a listing (body: `{"agent_name": "Matt Hermoza"}`); accepts auth session or MANAGE_KEY
+- `GET /manage/senders` — list distinct email senders with listing counts; requires auth or MANAGE_KEY
 
 ## 9. Key Technical Decisions
 
@@ -472,6 +474,9 @@ Mobile-first single-page app served at `/` (`app/templates/dashboard.html`).
 - Commute is drive-to-station + transit only: pure transit (walking/bus) removed entirely for consistent, comparable commute times across all listings
 - Station overrides expanded: Cortlandt Manor → Croton-Harmon; Chappaqua/Millwood/New Castle → Chappaqua; Armonk/North Castle → North White Plains
 - `POST /manage/update-criteria` endpoint for criteria updates without Google OAuth (protected by MANAGE_KEY)
+- **Agent tagging** — `AGENT_MAP` env var maps email senders / domains to agent names (e.g. `redfin.com:Ken Wile,bronwyneharris@gmail.com:Bronwyn`); auto-applied at poll time and backfilled on startup; shown as "Shared by {name}" note in listing detail card
+- **Filter isolation fix** — Toured and Want to Go filter chips bypass all display preferences (hidePending, hidePassed, hideLowScore); regression test added
+- **Mobile header compact mode** — header collapses to icon-only buttons on screens ≤640px
 - Ground-floor bedroom scoring changed from binary reject to point-based: +15 confirmed, -20/-25 confirmed absent, -10/-15 verifiable unknown, -3/-5 missing-data unknown
 - Two-tier unknown penalty in AI prompt: verifiable unknowns (images present, feature unconfirmed) = 10–15 pt deduction; missing-data unknowns (no floor plan) = 3–5 pt mild deduction
 - Address normalization: hyphens stripped from both address and town (fixes Croton-On-Hudson duplication)

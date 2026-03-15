@@ -1663,3 +1663,45 @@ class TestManageUpdateListing:
         assert "score" not in call_kwargs
         assert "criteria_version" not in call_kwargs
         assert call_kwargs.get("year_built") == 2000
+
+
+class TestFilteredDashboardRoutes:
+    """Regression tests for filtered dashboard routes."""
+
+    def test_want_to_go_route_serves_html(self, client):
+        """GET /want-to-go should serve the dashboard HTML."""
+        res = client.get("/want-to-go")
+        assert res.status_code == 200
+        assert "text/html" in res.headers["content-type"]
+
+    def test_toured_route_serves_html(self, client):
+        res = client.get("/toured")
+        assert res.status_code == 200
+        assert "text/html" in res.headers["content-type"]
+
+    def test_passed_route_serves_html(self, client):
+        res = client.get("/passed")
+        assert res.status_code == 200
+        assert "text/html" in res.headers["content-type"]
+
+    def test_want_to_go_filter_not_hidden_by_pending_status(self):
+        """Regression: want-to-go listings with Pending status must appear in the Want to Go view.
+
+        The filter logic previously put 'Want to Go' inside the else-branch alongside
+        hidePending, which caused Pending-status tour-requested listings to be hidden.
+        This test validates the JS filter logic by inspecting the dashboard source.
+        """
+        import re
+        from pathlib import Path
+
+        html = Path("app/templates/dashboard.html").read_text()
+
+        # The fix: 'Want to Go' and 'Toured' branches must appear BEFORE the else block
+        # that applies hidePending/hidePassed/hideLowScore.
+        # Verify the structure: "Want to Go" filter check comes before the else { hidePending block.
+        want_to_go_pos = html.index("activeFilter === 'Want to Go'")
+        hide_pending_pos = html.index("_displayPrefs.hidePending")
+        assert want_to_go_pos < hide_pending_pos, (
+            "Want to Go filter must be handled before hidePending display pref "
+            "(regression: pending-status listings were hidden in Want to Go view)"
+        )
