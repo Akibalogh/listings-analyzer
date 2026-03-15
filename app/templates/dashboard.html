@@ -291,6 +291,22 @@
   .signin-btn:hover { box-shadow: 0 4px 12px rgba(37,99,235,0.4); transform: translateY(-1px); }
   .signin-btn:active { transform: translateY(0); }
 
+  /* ===== Mobile header optimizations ===== */
+  @media (max-width: 640px) {
+    .header { padding: 8px 14px; }
+    .header h1 { font-size: 15px; }
+    .last-polled { font-size: 10px; margin-top: 2px; }
+    .header-actions { gap: 4px; }
+    .user-email { display: none !important; }
+    .data-confidence { display: none !important; }
+    .mobile-hide { display: none !important; }
+    .btn-label { display: none; }
+    .btn-icon { display: inline !important; }
+    .criteria-btn { padding: 6px 10px; font-size: 16px; }
+    .poll-btn { padding: 7px 12px; }
+    .settings-btn { height: 34px; width: 38px; font-size: 18px; }
+  }
+
   /* ===== Controls / Filters ===== */
   .controls {
     display: flex;
@@ -1435,11 +1451,11 @@
         <span class="user-email auth-only" id="userEmail"></span>
         <span class="data-confidence" id="dataConfidence" style="display:none" title="Composite data completeness across all listings"></span>
         <button class="settings-btn auth-only" onclick="openSettings()" title="Settings">&#9881;</button>
-        <button class="criteria-btn auth-only" onclick="openCriteria()">&#10024; AI Criteria</button>
+        <button class="criteria-btn auth-only" onclick="openCriteria()">&#10024;<span class="btn-label"> AI Criteria</span></button>
         <button class="poll-btn auth-only" id="pollBtn" onclick="pollNow()">
-          Check Email
+          <span class="btn-label">Check Email</span><span class="btn-icon" style="display:none">&#9993;</span>
         </button>
-        <button class="logout-btn auth-only" onclick="doLogout()">Sign out</button>
+        <button class="logout-btn auth-only mobile-hide" onclick="doLogout()">Sign out</button>
         <button class="signin-btn" id="signinBtn" onclick="showLogin()">Sign in</button>
       </div>
     </div>
