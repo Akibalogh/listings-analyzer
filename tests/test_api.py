@@ -1691,10 +1691,9 @@ class TestFilteredDashboardRoutes:
         hidePending, which caused Pending-status tour-requested listings to be hidden.
         This test validates the JS filter logic by inspecting the dashboard source.
         """
-        import re
         from pathlib import Path
 
-        html = Path("app/templates/dashboard.html").read_text()
+        html = (Path(__file__).parent.parent / "app" / "templates" / "dashboard.html").read_text()
 
         # The fix: 'Want to Go' and 'Toured' branches must appear BEFORE the else block
         # that applies hidePending/hidePassed/hideLowScore.
