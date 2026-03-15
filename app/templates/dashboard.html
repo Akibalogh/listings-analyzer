@@ -1858,13 +1858,13 @@ window.addEventListener('popstate', function() {
 function updateFilterCounts() {
   var counts = { all: 0, 'not-reject': 0, 'Toured': 0, 'Want to Go': 0, 'Passed': 0 };
   allListings.forEach(function(l) {
+    if (l.toured) counts['Toured']++;
+    if (l.tour_requested) counts['Want to Go']++;
     if (l.passed) { counts['Passed']++; if (_displayPrefs.hidePassed) return; }
     var isPending = ['Pending','Sold','Under Contract','Closed'].indexOf(l.listing_status || '') >= 0;
     if (_displayPrefs.hidePending && isPending) return;
     counts['all']++;
     if (l.verdict !== 'Reject') counts['not-reject']++;
-    if (l.toured) counts['Toured']++;
-    if (l.tour_requested) counts['Want to Go']++;
   });
   document.querySelectorAll('.filter-chip').forEach(function(chip) {
     var f = chip.dataset.filter;
