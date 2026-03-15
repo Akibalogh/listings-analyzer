@@ -190,3 +190,65 @@ class TestManageSendersEndpoint:
                 res = authed_client.get("/manage/senders")
         assert res.status_code == 200
         assert "senders" in res.json()
+
+
+# ---------------------------------------------------------------------------
+# Filter chip counts
+# ---------------------------------------------------------------------------
+
+
+class TestFilterCounts:
+    """Tests for updateFilterCounts JS logic (via HTML snapshot).
+
+    Verifies that Toured and Want to Go counts are NOT filtered by display
+    preferences (hidePending, hidePassed) — a pending listing with
+    tour_requested=True must still be counted in Want to Go.
+    """
+
+    @pytest.fixture
+    def dashboard_html(self):
+        from pathlib import Path
+        path = Path(__file__).parent.parent / "app" / "templates" / "dashboard.html"
+        return path.read_text()
+
+    def test_toured_count_not_filtered_by_display_prefs(self, dashboard_html):
+        """Toured count increments before hidePending check."""
+        lines = dashboard_html.splitlines()
+        toured_idx = next(
+            i for i, ln in enumerate(lines) if "counts['Toured']++" in ln
+        )
+        hide_pending_idx = next(
+            i for i, ln in enumerate(lines)
+            if "hidePending && isPending" in ln and "return" in ln
+        )
+        assert toured_idx < hide_pending_idx, (
+            "Toured count must be incremented before the hidePending early-return"
+        )
+
+    def test_want_to_go_count_not_filtered_by_display_prefs(self, dashboard_html):
+        """Want to Go count increments before hidePending check."""
+        lines = dashboard_html.splitlines()
+        wtg_idx = next(
+            i for i, ln in enumerate(lines) if "counts['Want to Go']++" in ln
+        )
+        hide_pending_idx = next(
+            i for i, ln in enumerate(lines)
+            if "hidePending && isPending" in ln and "return" in ln
+        )
+        assert wtg_idx < hide_pending_idx, (
+            "Want to Go count must be incremented before the hidePending early-return"
+        )
+
+    def test_want_to_go_count_not_filtered_by_hide_passed(self, dashboard_html):
+        """Want to Go count increments before hidePassed check."""
+        lines = dashboard_html.splitlines()
+        wtg_idx = next(
+            i for i, ln in enumerate(lines) if "counts['Want to Go']++" in ln
+        )
+        hide_passed_idx = next(
+            i for i, ln in enumerate(lines)
+            if "hidePassed" in ln and "return" in ln
+        )
+        assert wtg_idx < hide_passed_idx, (
+            "Want to Go count must be incremented before the hidePassed early-return"
+        )

@@ -265,7 +265,7 @@ Mobile-first single-page app served at `/` (`app/templates/dashboard.html`).
 ### Filters & Sorting
 - Filter chips: All, Active (non-reject), **Toured**, **Want to Go**, **Passed**
 - Sort: Score (high→low/low→high), Price, Sqft, $/sqft, Newest first, Commute, Schools
-- Filter counts shown on chips (respect display preferences for passed/pending hiding)
+- Filter counts shown on chips: Toured and Want to Go counts are always accurate (include pending/passed listings); All/Active counts respect display preferences
 
 ### Display Settings Panel (overlay, auth-only via ⚙ gear icon)
 - "Hide passed listings" toggle (default ON) — excludes passed from All/Active view; **does not affect** Passed, Toured, or Want to Go filter chips
@@ -476,6 +476,7 @@ Mobile-first single-page app served at `/` (`app/templates/dashboard.html`).
 - `POST /manage/update-criteria` endpoint for criteria updates without Google OAuth (protected by MANAGE_KEY)
 - **Agent tagging** — `AGENT_MAP` env var maps email senders / domains to agent names (e.g. `redfin.com:Ken Wile,bronwyneharris@gmail.com:Bronwyn`); auto-applied at poll time and backfilled on startup; shown as "Shared by {name}" note in listing detail card
 - **Filter isolation fix** — Toured and Want to Go filter chips bypass all display preferences (hidePending, hidePassed, hideLowScore); regression test added
+- **Filter count fix** — Toured and Want to Go chip counts now include listings with any status (pending/passed); previously pending listings with tour_requested=True were excluded from the count due to early-return in display prefs logic
 - **Mobile header compact mode** — header collapses to icon-only buttons on screens ≤640px
 - Ground-floor bedroom scoring changed from binary reject to point-based: +15 confirmed, -20/-25 confirmed absent, -10/-15 verifiable unknown, -3/-5 missing-data unknown
 - Two-tier unknown penalty in AI prompt: verifiable unknowns (images present, feature unconfirmed) = 10–15 pt deduction; missing-data unknowns (no floor plan) = 3–5 pt mild deduction
