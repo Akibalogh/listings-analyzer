@@ -483,6 +483,75 @@ class TestTourRequest:
         assert res.json()["tour_requested"] is True
         mock_mark.assert_called_once_with(5, True)
 
+    @patch("app.main.db.mark_listing_tour_requested")
+    @patch("app.main.db.get_listing_by_id", return_value={"id": 3, "address": "10 Main St"})
+    def test_manage_key_accepted_in_lieu_of_auth(self, mock_get, mock_mark, client):
+        """x-manage-key header should bypass Google auth for tour-request."""
+        with patch("app.main.settings") as mock_s:
+            mock_s.manage_key = "secret-key"
+            res = client.post(
+                "/listings/3/tour-request",
+                json={"tour_requested": True},
+                headers={"x-manage-key": "secret-key"},
+            )
+        assert res.status_code == 200
+        assert res.json()["tour_requested"] is True
+
+    def test_wrong_manage_key_rejected(self, client):
+        """Wrong manage key should still get 401 (falls through to auth check)."""
+        with patch("app.main.settings") as mock_s:
+            mock_s.manage_key = "correct-key"
+            res = client.post(
+                "/listings/3/tour-request",
+                json={"tour_requested": True},
+                headers={"x-manage-key": "wrong-key"},
+            )
+        assert res.status_code == 401
+
+
+class TestPollVsReprocess:
+    """Tests that verify poll (new emails) and reprocess (old emails) are distinct.
+
+    'Check Email' → POST /poll → fetches NEW emails from Gmail.
+    'Reprocess Emails' → POST /reprocess → re-parses already-processed emails.
+    These are not interchangeable; using one does not substitute for the other.
+    """
+
+    def test_poll_dispatches_to_poll_once(self, authed_client):
+        """POST /poll should call poll_once(), not replay old emails."""
+        with patch("app.main.poll_once", return_value=[]) as mock_poll:
+            res = authed_client.post("/poll")
+        assert res.status_code == 200
+        mock_poll.assert_called_once()
+
+    def test_reprocess_does_not_call_poll_once(self, authed_client):
+        """POST /reprocess re-parses old emails without fetching new ones."""
+        with patch("app.main.poll_once") as mock_poll:
+            with patch("app.main.db.get_active_criteria", return_value=None):
+                with patch("app.main.db.get_all_processed_gmail_ids", return_value=[]):
+                    res = authed_client.post("/reprocess")
+        assert res.status_code == 200
+        mock_poll.assert_not_called()
+
+    @patch("app.main.db.get_active_criteria", return_value=None)
+    @patch("app.main.db.get_all_processed_gmail_ids", return_value=[])
+    def test_reprocess_returns_email_counts(self, mock_ids, mock_criteria, authed_client):
+        """POST /reprocess response includes emails_checked (not listings_processed)."""
+        res = authed_client.post("/reprocess")
+        assert res.status_code == 200
+        data = res.json()
+        assert "emails_checked" in data
+        assert "urls_updated" in data
+
+    def test_poll_returns_listings_processed(self, authed_client):
+        """POST /poll response includes listings_processed (not emails_checked)."""
+        with patch("app.main.poll_once", return_value=[]):
+            res = authed_client.post("/poll")
+        assert res.status_code == 200
+        data = res.json()
+        assert "listings_processed" in data
+        assert "emails_checked" not in data
+
 
 class TestPassedEndpoint:
     """Tests for POST /listings/{listing_id}/passed."""
