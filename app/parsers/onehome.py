@@ -354,23 +354,30 @@ def scrape_listing_description(
                 return result
         return _try_redfin_fallback(address, town, state, zip_code, mls_id)
 
-    # --- Redfin URLs: try with retries + better fallbacks ---
+    # --- Redfin URLs: try with retries + aggressive fallbacks ---
     if "redfin.com" in url_lower:
         logger.info(f"Redfin URL detected, trying static HTTP with retries: {url[:80]}")
         # Try static with 2 attempts (different User-Agent each time)
+        static_failed = False
         for attempt in range(1, 3):
             result = _scrape_static(url, attempt=attempt)
             if result and result[0]:
                 return result
+            if result is None:  # None = detected bot block or hard error
+                static_failed = True
 
-        logger.info(f"Static scrape failed for Redfin, trying Jina Reader: {url[:80]}")
+        if static_failed:
+            logger.info(f"Static scrape failed for Redfin (likely bot block), trying Jina Reader immediately: {url[:80]}")
+        else:
+            logger.info(f"Static scrape returned empty content, trying Jina Reader: {url[:80]}")
+
         result = _scrape_with_jina(url)
         if result and result[0]:
             return result
 
         # Redfin blocked (common from cloud IPs) — fall back to OneKey MLS
         if mls_id and address and town:
-            logger.info(f"Redfin blocked, trying OneKey MLS for MLS#{mls_id}")
+            logger.info(f"Redfin + Jina failed, trying OneKey MLS for MLS#{mls_id}")
             result = _try_onekeymls(address, town, state, zip_code, mls_id)
             if result and result[0]:
                 return result
@@ -386,6 +393,8 @@ def scrape_listing_description(
                 result = _scrape_with_jina(onekeymls_url)
                 if result and result[0]:
                     return result
+
+        logger.warning(f"All scraping methods exhausted for Redfin URL: {url[:80]}")
         return None, []
 
     # --- Other URLs: try full chain ---
@@ -488,22 +497,44 @@ def _get_rotating_user_agent() -> str:
 
 
 def _is_bot_block_page(html: str) -> bool:
-    """Detect if Redfin returned a bot-blocking page (e.g., 'Unknown address')."""
+    """Detect if Redfin returned a bot-blocking page (not a normal 404 or missing listing).
+
+    Redfin bot blocks show specific UI patterns:
+    - Minimal HTML (no listing details, no property cards)
+    - "Unknown address" + error styling from Redfin error handler
+    - No description selectors / address fields populated
+
+    False positives to avoid:
+    - Normal 404s (have search bar, navigation)
+    - Genuinely delisted properties (have address/price, just no description)
+    """
     soup = BeautifulSoup(html, "html.parser")
+    html_lower = html.lower()
     text_lower = soup.get_text().lower()
-    # Check for common bot-block indicators
-    indicators = [
-        "unknown address",
-        "address not found",
-        "not found",
-        "access denied",
-        "please try again",
-        "bot",
-        "automated",
-    ]
-    for indicator in indicators:
-        if indicator in text_lower:
-            return True
+
+    # If the page has substantial content (>5000 chars of useful text),
+    # it's probably a real listing page or normal error — not a bot block
+    meaningful_text = " ".join([tag.get_text(strip=True) for tag in soup.find_all(['p', 'div', 'span']) if tag.get_text(strip=True)])
+    if len(meaningful_text) > 5000:
+        return False
+
+    # Redfin bot-block specific patterns (minimal error page from JS)
+    # Look for: (1) "unknown address" + (2) minimal navigation + (3) no property fields
+    has_unknown_address = "unknown address" in text_lower
+    has_error_structure = "rf-error" in html_lower or "error" in html_lower
+    has_nav = soup.find("nav") or soup.find(class_="header") or soup.find(id="header")
+    has_property_fields = (
+        soup.find(class_="address-street") or
+        soup.find(class_="price") or
+        soup.find(class_="property-details") or
+        soup.find(id="listingRemarks") or
+        soup.find(class_="remarksContainer")
+    )
+
+    # Bot block: "unknown address" error page with no nav/property fields
+    if has_unknown_address and has_error_structure and not has_nav and not has_property_fields:
+        return True
+
     return False
 
 
@@ -515,7 +546,8 @@ def _scrape_static(url: str, attempt: int = 1) -> tuple[str | None, list[str]] |
         attempt: Attempt number (used for delays and logging)
 
     Returns:
-        (description, images) tuple or None if failed
+        (description, images) tuple or None if failed.
+        NOTE: Returns None on both errors AND detected bot blocks (caller should try Jina next).
     """
     # Add delay to avoid rate limiting (0.5-1.5s per attempt)
     if attempt > 1:
@@ -541,9 +573,9 @@ def _scrape_static(url: str, attempt: int = 1) -> tuple[str | None, list[str]] |
 
         html = response.text
 
-        # Check for bot-block pages
+        # Check for bot-block pages (Redfin returning error pages for automated requests)
         if _is_bot_block_page(html):
-            logger.warning(f"Detected bot-block page for {url[:80]} (attempt {attempt})")
+            logger.warning(f"Detected Redfin bot-block page for {url[:80]} (attempt {attempt}), will try Jina")
             return None
 
         description = _extract_description_from_html(html, url, "static")

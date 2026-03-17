@@ -900,27 +900,61 @@ class TestBotDetectionMitigation:
         agents = {_get_rotating_user_agent() for _ in range(20)}
         assert len(agents) > 1, "Should rotate through multiple User-Agents"
 
-    def test_detects_unknown_address_page(self):
-        """_is_bot_block_page detects 'unknown address' responses."""
-        bot_block_html = "<html><body><h1>Unknown Address</h1></body></html>"
+    def test_detects_redfin_bot_block_page(self):
+        """_is_bot_block_page detects Redfin 'unknown address' bot-block errors."""
+        # Redfin bot-block: minimal error page with "unknown address" and error styling
+        bot_block_html = (
+            '<html><body class="rf-error">'
+            '<h1>Unknown Address</h1>'
+            '<p>We cannot find this address.</p>'
+            '</body></html>'
+        )
         assert _is_bot_block_page(bot_block_html) is True
 
-    def test_detects_address_not_found(self):
-        """_is_bot_block_page detects 'address not found'."""
-        html = "<html><body>Sorry, we could not find this address.</body></html>"
-        assert _is_bot_block_page(html) is True
+    def test_normal_404_with_nav_not_bot_block(self):
+        """_is_bot_block_page does not flag normal 404 pages that have navigation."""
+        normal_404 = (
+            "<html><body>"
+            "<nav><a href='/'>Home</a></nav>"
+            "<h1>Property Not Found</h1>"
+            "<p>The address you're looking for is not available.</p>"
+            "</body></html>"
+        )
+        assert _is_bot_block_page(normal_404) is False
 
-    def test_detects_case_insensitive(self):
-        """_is_bot_block_page is case-insensitive."""
-        html = "<html><body>UNKNOWN ADDRESS - Property not found</body></html>"
-        assert _is_bot_block_page(html) is True
+    def test_delisted_property_not_bot_block(self):
+        """_is_bot_block_page does not flag delisted properties (have details, just no description)."""
+        delisted_html = (
+            "<html><body>"
+            "<div class='property-details'>"
+            "<span>123 Main Street</span>"
+            "<span class='price'>$1,500,000</span>"
+            "</div>"
+            "<p>This property is no longer on the market.</p>"
+            "</body></html>"
+        )
+        assert _is_bot_block_page(delisted_html) is False
 
-    def test_normal_page_not_detected_as_bot_block(self):
+    def test_substantial_content_not_bot_block(self):
+        """_is_bot_block_page ignores 'unknown address' if page has substantial content (>5000 chars)."""
+        # Real listing page with lots of details that happens to mention "unknown address"
+        substantial_html = (
+            "<html><body>"
+            + ("<p>Home details: " + "real estate description " * 500 + "</p>")
+            + "<p>The unknown address field has been processed.</p>"
+            + "</body></html>"
+        )
+        assert _is_bot_block_page(substantial_html) is False
+
+    def test_normal_page_with_listing_details_not_bot_block(self):
         """_is_bot_block_page does not flag normal listing pages."""
         normal_html = (
             "<html><body>"
             "<h1>123 Main St</h1>"
             "<p>Beautiful home with finished basement and nice address.</p>"
+            "<div id='listingRemarks'>"
+            "<p>This 3-bed, 2-bath home features a modern kitchen.</p>"
+            "</div>"
             "</body></html>"
         )
         assert _is_bot_block_page(normal_html) is False
