@@ -478,6 +478,7 @@ Mobile-first single-page app served at `/` (`app/templates/dashboard.html`).
 - **Filter isolation fix** — Toured and Want to Go filter chips bypass all display preferences (hidePending, hidePassed, hideLowScore); regression test added
 - **Filter count fix** — Toured and Want to Go chip counts now include listings with any status (pending/passed); previously pending listings with tour_requested=True were excluded from the count due to early-return in display prefs logic
 - **Mobile header compact mode** — header collapses to icon-only buttons on screens ≤640px
+- **Redfin bot detection mitigation** — scraper now: (1) rotates User-Agent across 5 browser signatures to avoid fingerprinting, (2) adds Referer, DNT, and Connection headers for realism, (3) retries Redfin URLs twice with different User-Agents and delays between attempts, (4) detects "unknown address" bot-block pages and switches to fallback sources (OneKey MLS, Jina Reader) earlier
 - Ground-floor bedroom scoring changed from binary reject to point-based: +15 confirmed, -20/-25 confirmed absent, -10/-15 verifiable unknown, -3/-5 missing-data unknown
 - Two-tier unknown penalty in AI prompt: verifiable unknowns (images present, feature unconfirmed) = 10–15 pt deduction; missing-data unknowns (no floor plan) = 3–5 pt mild deduction
 - Address normalization: hyphens stripped from both address and town (fixes Croton-On-Hudson duplication)

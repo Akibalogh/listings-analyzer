@@ -13,7 +13,11 @@ Supports both static HTML pages and JavaScript SPAs:
 """
 
 import logging
+import random
 import re
+import time
+from typing import NamedTuple
+from urllib.parse import quote, urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
@@ -350,28 +354,33 @@ def scrape_listing_description(
                 return result
         return _try_redfin_fallback(address, town, state, zip_code, mls_id)
 
-    # --- Redfin URLs: static HTTP → Jina → OneKey MLS fallback ---
+    # --- Redfin URLs: try with retries + better fallbacks ---
     if "redfin.com" in url_lower:
-        logger.info(f"Redfin URL detected, trying static HTTP: {url[:80]}")
-        result = _scrape_static(url)
-        if result and result[0]:
-            return result
+        logger.info(f"Redfin URL detected, trying static HTTP with retries: {url[:80]}")
+        # Try static with 2 attempts (different User-Agent each time)
+        for attempt in range(1, 3):
+            result = _scrape_static(url, attempt=attempt)
+            if result and result[0]:
+                return result
+
         logger.info(f"Static scrape failed for Redfin, trying Jina Reader: {url[:80]}")
         result = _scrape_with_jina(url)
         if result and result[0]:
             return result
+
         # Redfin blocked (common from cloud IPs) — fall back to OneKey MLS
         if mls_id and address and town:
             logger.info(f"Redfin blocked, trying OneKey MLS for MLS#{mls_id}")
             result = _try_onekeymls(address, town, state, zip_code, mls_id)
             if result and result[0]:
                 return result
+
         # No MLS ID — search OneKey MLS by address via DDG
         if address and town:
             logger.info(f"Trying OneKeyMLS address search for: {address}, {town}")
             onekeymls_url = _search_onekeymls_url(address, town, state, zip_code)
             if onekeymls_url:
-                result = _scrape_static(onekeymls_url)
+                result = _scrape_static(onekeymls_url, attempt=1)
                 if result and result[0]:
                     return result
                 result = _scrape_with_jina(onekeymls_url)
@@ -466,35 +475,86 @@ def _is_spa_url(url: str) -> bool:
     return "portal.onehome.com" in url or "onehome.com" in url
 
 
-def _scrape_static(url: str) -> tuple[str | None, list[str]] | None:
-    """Fast static HTTP scrape — works for server-rendered pages (Redfin, etc.)."""
+def _get_rotating_user_agent() -> str:
+    """Rotate User-Agent to avoid bot detection. Simulates different browsers."""
+    agents = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
+    ]
+    return random.choice(agents)
+
+
+def _is_bot_block_page(html: str) -> bool:
+    """Detect if Redfin returned a bot-blocking page (e.g., 'Unknown address')."""
+    soup = BeautifulSoup(html, "html.parser")
+    text_lower = soup.get_text().lower()
+    # Check for common bot-block indicators
+    indicators = [
+        "unknown address",
+        "address not found",
+        "not found",
+        "access denied",
+        "please try again",
+        "bot",
+        "automated",
+    ]
+    for indicator in indicators:
+        if indicator in text_lower:
+            return True
+    return False
+
+
+def _scrape_static(url: str, attempt: int = 1) -> tuple[str | None, list[str]] | None:
+    """Fast static HTTP scrape — works for server-rendered pages (Redfin, etc.).
+
+    Args:
+        url: URL to scrape
+        attempt: Attempt number (used for delays and logging)
+
+    Returns:
+        (description, images) tuple or None if failed
+    """
+    # Add delay to avoid rate limiting (0.5-1.5s per attempt)
+    if attempt > 1:
+        delay = 0.5 + random.random()
+        time.sleep(delay)
+
     try:
         with httpx.Client(
             timeout=_SCRAPE_TIMEOUT,
             follow_redirects=True,
             headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/121.0.0.0 Safari/537.36"
-                ),
+                "User-Agent": _get_rotating_user_agent(),
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 "Accept-Language": "en-US,en;q=0.5",
+                "Referer": "https://www.google.com/",
+                "DNT": "1",
+                "Connection": "keep-alive",
+                "Upgrade-Insecure-Requests": "1",
             },
         ) as client:
             response = client.get(url)
             response.raise_for_status()
 
         html = response.text
+
+        # Check for bot-block pages
+        if _is_bot_block_page(html):
+            logger.warning(f"Detected bot-block page for {url[:80]} (attempt {attempt})")
+            return None
+
         description = _extract_description_from_html(html, url, "static")
         images = _extract_image_urls(html, url) if description else []
         return description, images
 
     except httpx.HTTPStatusError as e:
-        logger.warning(f"HTTP {e.response.status_code} fetching listing page: {url}")
+        logger.warning(f"HTTP {e.response.status_code} fetching listing page: {url} (attempt {attempt})")
         return None
     except Exception as e:
-        logger.warning(f"Failed to scrape listing page {url}: {e}")
+        logger.warning(f"Failed to scrape listing page {url} (attempt {attempt}): {e}")
         return None
 
 

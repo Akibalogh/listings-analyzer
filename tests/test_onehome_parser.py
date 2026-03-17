@@ -21,6 +21,8 @@ from app.parsers.onehome import (
     _extract_image_urls,
     _extract_property_stats,
     _extract_listing_status,
+    _is_bot_block_page,
+    _get_rotating_user_agent,
 )
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
@@ -882,3 +884,91 @@ class TestEnumerateRedfinImages:
 
         result = enumerate_redfin_images(seeds)
         assert result == seeds
+
+
+class TestBotDetectionMitigation:
+    """Tests for Redfin bot detection avoidance."""
+
+    def test_rotating_user_agent_returns_valid_browser(self):
+        """_get_rotating_user_agent returns a realistic User-Agent."""
+        ua = _get_rotating_user_agent()
+        assert "Mozilla" in ua
+        assert "Chrome" in ua or "Firefox" in ua or "Safari" in ua
+
+    def test_rotating_user_agent_varies(self):
+        """_get_rotating_user_agent returns different agents."""
+        agents = {_get_rotating_user_agent() for _ in range(20)}
+        assert len(agents) > 1, "Should rotate through multiple User-Agents"
+
+    def test_detects_unknown_address_page(self):
+        """_is_bot_block_page detects 'unknown address' responses."""
+        bot_block_html = "<html><body><h1>Unknown Address</h1></body></html>"
+        assert _is_bot_block_page(bot_block_html) is True
+
+    def test_detects_address_not_found(self):
+        """_is_bot_block_page detects 'address not found'."""
+        html = "<html><body>Sorry, we could not find this address.</body></html>"
+        assert _is_bot_block_page(html) is True
+
+    def test_detects_case_insensitive(self):
+        """_is_bot_block_page is case-insensitive."""
+        html = "<html><body>UNKNOWN ADDRESS - Property not found</body></html>"
+        assert _is_bot_block_page(html) is True
+
+    def test_normal_page_not_detected_as_bot_block(self):
+        """_is_bot_block_page does not flag normal listing pages."""
+        normal_html = (
+            "<html><body>"
+            "<h1>123 Main St</h1>"
+            "<p>Beautiful home with finished basement and nice address.</p>"
+            "</body></html>"
+        )
+        assert _is_bot_block_page(normal_html) is False
+
+    @patch("app.parsers.onehome.time.sleep")
+    @patch("app.parsers.onehome.httpx.Client")
+    def test_scrape_static_retries_with_delay(self, mock_client_cls, mock_sleep):
+        """_scrape_static adds delay on retry attempts."""
+        mock_response = MagicMock()
+        mock_response.text = "<html><body><p>Real description here with real estate content</p></body></html>"
+        mock_response.raise_for_status = MagicMock()
+        mock_client_cls.return_value.__enter__.return_value.get.return_value = mock_response
+
+        # First attempt (no sleep)
+        _scrape_static("http://example.com", attempt=1)
+        mock_sleep.assert_not_called()
+
+        # Second attempt (sleeps)
+        _scrape_static("http://example.com", attempt=2)
+        assert mock_sleep.called
+
+    @patch("app.parsers.onehome.httpx.Client")
+    def test_scrape_static_detects_bot_block_and_returns_none(self, mock_client_cls):
+        """_scrape_static returns None when bot-block page detected."""
+        mock_response = MagicMock()
+        mock_response.text = "<html><body>Unknown Address</body></html>"
+        mock_response.raise_for_status = MagicMock()
+        mock_client_cls.return_value.__enter__.return_value.get.return_value = mock_response
+
+        result = _scrape_static("http://example.com", attempt=1)
+        assert result is None
+
+    @patch("app.parsers.onehome.httpx.Client")
+    def test_scrape_static_includes_referer_and_other_headers(self, mock_client_cls):
+        """_scrape_static sends realistic headers including Referer, DNT."""
+        mock_response = MagicMock()
+        mock_response.text = "<html><body><p>Listing details here for real estate evaluation</p></body></html>"
+        mock_response.raise_for_status = MagicMock()
+        mock_client_cls.return_value.__enter__.return_value.get.return_value = mock_response
+
+        _scrape_static("http://example.com", attempt=1)
+
+        # Check that headers include realistic fields
+        call_kwargs = mock_client_cls.return_value.__enter__.return_value.get.call_args[1]
+        headers = call_kwargs.get("headers", {})
+        assert "Referer" in headers
+        assert headers["Referer"] == "https://www.google.com/"
+        assert "DNT" in headers
+        assert headers["DNT"] == "1"
+        assert "Connection" in headers
+        assert "User-Agent" in headers
