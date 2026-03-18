@@ -605,7 +605,11 @@ async def add_listing_from_url(request: Request):
     except Exception:
         resolved_url = url
 
-    # If the resolved URL was ratelimited/redirected away (e.g. ratelimited.redfin.com),
+    # Reject rate-limited responses — Redfin redirects to ratelimited.redfin.com
+    if "ratelimited." in resolved_url:
+        raise HTTPException(status_code=429, detail="Redfin rate-limited this request. Try again in a few minutes.")
+
+    # If the resolved URL was redirected away from a valid listing page,
     # fall back to the original URL for both address parsing and scraping.
     if not REDFIN_URL_ADDR_RE.search(resolved_url) and REDFIN_URL_ADDR_RE.search(url):
         resolved_url = url

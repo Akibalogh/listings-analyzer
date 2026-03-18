@@ -392,6 +392,21 @@ class TestAddListingFromUrl:
         res = authed_client.post("/listings/add", json={"url": "not-a-url"})
         assert res.status_code == 400
 
+    @patch("httpx.Client")
+    def test_rejects_ratelimited_redfin(self, mock_client_cls, authed_client):
+        """Redfin rate-limit redirect returns 429 instead of saving empty listing."""
+        mock_response = MagicMock()
+        mock_response.url = "https://ratelimited.redfin.com/"
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.head.return_value = mock_response
+        mock_client_cls.return_value = mock_client
+
+        res = authed_client.post("/listings/add", json={"url": "https://redf.in/abc"})
+        assert res.status_code == 429
+        assert "rate-limited" in res.json()["detail"].lower()
+
     @patch("app.main.db.get_active_criteria", return_value=None)
     @patch("app.main.db.save_listing", return_value=55)
     @patch("app.main.db.save_processed_email", return_value=1)
