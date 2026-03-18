@@ -425,6 +425,27 @@ class TestAddListingFromUrl:
         assert "rate-limited" in res.json()["detail"].lower()
 
     @patch("app.main.db.get_active_criteria", return_value=None)
+    @patch("app.main.db.save_listing", return_value=80)
+    @patch("app.main.db.save_processed_email", return_value=1)
+    @patch("app.main.db.is_listing_duplicate_by_address", return_value=False)
+    @patch("httpx.Client")
+    def test_full_redfin_url_skips_resolution(
+        self, mock_client_cls, mock_dedup, mock_save_email, mock_save_listing,
+        mock_criteria, authed_client
+    ):
+        """Full Redfin URLs skip HEAD request — no rate-limit risk."""
+        res = authed_client.post(
+            "/listings/add",
+            json={"url": "https://www.redfin.com/NY/Briarcliff-Manor/121-Law-Rd-10510/home/20069618"},
+        )
+        assert res.status_code == 200
+        data = res.json()
+        assert data["address"] is not None
+        assert "Law Rd" in data["address"]
+        # httpx.Client should NOT have been called (no HEAD request)
+        mock_client_cls.return_value.__enter__.return_value.head.assert_not_called()
+
+    @patch("app.main.db.get_active_criteria", return_value=None)
     @patch("app.main.db.save_listing", return_value=55)
     @patch("app.main.db.save_processed_email", return_value=1)
     @patch("app.main.db.is_listing_duplicate_by_address", return_value=False)

@@ -601,22 +601,26 @@ async def add_listing_from_url(request: Request):
     if not url or not url.startswith(("http://", "https://")):
         raise HTTPException(status_code=400, detail="Invalid URL")
 
-    # Resolve short URLs (e.g. redf.in)
-    try:
-        with httpx.Client(timeout=10, follow_redirects=True) as client:
-            resp = client.head(url)
-            resolved_url = str(resp.url)
-    except Exception:
+    # Skip URL resolution for full Redfin URLs (address extractable from path).
+    # Only resolve short URLs (redf.in, etc.) that need a redirect to get the real path.
+    if REDFIN_URL_ADDR_RE.search(url):
         resolved_url = url
+    else:
+        try:
+            with httpx.Client(timeout=10, follow_redirects=True) as client:
+                resp = client.head(url)
+                resolved_url = str(resp.url)
+        except Exception:
+            resolved_url = url
 
-    # Reject rate-limited responses — Redfin redirects to ratelimited.redfin.com
-    if "ratelimited." in resolved_url:
-        raise HTTPException(status_code=429, detail="Redfin rate-limited this request. Try again in a few minutes.")
+        # Reject rate-limited responses — Redfin redirects to ratelimited.redfin.com
+        if "ratelimited." in resolved_url:
+            raise HTTPException(status_code=429, detail="Redfin rate-limited this request. Try again in a few minutes.")
 
-    # If the resolved URL was redirected away from a valid listing page,
-    # fall back to the original URL for both address parsing and scraping.
-    if not REDFIN_URL_ADDR_RE.search(resolved_url) and REDFIN_URL_ADDR_RE.search(url):
-        resolved_url = url
+        # If the resolved URL was redirected away from a valid listing page,
+        # fall back to the original URL for both address parsing and scraping.
+        if not REDFIN_URL_ADDR_RE.search(resolved_url) and REDFIN_URL_ADDR_RE.search(url):
+            resolved_url = url
 
     # Extract address from Redfin URL path
     address = town = state = zip_code = None
