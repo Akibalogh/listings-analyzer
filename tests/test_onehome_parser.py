@@ -372,12 +372,15 @@ class TestUrlRouting:
     @patch("app.parsers.onehome._scrape_with_jina", return_value=("Finished basement", []))
     @patch("app.parsers.onehome._scrape_static", return_value=None)
     def test_redfin_tries_static_then_jina(self, mock_static, mock_jina):
-        """Redfin URLs try static HTTP first; fall back to Jina if static fails."""
+        """Redfin URLs try static HTTP with retries; fall back to Jina if all fail."""
         url = "https://www.redfin.com/NY/Scarsdale/10-Test-St/home/123"
 
         desc, images = scrape_listing_description(url)
 
-        mock_static.assert_called_once_with(url)
+        # Static is retried (2 attempts) before falling back to Jina
+        assert mock_static.call_count == 2
+        mock_static.assert_any_call(url, attempt=1)
+        mock_static.assert_any_call(url, attempt=2)
         mock_jina.assert_called_once_with(url)
         assert desc is not None
         assert "basement" in desc.lower()
@@ -733,10 +736,11 @@ class TestRedinFallsBackToOneKeyMLSSearch:
     @patch("app.parsers.onehome._scrape_with_jina", return_value=(None, []))
     def test_redfin_falls_back_to_onekeymls_search(self, mock_jina_outer, mock_static, mock_onekeymls_search):
         """Redfin URL with no MLS ID falls back to OneKeyMLS DDG address search."""
-        # First static call (Redfin) fails, Jina fails, no MLS ID so _try_onekeymls skipped,
-        # then DDG search finds OneKeyMLS URL, second static call succeeds
+        # 2 Redfin static attempts fail, Jina fails, no MLS ID so _try_onekeymls skipped,
+        # then DDG search finds OneKeyMLS URL, third static call succeeds
         mock_static.side_effect = [
-            None,  # Redfin static fails
+            None,  # Redfin static attempt 1 fails
+            None,  # Redfin static attempt 2 fails
             ("Charming colonial with finished basement and pool", []),  # OneKeyMLS static succeeds
         ]
         url = "https://www.redfin.com/NY/Chappaqua/19-Georgia-Ln-10514/home/123456"
@@ -980,7 +984,7 @@ class TestBotDetectionMitigation:
     def test_scrape_static_detects_bot_block_and_returns_none(self, mock_client_cls):
         """_scrape_static returns None when bot-block page detected."""
         mock_response = MagicMock()
-        mock_response.text = "<html><body>Unknown Address</body></html>"
+        mock_response.text = '<html><body><div class="rf-error">Unknown Address</div></body></html>'
         mock_response.raise_for_status = MagicMock()
         mock_client_cls.return_value.__enter__.return_value.get.return_value = mock_response
 
@@ -997,8 +1001,8 @@ class TestBotDetectionMitigation:
 
         _scrape_static("http://example.com", attempt=1)
 
-        # Check that headers include realistic fields
-        call_kwargs = mock_client_cls.return_value.__enter__.return_value.get.call_args[1]
+        # Headers are passed to httpx.Client() constructor, not .get()
+        call_kwargs = mock_client_cls.call_args[1]
         headers = call_kwargs.get("headers", {})
         assert "Referer" in headers
         assert headers["Referer"] == "https://www.google.com/"
