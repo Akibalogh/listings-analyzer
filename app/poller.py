@@ -35,7 +35,7 @@ def poll_once() -> list[dict]:
         emails = fetch_new_emails()
     except Exception as e:
         logger.error(f"Failed to fetch emails: {e}")
-        return results
+        raise
 
     for email_data in emails:
         gmail_id = email_data["gmail_id"]

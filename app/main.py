@@ -224,7 +224,11 @@ def health():
 def trigger_poll(request: Request):
     """Trigger a Gmail poll cycle. Returns processed listings."""
     _require_auth(request)
-    results = poll_once()
+    try:
+        results = poll_once()
+    except Exception as e:
+        _record_poll("manual", 0, error=str(e))
+        raise HTTPException(status_code=500, detail=f"Poll failed: {e}")
     _record_poll("manual", len(results))
     return {
         "listings_processed": len(results),
@@ -1345,7 +1349,11 @@ def manage_poll(request: Request):
     if not settings.manage_key or key != settings.manage_key:
         raise HTTPException(status_code=403, detail="Invalid or missing management key")
 
-    results = poll_once()
+    try:
+        results = poll_once()
+    except Exception as e:
+        _record_poll("manage", 0, error=str(e))
+        raise HTTPException(status_code=500, detail=f"Poll failed: {e}")
     _record_poll("manage", len(results))
     return {
         "listings_processed": len(results),

@@ -239,6 +239,23 @@ class TestPublicEndpoints:
         assert res.status_code == 401
 
 
+class TestPollErrorSurfacing:
+    """Tests that poll errors are reported in health and API responses."""
+
+    @patch("app.main.settings", MagicMock(manage_key="test-key"))
+    @patch("app.main.poll_once", side_effect=Exception("Invalid JSON in credentials"))
+    def test_manage_poll_returns_500_on_error(self, mock_poll, client):
+        res = client.post("/manage/poll", headers={"x-manage-key": "test-key"})
+        assert res.status_code == 500
+        assert "Invalid JSON" in res.json()["detail"]
+
+    @patch("app.main.poll_once", side_effect=Exception("Token expired"))
+    def test_manual_poll_returns_500_on_error(self, mock_poll, authed_client):
+        res = authed_client.post("/poll")
+        assert res.status_code == 500
+        assert "Token expired" in res.json()["detail"]
+
+
 class TestTouredEndpoint:
     """Tests for POST /listings/{listing_id}/toured."""
 
