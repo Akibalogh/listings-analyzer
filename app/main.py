@@ -598,6 +598,13 @@ async def add_listing_from_url(request: Request):
         _require_auth(request)
     body = await request.json()
     url = (body.get("url") or "").strip()
+
+    # Allow optional field overrides (for rate-limited URLs where address can't be extracted)
+    address = (body.get("address") or "").strip() or None
+    town = (body.get("town") or "").strip() or None
+    state = (body.get("state") or "").strip() or None
+    zip_code = (body.get("zip_code") or "").strip() or None
+
     if not url or not url.startswith(("http://", "https://")):
         raise HTTPException(status_code=400, detail="Invalid URL")
 
@@ -613,8 +620,11 @@ async def add_listing_from_url(request: Request):
         except Exception:
             resolved_url = url
 
-        # Reject rate-limited responses — Redfin redirects to ratelimited.redfin.com
-        if "ratelimited." in resolved_url:
+        # If rate-limited but user provided fields, use those instead
+        if "ratelimited." in resolved_url and (address or town):
+            logger.info(f"Redfin rate-limited {url}, but user provided address fields — proceeding")
+            resolved_url = url  # Keep original URL for scraping attempts in background
+        elif "ratelimited." in resolved_url:
             raise HTTPException(status_code=429, detail="Redfin rate-limited this request. Try again in a few minutes.")
 
         # If the resolved URL was redirected away from a valid listing page,
@@ -622,16 +632,16 @@ async def add_listing_from_url(request: Request):
         if not REDFIN_URL_ADDR_RE.search(resolved_url) and REDFIN_URL_ADDR_RE.search(url):
             resolved_url = url
 
-    # Extract address from Redfin URL path
-    address = town = state = zip_code = None
-    redfin_match = REDFIN_URL_ADDR_RE.search(resolved_url)
-    if redfin_match:
-        state = redfin_match.group(1).upper()
-        town = redfin_match.group(2).replace("-", " ").title()
-        addr_slug = redfin_match.group(3).replace("-", " ")
-        if redfin_match.group(4):
-            zip_code = redfin_match.group(4)
-        address = addr_slug.title()
+    # Extract address from Redfin URL path if not provided by user
+    if not address:
+        redfin_match = REDFIN_URL_ADDR_RE.search(resolved_url)
+        if redfin_match:
+            state = state or redfin_match.group(1).upper()
+            town = town or redfin_match.group(2).replace("-", " ").title()
+            addr_slug = redfin_match.group(3).replace("-", " ")
+            if redfin_match.group(4):
+                zip_code = zip_code or redfin_match.group(4)
+            address = addr_slug.title()
 
     # Check for duplicates by address
     if address and town:
@@ -1554,10 +1564,17 @@ def manage_scrape_descriptions(request: Request):
     skipped = 0
     errors = []
 
-    for lid in listing_ids:
+    for idx, lid in enumerate(listing_ids):
         listing = db.get_listing_by_id(lid)
         if not listing:
             continue
+
+        # Add delay between listings to avoid Redfin rate-limiting
+        # (2-3s between requests, with slight randomization)
+        if idx > 0:
+            import time
+            delay = 2.0 + random.random()
+            time.sleep(delay)
 
         url = listing.get("listing_url")
 
