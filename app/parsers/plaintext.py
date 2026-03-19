@@ -250,7 +250,7 @@ REDFIN_URL_ADDR_RE = re.compile(
 )
 
 # Detect if text has listing-like content
-LISTING_INDICATORS = [PRICE_RE, MLS_RE, BEDS_RE]
+LISTING_INDICATORS = [PRICE_RE, MLS_RE, BEDS_RE, BATHS_RE]
 
 
 class PlainTextParser(EmailParser):
