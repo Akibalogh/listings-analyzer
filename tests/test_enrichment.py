@@ -1835,3 +1835,52 @@ class TestFetchLotAcresParcel:
             result = fetch_lot_acres_parcel("3 Valley Rd", "Pleasantville", "NY")
 
         assert result == round(0.333333333, 4)
+
+
+# ---------------------------------------------------------------------------
+# Enrichment logging for missing data
+# ---------------------------------------------------------------------------
+
+
+class TestEnrichmentLogging:
+    """Tests for enrichment logging when required fields are missing."""
+
+    def test_fetch_school_data_logs_missing_zip(self, caplog):
+        """fetch_school_data should log WARNING when zip_code is missing."""
+        from app.enrichment import fetch_school_data
+        
+        result = fetch_school_data(zip_code=None, state="NY")
+        
+        assert result is None
+        assert "missing zip_code" in caplog.text.lower()
+        assert "WARNING" in caplog.text
+
+    def test_fetch_school_data_logs_missing_state(self, caplog):
+        """fetch_school_data should log WARNING when state is missing."""
+        from app.enrichment import fetch_school_data
+        
+        result = fetch_school_data(zip_code="10570", state=None)
+        
+        assert result is None
+        assert "missing" in caplog.text.lower()
+        assert "state" in caplog.text.lower()
+
+    def test_fetch_commute_time_logs_missing_address(self, caplog):
+        """fetch_commute_time should log WARNING when address is missing."""
+        from app.enrichment import fetch_commute_time
+        
+        result = fetch_commute_time(address=None, town="Pleasantville", state="NY", zip_code="10570")
+        
+        assert result is None
+        assert "missing address" in caplog.text.lower()
+        assert "WARNING" in caplog.text
+
+    def test_fetch_commute_time_logs_missing_town(self, caplog):
+        """fetch_commute_time should log WARNING when town is missing."""
+        from app.enrichment import fetch_commute_time
+        
+        result = fetch_commute_time(address="31 Pierce", town=None, state="NY", zip_code="10570")
+        
+        assert result is None
+        assert "missing" in caplog.text.lower()
+        assert "town" in caplog.text.lower()
