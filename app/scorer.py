@@ -98,16 +98,17 @@ Worth Touring — 65/100
 ✅ Size: 2,862 sqft clears the minimum requirement.
 ✅ Bedrooms: 4 bedrooms meets the requirement.
 ✅ Detached: Single-family home.
+✅ Ground-floor bedroom: CONFIRMED — floor plan shows 12' x 14'11" bedroom on main floor.
 ⚠️ Price: $1.95M is $450K above the ideal $1.5M target, within the $2M hard cap.
 ❓ Basement: Not mentioned — must verify finished basement on visit.
-❓ Ground-floor bedroom: Not confirmed from listing data.
 ❓ Lot: Size not stated in listing.
 
 A confirmed finished basement would push this into Strong Match territory. Price is the main concern — negotiate accordingly.
 
-GROUND-FLOOR BEDROOM INFERENCE — USE ALL AVAILABLE SIGNALS:
-The buyer's parents will live on the ground floor. This is the single most important feature.
-Do NOT give up and mark "unknown" if you have any evidence to work with. Use all of these:
+GROUND-FLOOR BEDROOM INFERENCE — CRITICAL PRIORITY, USE ALL AVAILABLE SIGNALS:
+The buyer's parents will live on the ground floor. This is the SINGLE MOST IMPORTANT feature — treat it as a hard criterion.
+Do NOT mark "unknown" or "not confirmed" if you have ANY evidence. If you see a floor plan, READ IT CAREFULLY.
+Use all of these signals:
 
 1. FLOOR PLAN IMAGES (strongest): If a floor plan is shown, read the room labels carefully.
    Look for "Bedroom", "BR", "Guest Room", "In-Law Suite", "Den", "Study", "Office", "Library", or
@@ -133,8 +134,9 @@ Do NOT give up and mark "unknown" if you have any evidence to work with. Use all
    closer to ground. Colonials and Tudors almost never have ground-floor bedrooms.
    If year_built < 1960 and the style appears to be a ranch or cape cod, infer likely present.
 
-Make your BEST INFERENCE and commit to it. Only use "unknown" if all four signals are truly
-absent or contradictory. If you're 60%+ confident either way, pick a side and apply that score.
+COMMIT TO A DECISION on ground-floor bedroom. Only use "unknown" if ALL FOUR signals are genuinely absent AND no floor plan
+was provided. If you see a floor plan with a labeled bedroom/den/study/guest room on the main/first floor, mark it CONFIRMED.
+If you're 60%+ confident either way, pick a side and apply that score. A floor plan showing a bedroom = CONFIRMATION.
 
 ENRICHMENT DATA:
 - If school_data is provided in <listing_data>, factor school quality into your evaluation.
