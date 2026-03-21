@@ -1559,18 +1559,26 @@ def parse_garage_count(description: str | None) -> dict:
     if m:
         count = int(next(g for g in m.groups() if g is not None))
         garage_type = None
-        if "attached" in text[max(0, m.start() - 20) : m.end() + 20]:
+        # Check context around the match for type keywords
+        context_start = max(0, m.start() - 30)
+        context_end = min(len(text), m.end() + 30)
+        context = text[context_start:context_end]
+        if "attached" in context:
             garage_type = "attached"
-        elif "detached" in text[max(0, m.start() - 20) : m.end() + 20]:
+        elif "detached" in context:
             garage_type = "detached"
+        elif "integrated" in context or "built[\s-]?in" in context:
+            garage_type = "attached"  # integrated = effectively attached
+        elif "enclosed" in context or "open" in context or "carport" in context:
+            garage_type = "detached"  # enclosed/open typically implies separate structure
         return {"garage_count": count, "garage_type": garage_type, "source": "description_parse"}
 
     # Generic "garage" without count — assume 1
     if re.search(r"\bgarage\b", text):
         garage_type = None
-        if re.search(r"\battached\b", text):
+        if re.search(r"\battached\b|\bintegrated\b|\bbuilt[\s-]?in\b", text):
             garage_type = "attached"
-        elif re.search(r"\bdetached\b", text):
+        elif re.search(r"\bdetached\b|\bstandalone\b|\bseparate\b", text):
             garage_type = "detached"
         return {"garage_count": 1, "garage_type": garage_type, "source": "description_parse"}
 
@@ -1712,12 +1720,67 @@ def parse_basement(description: str | None) -> dict:
     if re.search(r"\bunfinished\s+basement\b|\bfull\s+basement\b|\bbasement\s+(?:with\s+)?(?:utility|storage|laundry|mechanicals)\b", text):
         return {"has_basement": True, "basement_type": "unfinished", "basement_gym_suitable": False, "source": "description_parse"}
 
-    # Generic basement mention
-    if re.search(r"\bbasement\b|\blower\s+level\b|\bfinished\s+lower\b", text):
+    # Generic basement mention (expanded to catch more variations)
+    if re.search(
+        r"\bbasement\b|\blower\s+level\b|\bfinished\s+lower\b|"
+        r"\blower\s+level\s+bedroom\b|\bdownstairs\s+(?:bedroom|suite|apartment)\b|"
+        r"\bbelow[\s-]?grade\b|\bsubterranean\b|\bsemi[\s-]?finished\s+lower\b",
+        text
+    ):
         # Generic mention: assume not gym-suitable unless explicit keywords
         return {"has_basement": True, "basement_type": None, "basement_gym_suitable": gym_suitable, "source": "description_parse"}
 
     return {"has_basement": None, "basement_type": None, "basement_gym_suitable": None, "source": "description_parse"}
+
+
+def infer_property_type_from_description(description: str | None) -> str | None:
+    """Infer property type from description keywords when not available from parser.
+
+    Returns standard property type strings:
+    - "Single Family Residential"
+    - "Condo/Co-op"
+    - "Townhouse"
+    - "Multi-Family"
+    - "Mobile/Manufactured Home"
+    Or None if not detectable.
+
+    This is a fallback when property_type wasn't in email metadata.
+    Used for plaintext emails (88% of listings) where property_type coverage is low.
+    """
+    if not description:
+        return None
+
+    text = description.lower()
+
+    # Multi-family — check FIRST to avoid false positives from "single family" in descriptions
+    if re.search(r"\b(?:multi[\s-]?family|multifamily|two[\s-]?family|3[\s-]?family|four[\s-]?family|duplex|triplex)\b", text):
+        return "Multi-Family"
+
+    # Townhouse / Townhome
+    if re.search(r"\b(?:townhouse|townhome|town\s+home|attached\s+home)\b", text):
+        return "Townhouse"
+
+    # Condo / Co-op
+    if re.search(r"\b(?:condo|condominium|co[\s-]?op|cooperative)\b", text):
+        return "Condo/Co-op"
+
+    # Single family (check after more specific types to avoid false matches)
+    if re.search(r"\b(?:single[\s-]?family|single[\s-]?family\s+(?:home|residence)|detached\s+home|single\s+home)\b", text):
+        return "Single Family Residential"
+
+    # Architectural styles strongly suggest single-family
+    if re.search(
+        r"\b(?:colonial|ranch|cape\s+cod|split[\s-]?level|contemporary|victorian|tudor|"
+        r"farmhouse|craftsman|mediterranean|modern|cape|spanish|french\s+country)\b",
+        text
+    ):
+        return "Single Family Residential"
+
+    # Mobile/Manufactured home
+    if re.search(r"\b(?:mobile\s+home|manufactured\s+home|trailer|rv|motorhome)\b", text):
+        return "Mobile/Manufactured Home"
+
+    return None
 
 
 def parse_list_date(description: str | None) -> str | None:

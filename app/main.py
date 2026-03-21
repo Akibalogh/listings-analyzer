@@ -863,6 +863,13 @@ def _build_listing_data(listing_row: dict) -> dict:
         "lot_acres": listing_row.get("lot_acres"),
     }
 
+    # Infer property_type from description if not available in metadata
+    if not listing_data.get("property_type") and listing_data.get("description"):
+        from app.enrichment import infer_property_type_from_description
+        inferred_type = infer_property_type_from_description(listing_data["description"])
+        if inferred_type:
+            listing_data["property_type"] = inferred_type
+
     # Add enrichment data (school quality + commute time)
     if listing_row.get("school_data_json"):
         try:
