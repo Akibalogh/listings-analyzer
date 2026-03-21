@@ -1510,6 +1510,7 @@
 
   <div class="controls" id="controls">
     <button class="filter-chip active" data-filter="all">Active</button>
+    <button class="filter-chip" data-filter="all-unfiltered">All</button>
     <button class="filter-chip" data-filter="not-reject">Strong Match+</button>
     <button class="filter-chip" data-filter="Toured">Toured</button>
     <button class="filter-chip" data-filter="Liked">Liked for Parents</button>
@@ -1639,6 +1640,7 @@
 <script>
 var allListings = [];
 var _filterRoutes = {
+  '/all': 'all-unfiltered',
   '/want-to-go': 'Want to Go',
   '/toured': 'Toured',
   '/liked': 'Liked',
@@ -1938,7 +1940,10 @@ function render() {
     items = items.filter(function(l) { return l.liked; });
   } else if (activeFilter === 'Want to Go') {
     items = items.filter(function(l) { return l.tour_requested; });
+  } else if (activeFilter === 'all-unfiltered') {
+    // "All" button shows truly all listings with no filters applied
   } else {
+    // "Active" (default) applies display preferences
     if (_displayPrefs.hidePassed) {
       items = items.filter(function(l) { return !l.passed; });
     }
