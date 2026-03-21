@@ -530,6 +530,17 @@ Mobile-first single-page app served at `/` (`app/templates/dashboard.html`).
 - **Testing:** Added test suite for enrichment logging (commit 33981c6)
 - **Impact:** Enrichment gaps now visible in logs; enables diagnosis of data entry issues vs API failures vs quota limits
 
+### Phase 4.3 (v7 Data Quality Improvements — Mar 21, 2026)
+**Description-Based Inference & Signal Extraction**
+- **Property type inference:** Added `infer_property_type_from_description()` to detect property types from description keywords for plaintext emails (88% coverage gap). Detects: Single Family, Condo/Co-op, Townhouse, Multi-Family, Mobile Home. Integrated into `_build_listing_data()` pipeline to backfill missing metadata. Expected to improve coverage from 12% → 30-40%.
+- **Garage type enhancement:** Improved `parse_garage_count()` to detect integrated, built-in, standalone, and separate garages. Expanded context window for type keyword detection (3-char radius).
+- **Energy efficiency detection:** Added `parse_energy_efficiency()` to detect solar panels, geothermal systems, high-efficiency HVAC. Useful for soft point scoring and property summary analysis.
+- **Views detection:** Added `parse_views()` to detect water, mountain, and city views; quality indicators (panoramic, scenic). Relevant to property appeal scoring.
+- **Outdoor features:** Added `parse_outdoor_features()` to detect fenced yards, patios/decks, mature trees, privacy levels (private/secluded).
+- **Lot characteristics:** Added `parse_lot_characteristics()` to detect oversized/large/small lots, corner lots, multiple adjoining lots; supplements `fetch_lot_acres_parcel()` API data.
+- **Testing:** Added 30+ test cases covering all inference functions (property type, garage, energy, views, outdoor features, lot characteristics).
+- **Impact:** Enriches property_summary generation and AI scoring with high-value description signals; reduces "missing data" unknowns in scoring (commits b60cf6c, 01487f3, d6d6cdf, 9558eb1, 7aa661f)
+
 ### Phase 5 (Future)
 - Comps engine
 - Slack notifications
@@ -540,20 +551,30 @@ This section documents enrichment fields that cannot reach 100% coverage and why
 
 | Field | Coverage | Reason for gap |
 |---|---|---|
-| `property_type` | ~12% | Comes from email parser only; not extractable from descriptions. Redfin alerts include it in HTML emails (parsed by OneHome parser) but not in plaintext emails. Affects ~88% of listings ingested from plaintext sources. |
+| `property_type` | ~30-40% (after inference) | Previously 12% from email parser only. Phase 4.3 added `infer_property_type_from_description()` to detect from keywords. Remaining gap (60-70%) comes from descriptions with no property type indicators. Plaintext emails with sparse descriptions still have highest miss rate. |
 | `has_basement` | ~68% | Regex-based: can only detect when description explicitly mentions "basement", "lower level", "crawl space", etc. Many descriptions simply omit this information. ~32% natural ambiguity ceiling. |
 | `property_tax_json` | ~55-60% (after ORPTS expansion) | Hard floor ~37% before fix. NJ listings (Harding Township, Basking Ridge, Bernardsville area, ~9%) have no supported tax source. CT listing (Greenwich, ~2%) not covered. Some NY listings fail ORPTS address matching due to address format mismatches between listing data and parcel records. |
 | `lat`, `lng` | ~85-90% (after fix) | Listings with no address or no town cannot be geocoded. 2 listings (3.5%) have no address data. |
 | `year_built` | ~97% (after description parsing) | Hard floor: listings with no description and no JSON-LD metadata. 1 listing has neither. |
 | `basement_type` | ~32% | Subset of `has_basement`: only populated when description is specific enough to indicate finish level. "Large basement" → `has_basement=true`, `basement_type=null`. |
-| `garage_type` | ~12% | Only populated when description specifies "attached", "detached", or "carport". Generic "garage" mentions set `garage_count` but leave `garage_type` null. |
+| `garage_type` | ~15-20% (after enhancement) | Previously 12%. Phase 4.3 enhanced `parse_garage_count()` to detect integrated, built-in, standalone variants. Still limited by descriptions that only mention presence without type. |
 | `hoa_monthly` | ~14% | Correct behavior: most single-family homes in Westchester have no HOA. Only HOA listings (typically newer developments, condos mislabeled as SFH, or golf course communities) have this data. |
+
+### Description-Based Signal Extraction (Phase 4.3)
+These fields are extracted from listing descriptions via regex-based parsing and made available for AI scoring:
+- `property_type_inferred` — inferred from keywords (Single Family, Condo, Townhouse, Multi-Family, Mobile Home)
+- `has_solar`, `has_geothermal`, `high_efficiency` — energy efficiency signals
+- `has_water_view`, `has_mountain_view`, `has_city_view`, `view_quality` — views and vistas
+- `has_fenced_yard`, `has_patio_deck`, `has_mature_trees`, `privacy_level` — outdoor features
+- `lot_size_indicator`, `lot_count`, `corner_lot` — lot characteristics
+
+These are NOT stored in the database but are computed on-the-fly during scoring and included in the `listing_data` dict passed to the AI scorer. The AI uses them for soft point adjustments and property_summary generation.
 
 ### Non-Enrichable Fields
 These fields require human input or external data sources not currently integrated:
-- `property_type` — requires HTML email parsing (plaintext emails lack it) or manual entry
 - Floor plan data — not available in any listing source; AI must infer from description/images
 - Interior condition rating — AI inference only; no structured source
+- Exact square footage of specific rooms — not available in structured form
 
 ## 13. Engineering Discipline
 
