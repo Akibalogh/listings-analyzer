@@ -3,7 +3,6 @@
 import pytest
 from unittest.mock import MagicMock, patch
 from app import db
-from app.models import ScoringResult
 
 
 class TestLikedFeature:
