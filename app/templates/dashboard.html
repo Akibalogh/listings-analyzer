@@ -1513,7 +1513,7 @@
     <button class="filter-chip" data-filter="all-unfiltered">All</button>
     <button class="filter-chip" data-filter="not-reject">Strong Match+</button>
     <button class="filter-chip" data-filter="Toured">Toured</button>
-    <button class="filter-chip" data-filter="Liked">Liked for Parents</button>
+    <button class="filter-chip" data-filter="Liked">Liked</button>
     <button class="filter-chip" data-filter="Want to Go">Want to Go</button>
     <button class="filter-chip" data-filter="Passed">Passed</button>
     <select class="sort-select" id="sortSelect" onchange="applySort()">
@@ -2061,7 +2061,7 @@ function buildCard(l) {
   }
   /* Liked badge (visible in compact row) */
   if (l.liked) {
-    summary.appendChild(el('span', {className: 'liked-badge'}, '♥ For Parents'));
+    summary.appendChild(el('span', {className: 'liked-badge'}, '♥ Liked'));
   }
   /* Pending badge (visible in compact row) */
   var pendingStatuses = ['Pending', 'Under Contract', 'Closed'];
@@ -2097,7 +2097,7 @@ function buildCard(l) {
     var likedBtn = el('button', {
       className: 'liked-btn' + (l.liked ? ' liked' : ''),
       onclick: function(e) { e.stopPropagation(); toggleLiked(l.id, l.liked, likedBtn); }
-    }, l.liked ? '\u2665 For Parents \u2014 click to remove' : 'Like for Parents');
+    }, l.liked ? '\u2665 Liked \u2014 click to remove' : 'Like');
     var soldBtn = el('button', {
       className: 'sold-btn',
       onclick: function(e) { e.stopPropagation(); markSold(l.id); }

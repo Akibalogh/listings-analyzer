@@ -1,4 +1,4 @@
-"""Tests for 'Liked for Parents' feature."""
+"""Tests for 'Liked' feature."""
 
 import pytest
 from unittest.mock import MagicMock, patch
@@ -6,7 +6,7 @@ from app import db
 
 
 class TestLikedFeature:
-    """Tests for marking listings as liked for parents."""
+    """Tests for marking listings as liked ."""
 
     def test_mark_listing_liked(self):
         """Should update listing liked status to True."""
@@ -39,8 +39,8 @@ class TestLikedFeature:
     def test_liked_distinct_from_passed(self):
         """Liked and Passed should be independent statuses."""
         # A listing can be:
-        # - liked=True, passed=False (show to parents, but not for self)
-        # - liked=False, passed=True (rejected, don't show to anyone)
+        # - liked=True, passed=False (want to revisit)
+        # - liked=False, passed=True (rejected)
         # - liked=False, passed=False (undecided)
         # - liked=True, passed=True (shouldn't happen in normal usage, but possible)
 
@@ -99,7 +99,7 @@ class TestLikedButton:
     def test_liked_button_text_changes_with_state(self):
         """Button text should reflect current liked state."""
         # When liked=True: "♥ For Parents — click to remove"
-        # When liked=False: "Like for Parents"
+        # When liked=False: "Like "
         pass  # JavaScript unit test
 
     def test_liked_button_sends_api_request(self):
@@ -121,9 +121,9 @@ class TestFilterChipCounts:
     """Tests for filter chip badge counts."""
 
     def test_liked_count_in_filter_chips(self):
-        """'Liked for Parents' chip should show count of liked listings."""
+        """'Liked ' chip should show count of liked listings."""
         # updateFilterCounts() should increment counts['Liked'] for each liked listing
-        # Chip text should show "Liked for Parents (n)" where n is the count
+        # Chip text should show "Liked  (n)" where n is the count
         pass  # JavaScript unit test
 
 
@@ -158,13 +158,13 @@ class TestLikedUIIntegration:
     """End-to-end tests for liked feature UI."""
 
     def test_user_can_mark_listing_as_liked(self):
-        """Full workflow: view listing → click 'Like for Parents' → see badge."""
+        """Full workflow: view listing → click 'Like ' → see badge."""
         # 1. Load dashboard with listings
         # 2. Expand a listing card
-        # 3. Click "Like for Parents" button
-        # 4. See toast: "Marked for Parents"
+        # 3. Click "Like " button
+        # 4. See toast: "Marked "
         # 5. See badge "♥ For Parents" appear on card
-        # 6. See "Liked for Parents" chip show count increase
+        # 6. See "Liked " chip show count increase
         pass  # E2E test
 
     def test_user_can_unmark_liked_listing(self):
@@ -177,7 +177,7 @@ class TestLikedUIIntegration:
 
     def test_user_can_filter_liked_listings(self):
         """User can view only liked listings via filter chip."""
-        # 1. Click "Liked for Parents" chip
+        # 1. Click "Liked " chip
         # 2. Dashboard shows only liked listings
         # 3. Other filters hidden
         # 4. Click "Active" to return to default view
@@ -185,10 +185,10 @@ class TestLikedUIIntegration:
 
     def test_liked_independent_from_passed(self):
         """Listing can be liked even if later passed."""
-        # 1. Mark listing as "Liked for Parents"
+        # 1. Mark listing as "Liked "
         # 2. Later click "Pass"
         # 3. Both liked=True and passed=True
         # 4. "Active" view hides it (due to passed)
-        # 5. "Liked for Parents" chip still shows it
+        # 5. "Liked " chip still shows it
         # 6. "Passed" chip shows it
         pass  # E2E test

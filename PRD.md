@@ -260,10 +260,11 @@ Mobile-first single-page app served at `/` (`app/templates/dashboard.html`).
 - Falls back to hard results checklist + concerns + AI reasoning for older listings without property_summary
 - "Want to Go" / "✓ Want to Go — click to cancel" toggle *(auth-only)*
 - "Mark as Toured" / "Unmark as Toured" toggle *(auth-only)*
+- "Like" / "♥ Liked — click to remove" toggle *(auth-only)* — mark listings to revisit or share with others
 - "Mark as Sold" button *(auth-only)*
 
 ### Filters & Sorting
-- Filter chips: All, Active (non-reject), **Toured**, **Want to Go**, **Passed**
+- Filter chips: All, Active (non-reject), **Toured**, **Liked**, **Want to Go**, **Passed**
 - Sort: Score (high→low/low→high), Price, Sqft, $/sqft, Newest first, Commute, Schools
 - Filter counts shown on chips: Toured and Want to Go counts are always accurate (include pending/passed listings); All/Active counts respect display preferences
 
