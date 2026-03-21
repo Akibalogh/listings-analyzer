@@ -128,6 +128,7 @@ def fetch_school_data(zip_code: str | None, state: str | None) -> dict | None:
     calling this function to avoid exceeding the 20 calls/day free tier limit.
     """
     if not zip_code or not state:
+        logger.warning(f"Cannot fetch school data: missing zip_code={zip_code} or state={state}")
         return None
     if not settings.schooldigger_app_id or not settings.schooldigger_app_key:
         logger.debug("SchoolDigger API not configured, skipping")
@@ -330,6 +331,7 @@ def fetch_commute_time(
         return None
 
     if not address or not town:
+        logger.warning(f"Cannot fetch commute: missing address={address} or town={town}")
         return None
 
     destination = settings.commute_destination
