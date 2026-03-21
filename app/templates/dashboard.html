@@ -428,6 +428,12 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
+  .card-badge-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 4px;
+  }
   .card-meta {
     font-size: 12px;
     color: var(--text-muted);
@@ -2029,7 +2035,7 @@ function buildCard(l) {
   /* Score number */
   summary.appendChild(el('span', {className: 'card-score', style: 'color:' + scoreColor}, scoreDisplay));
 
-  /* Address + compact meta line */
+  /* Address + town + badges all inside card-info */
   var info = el('div', {className: 'card-info'});
   var addressEl = el('div', {className: 'card-address'});
   if (l.listing_url) {
@@ -2041,33 +2047,33 @@ function buildCard(l) {
   if (l.town) {
     info.appendChild(el('div', {className: 'card-town'}, l.town + (l.state ? ', ' + l.state : '')));
   }
-  summary.appendChild(info);
 
-  /* Toured badge (visible in compact row) */
+  /* Badges row (below address/town, wraps if needed) */
+  var badgeRow = el('div', {className: 'card-badge-row'});
   if (l.toured) {
-    summary.appendChild(el('span', {className: 'toured-badge'}, '\u2713 Toured'));
+    badgeRow.appendChild(el('span', {className: 'toured-badge'}, '\u2713 Toured'));
   }
-  /* Want to Go badge (visible in compact row) */
   if (l.tour_requested) {
-    summary.appendChild(el('span', {className: 'want-to-go-badge'}, 'Want to Go'));
+    badgeRow.appendChild(el('span', {className: 'want-to-go-badge'}, 'Want to Go'));
   }
-  /* Passed badge (visible in compact row) */
   if (l.passed) {
-    summary.appendChild(el('span', {className: 'passed-badge'}, 'Passed'));
+    badgeRow.appendChild(el('span', {className: 'passed-badge'}, 'Passed'));
   }
-  /* Liked badge (visible in compact row) */
   if (l.liked) {
-    summary.appendChild(el('span', {className: 'liked-badge'}, '♥ Liked'));
+    badgeRow.appendChild(el('span', {className: 'liked-badge'}, '♥ Liked'));
   }
-  /* Pending badge (visible in compact row) */
   var pendingStatuses = ['Pending', 'Under Contract', 'Closed'];
   if (pendingStatuses.indexOf(l.listing_status || '') >= 0) {
-    summary.appendChild(el('span', {className: 'pending-badge'}, l.listing_status));
+    badgeRow.appendChild(el('span', {className: 'pending-badge'}, l.listing_status));
   }
-  /* AI failure badge — score is a placeholder, not a real evaluation */
   if (l.evaluation_method === 'ai_failed') {
-    summary.appendChild(el('span', {className: 'ai-failed-badge', title: 'AI evaluation failed — score is a placeholder. Will retry on next rescore.'}, '\u26a0 Score pending'));
+    badgeRow.appendChild(el('span', {className: 'ai-failed-badge', title: 'AI evaluation failed — score is a placeholder. Will retry on next rescore.'}, '\u26a0 Score pending'));
   }
+  if (badgeRow.children.length > 0) {
+    info.appendChild(badgeRow);
+  }
+  summary.appendChild(info);
+
   /* Expand arrow */
   summary.appendChild(el('span', {className: 'card-expand-arrow'}, '\u25BC'));
   card.appendChild(summary);
@@ -2829,9 +2835,9 @@ async function toggleToured(listingId, currentlyTouredVal, btn) {
         var summary = card.querySelector('.card-summary');
         var existingBadge = summary ? summary.querySelector('.toured-badge') : null;
         if (newVal && !existingBadge && summary) {
-          var arrow = summary.querySelector('.card-expand-arrow');
+          var badgeRow = summary.querySelector('.card-badge-row') || (function() { var r = el('div', {className: 'card-badge-row'}); summary.querySelector('.card-info').appendChild(r); return r; })();
           var badge = el('span', {className: 'toured-badge'}, '\u2713 Toured');
-          summary.insertBefore(badge, arrow);
+          badgeRow.appendChild(badge);
         } else if (!newVal && existingBadge) {
           existingBadge.remove();
         }
@@ -2866,9 +2872,9 @@ async function toggleTourRequest(listingId, currentVal, btn) {
         var summary = card.querySelector('.card-summary');
         var existingBadge = summary ? summary.querySelector('.want-to-go-badge') : null;
         if (newVal && !existingBadge && summary) {
-          var arrow = summary.querySelector('.card-expand-arrow');
+          var badgeRow = summary.querySelector('.card-badge-row') || (function() { var r = el('div', {className: 'card-badge-row'}); summary.querySelector('.card-info').appendChild(r); return r; })();
           var badge = el('span', {className: 'want-to-go-badge'}, 'Want to Go');
-          summary.insertBefore(badge, arrow);
+          badgeRow.appendChild(badge);
         } else if (!newVal && existingBadge) {
           existingBadge.remove();
         }
@@ -2903,9 +2909,9 @@ async function togglePassed(listingId, currentVal, btn) {
         var summary = card.querySelector('.card-summary');
         var existingBadge = summary ? summary.querySelector('.passed-badge') : null;
         if (newVal && !existingBadge && summary) {
-          var arrow = summary.querySelector('.card-expand-arrow');
+          var badgeRow = summary.querySelector('.card-badge-row') || (function() { var r = el('div', {className: 'card-badge-row'}); summary.querySelector('.card-info').appendChild(r); return r; })();
           var badge = el('span', {className: 'passed-badge'}, 'Passed');
-          summary.insertBefore(badge, arrow);
+          badgeRow.appendChild(badge);
         } else if (!newVal && existingBadge) {
           existingBadge.remove();
         }
@@ -2939,9 +2945,9 @@ async function toggleLiked(listingId, currentVal, btn) {
         var summary = card.querySelector('.card-summary');
         var existingBadge = summary ? summary.querySelector('.liked-badge') : null;
         if (newVal && !existingBadge && summary) {
-          var arrow = summary.querySelector('.card-expand-arrow');
+          var badgeRow = summary.querySelector('.card-badge-row') || (function() { var r = el('div', {className: 'card-badge-row'}); summary.querySelector('.card-info').appendChild(r); return r; })();
           var badge = el('span', {className: 'liked-badge'}, '\u2665 Liked');
-          summary.insertBefore(badge, arrow);
+          badgeRow.appendChild(badge);
         } else if (!newVal && existingBadge) {
           existingBadge.remove();
         }
