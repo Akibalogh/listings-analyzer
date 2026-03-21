@@ -516,6 +516,20 @@ Mobile-first single-page app served at `/` (`app/templates/dashboard.html`).
 - **Fix:** Updated example to show confirmed bedroom; rephrased critical instructions: "If floor plan shows bedroom on main floor = CONFIRMATION" (commit 20f45fb)
 - **Impact:** Scorer now reliably detects and confirms ground-floor bedrooms from floor plan images; de-risks "parents' floor" criterion evaluation
 
+**Basement Suitable for Home Gym Criterion**
+- **Feature:** Added "Basement suitable for home gym" as explicit hard criterion
+- **Implementation:** Enhanced `parse_basement()` to detect gym keywords (gym, fitness, workout, rubber flooring, high ceiling); returns `basement_gym_suitable` flag
+- **Scoring:** Confirmed (+0 baseline), not confirmed (-18 points), missing basement (-28 points)
+- **Impact:** Properties like 37 Hyatt (tiny basement) now properly penalized; suitable basements appropriately rewarded (commit cdb5853)
+
+### Phase 4.2 (v7 Enrichment Logging & Observability — Mar 21, 2026)
+**Enrichment Data Visibility**
+- **Issue:** Listings like 31 Pierce (Pleasantville) and 101 Westchester (Buchanan) missing school/commute data with no diagnostic indication
+- **Root cause:** Silent failures in enrichment—when zip_code or address/town are missing, APIs are skipped without logging, making data gaps invisible
+- **Fix:** Added WARNING-level logging when school data skipped (missing zip_code/state) and when commute skipped (missing address/town) — commit 3eb29a1
+- **Testing:** Added test suite for enrichment logging (commit 33981c6)
+- **Impact:** Enrichment gaps now visible in logs; enables diagnosis of data entry issues vs API failures vs quota limits
+
 ### Phase 5 (Future)
 - Comps engine
 - Slack notifications
