@@ -10,6 +10,7 @@ All notable changes to Listings Analyzer are documented here.
 - **"Liked" status** — new listing status for marking properties to revisit or share. Independent from "Passed" and "Toured". `POST /listings/{id}/liked` endpoint (auth-only) toggles the status. Dashboard shows "Like" / "♥ Liked — click to remove" button in expanded detail, "♥ Liked" badge on card summary, and "Liked" filter chip with count. Status persists across page reloads in database.
 
 ### Changed
+- **Active filter hardened** — "Active" view now always excludes passed, toured, and pending/sold/closed listings regardless of display preferences. It is strictly "listings still on the roster to check out." The display preference toggles (hide passed, hide toured, hide pending) now apply only to the "All" view. PRD updated.
 - **Criteria v60: NJ hard reject + reduced sqft penalty** — NJ listings are now an explicit hard pass (Reject immediately). Borderline sqft penalty reduced from `-12 to -15` → `-5 to -7` for 2,200–2,400 sqft range (no longer "severe"). PRD updated to match.
 
 ### Added

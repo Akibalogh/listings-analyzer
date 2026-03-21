@@ -264,14 +264,17 @@ Mobile-first single-page app served at `/` (`app/templates/dashboard.html`).
 - "Mark as Sold" button *(auth-only)*
 
 ### Filters & Sorting
-- Filter chips: All, Active (non-reject), **Toured**, **Liked**, **Want to Go**, **Passed**
+- Filter chips: **Active** (default), All, Strong Match+, **Toured**, **Liked**, **Want to Go**, **Passed**
+- **Active** = listings still on the roster to review: always excludes passed, toured, and pending/sold/closed. This is the "what do we still need to check out?" view.
+- **All** = truly unfiltered (all listings); display prefs apply here
 - Sort: Score (high→low/low→high), Price, Sqft, $/sqft, Newest first, Commute, Schools
-- Filter counts shown on chips: Toured and Want to Go counts are always accurate (include pending/passed listings); All/Active counts respect display preferences
+- Filter counts shown on chips: Toured and Want to Go counts are always accurate (include pending/passed listings)
 
 ### Display Settings Panel (overlay, auth-only via ⚙ gear icon)
-- "Hide passed listings" toggle (default ON) — excludes passed from All/Active view; **does not affect** Passed, Toured, or Want to Go filter chips
-- "Hide pending/sold listings" toggle (default OFF) — excludes Pending/Sold/Under Contract/Closed from All/Active view; **does not affect** Toured or Want to Go filter chips
-- "Hide low-scoring listings" toggle (default OFF) — excludes Weak Match and Reject from All/Active view; **does not affect** Toured or Want to Go filter chips
+- "Hide passed in All view" toggle (default ON) — excludes passed from All view only; Active always hides passed
+- "Hide toured in All view" toggle — excludes toured from All view only; Active always hides toured
+- "Hide pending/sold in All view" toggle (default OFF) — excludes Pending/Sold/Under Contract/Closed from All view only; Active always hides pending/sold
+- "Hide low-scoring listings" toggle (default OFF) — excludes Weak Match and Reject from Active and All views; **does not affect** Toured, Liked, or Want to Go filter chips
 - "Default sort" dropdown — persisted across sessions
 - All preferences auto-saved to `localStorage` on toggle change (no Save button)
 

@@ -1544,8 +1544,8 @@
 
       <div class="pref-row">
         <div class="pref-label">
-          Hide passed listings
-          <small>Passed homes are hidden from All view; still visible via the Passed chip</small>
+          Hide passed in "All" view
+          <small>Active always hides passed; this applies only to the All view</small>
         </div>
         <label class="toggle-switch">
           <input type="checkbox" id="prefHidePassed" onchange="saveDisplayPrefs()">
@@ -1555,8 +1555,8 @@
 
       <div class="pref-row">
         <div class="pref-label">
-          Hide toured listings
-          <small>Listings marked as Toured won't appear in All view</small>
+          Hide toured in "All" view
+          <small>Active always hides toured; this applies only to the All view</small>
         </div>
         <label class="toggle-switch">
           <input type="checkbox" id="prefHideToured" onchange="saveDisplayPrefs()">
@@ -1566,8 +1566,8 @@
 
       <div class="pref-row">
         <div class="pref-label">
-          Hide pending/sold listings
-          <small>Listings marked Pending or Sold won't appear in All view</small>
+          Hide pending/sold in "All" view
+          <small>Active always hides pending/sold; this applies only to the All view</small>
         </div>
         <label class="toggle-switch">
           <input type="checkbox" id="prefHidePending" onchange="saveDisplayPrefs()">
@@ -1944,19 +1944,14 @@ function render() {
   } else if (activeFilter === 'all-unfiltered') {
     // "All" button shows truly all listings with no filters applied
   } else {
-    // "Active" (default) applies display preferences
-    if (_displayPrefs.hidePassed) {
-      items = items.filter(function(l) { return !l.passed; });
-    }
-    if (_displayPrefs.hideToured) {
-      items = items.filter(function(l) { return !l.toured; });
-    }
-    if (_displayPrefs.hidePending) {
-      items = items.filter(function(l) {
-        var s = l.listing_status || '';
-        return s !== 'Pending' && s !== 'Sold' && s !== 'Under Contract' && s !== 'Closed';
-      });
-    }
+    // "Active" = listings still on the roster to check out:
+    // always excludes passed, toured, and pending/sold/closed listings
+    items = items.filter(function(l) { return !l.passed; });
+    items = items.filter(function(l) { return !l.toured; });
+    items = items.filter(function(l) {
+      var s = l.listing_status || '';
+      return s !== 'Pending' && s !== 'Sold' && s !== 'Under Contract' && s !== 'Closed';
+    });
     if (_displayPrefs.hideLowScore) {
       items = items.filter(function(l) { return l.verdict !== 'Reject' && l.verdict !== 'Weak Match'; });
     }
