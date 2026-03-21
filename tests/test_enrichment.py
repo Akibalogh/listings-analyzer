@@ -2101,3 +2101,110 @@ class TestViewsDetection:
         assert result["has_mountain_view"] is False
         assert result["has_city_view"] is False
         assert result["view_quality"] is None
+
+
+# ---------------------------------------------------------------------------
+# Outdoor features detection
+# ---------------------------------------------------------------------------
+
+
+class TestOutdoorFeaturesDetection:
+    """Tests for parse_outdoor_features() detection."""
+
+    def test_fenced_yard_detection(self):
+        """Should detect fenced yards."""
+        from app.enrichment import parse_outdoor_features
+
+        result = parse_outdoor_features("Fenced yard for privacy and safety")
+        assert result["has_fenced_yard"] is True
+
+    def test_patio_deck_detection(self):
+        """Should detect patio and deck features."""
+        from app.enrichment import parse_outdoor_features
+
+        result = parse_outdoor_features("Beautiful deck with outdoor furniture")
+        assert result["has_patio_deck"] is True
+
+    def test_mature_trees_detection(self):
+        """Should detect mature landscaping."""
+        from app.enrichment import parse_outdoor_features
+
+        result = parse_outdoor_features("Property has mature trees and established landscaping")
+        assert result["has_mature_trees"] is True
+
+    def test_secluded_privacy(self):
+        """Should detect secluded privacy level."""
+        from app.enrichment import parse_outdoor_features
+
+        result = parse_outdoor_features("Secluded property with wooded surroundings")
+        assert result["privacy_level"] == "secluded"
+
+    def test_private_setting(self):
+        """Should detect private setting."""
+        from app.enrichment import parse_outdoor_features
+
+        result = parse_outdoor_features("Private lot with minimal neighbors")
+        assert result["privacy_level"] == "private"
+
+    def test_no_outdoor_features(self):
+        """Should return False for all features when none found."""
+        from app.enrichment import parse_outdoor_features
+
+        result = parse_outdoor_features("Townhouse in urban area")
+        assert result["has_fenced_yard"] is False
+        assert result["has_patio_deck"] is False
+        assert result["has_mature_trees"] is False
+        assert result["privacy_level"] is None
+
+
+# ---------------------------------------------------------------------------
+# Lot characteristics detection
+# ---------------------------------------------------------------------------
+
+
+class TestLotCharacteristicsDetection:
+    """Tests for parse_lot_characteristics() detection."""
+
+    def test_oversized_lot_detection(self):
+        """Should detect oversized lots."""
+        from app.enrichment import parse_lot_characteristics
+
+        result = parse_lot_characteristics("Oversized lot with over 1 acre")
+        assert result["lot_size_indicator"] == "oversized"
+
+    def test_large_lot_detection(self):
+        """Should detect large lots."""
+        from app.enrichment import parse_lot_characteristics
+
+        result = parse_lot_characteristics("Property sits on a large spacious lot")
+        assert result["lot_size_indicator"] == "large"
+
+    def test_small_lot_detection(self):
+        """Should detect small lots."""
+        from app.enrichment import parse_lot_characteristics
+
+        result = parse_lot_characteristics("Small compact lot in established neighborhood")
+        assert result["lot_size_indicator"] == "small"
+
+    def test_corner_lot_detection(self):
+        """Should detect corner lot properties."""
+        from app.enrichment import parse_lot_characteristics
+
+        result = parse_lot_characteristics("Corner lot with high visibility")
+        assert result["corner_lot"] is True
+
+    def test_multiple_lots_detection(self):
+        """Should detect multiple adjoining lots."""
+        from app.enrichment import parse_lot_characteristics
+
+        result = parse_lot_characteristics("Property includes 2 adjacent lots for expansion")
+        assert result["lot_count"] == 2
+
+    def test_no_lot_characteristics(self):
+        """Should return None/False when no lot characteristics found."""
+        from app.enrichment import parse_lot_characteristics
+
+        result = parse_lot_characteristics("Nice property in residential area")
+        assert result["lot_size_indicator"] is None
+        assert result["lot_count"] is None
+        assert result["corner_lot"] is False
