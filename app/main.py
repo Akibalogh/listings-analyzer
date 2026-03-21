@@ -888,7 +888,14 @@ def _build_listing_data(listing_row: dict) -> dict:
                 pass
 
     # Age/condition signal (computed on-the-fly, no DB storage needed)
-    from app.enrichment import score_age_condition, get_price_per_sqft_signal
+    from app.enrichment import (
+        score_age_condition,
+        get_price_per_sqft_signal,
+        parse_energy_efficiency,
+        parse_views,
+        parse_outdoor_features,
+        parse_lot_characteristics,
+    )
     age_cond = score_age_condition(
         listing_row.get("year_built"),
         listing_row.get("description"),
@@ -903,6 +910,30 @@ def _build_listing_data(listing_row: dict) -> dict:
     )
     if ppsf:
         listing_data["price_per_sqft_signal"] = ppsf
+
+    # Description-based signals for AI scoring (Phase 4.3 improvements)
+    if listing_data.get("description"):
+        description = listing_data["description"]
+
+        # Energy efficiency features
+        energy = parse_energy_efficiency(description)
+        if energy.get("has_solar") or energy.get("has_geothermal") or energy.get("high_efficiency"):
+            listing_data["energy_features"] = energy
+
+        # Views and vistas
+        views = parse_views(description)
+        if views.get("has_water_view") or views.get("has_mountain_view") or views.get("has_city_view"):
+            listing_data["views"] = views
+
+        # Outdoor features
+        outdoor = parse_outdoor_features(description)
+        if outdoor.get("has_fenced_yard") or outdoor.get("has_patio_deck") or outdoor.get("has_mature_trees"):
+            listing_data["outdoor_features"] = outdoor
+
+        # Lot characteristics
+        lot = parse_lot_characteristics(description)
+        if lot.get("lot_size_indicator") or lot.get("lot_count") or lot.get("corner_lot"):
+            listing_data["lot_features"] = lot
 
     # Property tax (stored JSON if previously fetched)
     if listing_row.get("property_tax_json"):
