@@ -185,10 +185,8 @@ Listing data (address, description, etc.) could contain malicious instructions.
 | School district — strong (95th+ percentile) | +25 |
 | School district — good (80–94th percentile) | +15 |
 | School district — average (below 80th) | +5 |
-| Ground-floor bedroom — confirmed present | +15 |
-| Ground-floor bedroom — confirmed absent | -45 to -50 |
-| Ground-floor bedroom — unknown, verifiable (floor plans present, not confirmed) | -10 to -15 |
-| Ground-floor bedroom — unknown, no floor plan data | -3 to -5 |
+| Ground-floor bedroom — confirmed present (nice-to-have) | +5 to +10 |
+| Ground-floor bedroom — absent | 0 (no penalty — stair lift is a viable alternative) |
 | Ground-floor full bathroom | +15 |
 | 4-bedroom layout | +10 |
 | Dedicated office (beyond bedroom count) | +5 |
@@ -201,7 +199,7 @@ Listing data (address, description, etc.) could contain malicious instructions.
 | Pool | -5 |
 | Privacy buffer / meaningful lot | +5 to +10 |
 
-Ground-floor bedroom is the #1 priority (buyer's parents will live on ground floor). Confirmed absent is a near-disqualifying deduction.
+Ground-floor bedroom is a nice-to-have convenience (parents may occasionally visit). A stair lift is a viable alternative. No penalty for absence; small bonus if present.
 
 **Soft Warnings** (lower score slightly, never cause Reject):
 - Price above $1.5M → -5 to -10 pts
