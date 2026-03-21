@@ -1878,9 +1878,117 @@ class TestEnrichmentLogging:
     def test_fetch_commute_time_logs_missing_town(self, caplog):
         """fetch_commute_time should log WARNING when town is missing."""
         from app.enrichment import fetch_commute_time
-        
+
         result = fetch_commute_time(address="31 Pierce", town=None, state="NY", zip_code="10570")
-        
+
         assert result is None
         assert "missing" in caplog.text.lower()
         assert "town" in caplog.text.lower()
+
+
+# ---------------------------------------------------------------------------
+# Property type inference from description
+# ---------------------------------------------------------------------------
+
+
+class TestPropertyTypeInference:
+    """Tests for infer_property_type_from_description()."""
+
+    def test_infer_single_family_from_style(self):
+        """Should detect single family from architectural style keywords."""
+        from app.enrichment import infer_property_type_from_description
+
+        result = infer_property_type_from_description("Beautiful colonial home with 3 bedrooms")
+        assert result == "Single Family Residential"
+
+    def test_infer_single_family_from_explicit(self):
+        """Should detect single family from explicit keywords."""
+        from app.enrichment import infer_property_type_from_description
+
+        result = infer_property_type_from_description("Single family home with attached garage")
+        assert result == "Single Family Residential"
+
+    def test_infer_townhouse(self):
+        """Should detect townhouse."""
+        from app.enrichment import infer_property_type_from_description
+
+        result = infer_property_type_from_description("Charming townhouse in downtown area")
+        assert result == "Townhouse"
+
+    def test_infer_condo(self):
+        """Should detect condo."""
+        from app.enrichment import infer_property_type_from_description
+
+        result = infer_property_type_from_description("Luxury condo with views and HOA")
+        assert result == "Condo/Co-op"
+
+    def test_infer_multifamily(self):
+        """Should detect multi-family (takes precedence over single-family)."""
+        from app.enrichment import infer_property_type_from_description
+
+        result = infer_property_type_from_description("Two-family home with separate entrance")
+        assert result == "Multi-Family"
+
+    def test_infer_none_no_keywords(self):
+        """Should return None when no type keywords present."""
+        from app.enrichment import infer_property_type_from_description
+
+        result = infer_property_type_from_description("Nice property with great location")
+        assert result is None
+
+    def test_infer_none_empty_description(self):
+        """Should return None for empty description."""
+        from app.enrichment import infer_property_type_from_description
+
+        result = infer_property_type_from_description(None)
+        assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Garage type detection
+# ---------------------------------------------------------------------------
+
+
+class TestGarageTypeDetection:
+    """Tests for parse_garage_count() garage type detection."""
+
+    def test_garage_type_attached(self):
+        """Should detect attached garage."""
+        from app.enrichment import parse_garage_count
+
+        result = parse_garage_count("2-car attached garage")
+        assert result["garage_count"] == 2
+        assert result["garage_type"] == "attached"
+
+    def test_garage_type_detached(self):
+        """Should detect detached garage."""
+        from app.enrichment import parse_garage_count
+
+        result = parse_garage_count("Single car detached garage in rear")
+        assert result["garage_count"] == 1
+        assert result["garage_type"] == "detached"
+
+    def test_garage_type_integrated(self):
+        """Should detect integrated garage (treat as attached)."""
+        from app.enrichment import parse_garage_count
+
+        result = parse_garage_count("3-car garage, integrated with home")
+        assert result["garage_count"] == 3
+        assert result["garage_type"] == "attached"
+
+    def test_garage_type_carport(self):
+        """Should detect carport."""
+        from app.enrichment import parse_garage_count
+
+        result = parse_garage_count("Covered carport for 2 vehicles")
+        assert result["garage_count"] == 1
+        assert result["garage_type"] == "carport"
+
+    def test_garage_no_type_generic(self):
+        """Should parse count but leave type None if not specified."""
+        from app.enrichment import parse_garage_count
+
+        result = parse_garage_count("Has a 2-car garage")
+        assert result["garage_count"] == 2
+        # Type is None unless explicitly mentioned
+        assert result["garage_type"] is None
