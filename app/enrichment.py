@@ -285,6 +285,7 @@ def _parse_duration(route: dict) -> int:
 # Towns whose nearest Metro-North station has a different name
 _STATION_OVERRIDES: dict[str, str] = {
     "bedford": "Bedford Hills",
+    "dobbs ferry": "Dobbs Ferry",
     "pound ridge": "Katonah",
     "south salem": "Katonah",
     "lewisboro": "Katonah",
