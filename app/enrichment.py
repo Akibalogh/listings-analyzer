@@ -1666,44 +1666,56 @@ def parse_pool_flag(description: str | None) -> dict:
 
 
 def parse_basement(description: str | None) -> dict:
-    """Detect basement presence and finish level from listing description.
+    """Detect basement presence, finish level, and gym-suitability from listing description.
 
     Returns:
         dict with keys:
           - has_basement (bool | None): True/False/None
           - basement_type (str | None): "finished", "partially_finished", "unfinished", "walk_out", or None
+          - basement_gym_suitable (bool | None): True if description suggests basement suitable for home gym
           - source (str): "description_parse"
     """
     if not description:
-        return {"has_basement": None, "basement_type": None, "source": "description_parse"}
+        return {"has_basement": None, "basement_type": None, "basement_gym_suitable": None, "source": "description_parse"}
 
     text = description.lower()
 
     # Explicit no-basement signals
     if re.search(r"\bno basement\b|\bslab foundation\b|\bslab\s+on\s+grade\b|\bcrawl\s*space\b", text):
-        return {"has_basement": False, "basement_type": None, "source": "description_parse"}
+        return {"has_basement": False, "basement_type": None, "basement_gym_suitable": False, "source": "description_parse"}
+
+    # Gym-suitability keywords (indicates finished, spacious basement suitable for exercise)
+    gym_suitable = bool(re.search(
+        r"\bgym\b|\bfitness\s+(?:room|space|center)\b|\bworkout\s+(?:room|space)\b|\bexercise\s+(?:room|space)\b|"
+        r"\brubber\s+(?:flooring|floor)\b|\bhigh\s+ceilings?\b|\brecreation\s+room\b|\brec\s+room\b",
+        text
+    ))
 
     # Walk-out basement (most desirable)
     if re.search(r"\bwalk[\s-]?out\s+basement\b|\bwalkout\s+basement\b|\bwalk[\s-]?out\s+lower\b", text):
-        return {"has_basement": True, "basement_type": "walk_out", "source": "description_parse"}
+        return {"has_basement": True, "basement_type": "walk_out", "basement_gym_suitable": gym_suitable or True, "source": "description_parse"}
 
     # Partially finished (check BEFORE finished to avoid false match on "partially finished")
     if re.search(r"\bpartially?\s+finished\s+basement\b|\bhalf\s+finished\s+basement\b|\bpartial(?:ly)?\s+finished\s+(?:lower|basement)\b", text):
-        return {"has_basement": True, "basement_type": "partially_finished", "source": "description_parse"}
+        return {"has_basement": True, "basement_type": "partially_finished", "basement_gym_suitable": gym_suitable, "source": "description_parse"}
 
     # Finished basement
     if re.search(r"\bfinished\s+basement\b|\bfully\s+finished\s+(?:lower|basement)\b|\bbasement.*finished\b", text):
-        return {"has_basement": True, "basement_type": "finished", "source": "description_parse"}
+        # Finished basement can be gym-suitable if it's spacious (assume true unless description hints at small/cluttered)
+        is_small = bool(re.search(r"\btiny\b|\bsmall\b|\bcompact\b|\bcramped\b|\blimited\s+space\b", text))
+        gym_suitable = gym_suitable or (not is_small)
+        return {"has_basement": True, "basement_type": "finished", "basement_gym_suitable": gym_suitable, "source": "description_parse"}
 
     # Unfinished basement
     if re.search(r"\bunfinished\s+basement\b|\bfull\s+basement\b|\bbasement\s+(?:with\s+)?(?:utility|storage|laundry|mechanicals)\b", text):
-        return {"has_basement": True, "basement_type": "unfinished", "source": "description_parse"}
+        return {"has_basement": True, "basement_type": "unfinished", "basement_gym_suitable": False, "source": "description_parse"}
 
     # Generic basement mention
     if re.search(r"\bbasement\b|\blower\s+level\b|\bfinished\s+lower\b", text):
-        return {"has_basement": True, "basement_type": None, "source": "description_parse"}
+        # Generic mention: assume not gym-suitable unless explicit keywords
+        return {"has_basement": True, "basement_type": None, "basement_gym_suitable": gym_suitable, "source": "description_parse"}
 
-    return {"has_basement": None, "basement_type": None, "source": "description_parse"}
+    return {"has_basement": None, "basement_type": None, "basement_gym_suitable": None, "source": "description_parse"}
 
 
 def parse_list_date(description: str | None) -> str | None:

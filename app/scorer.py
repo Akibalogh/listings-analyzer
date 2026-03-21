@@ -99,11 +99,11 @@ Worth Touring — 65/100
 ✅ Bedrooms: 4 bedrooms meets the requirement.
 ✅ Detached: Single-family home.
 ✅ Ground-floor bedroom: CONFIRMED — floor plan shows 12' x 14'11" bedroom on main floor.
+✅ Basement suitable for gym: CONFIRMED — 1,200 sqft finished basement with rec room, high ceilings, rubber flooring evident in photos.
 ⚠️ Price: $1.95M is $450K above the ideal $1.5M target, within the $2M hard cap.
-❓ Basement: Not mentioned — must verify finished basement on visit.
 ❓ Lot: Size not stated in listing.
 
-A confirmed finished basement would push this into Strong Match territory. Price is the main concern — negotiate accordingly.
+A confirmed basement gym setup is a major plus. Combined with ground floor bedroom for parents, this property is very strong. Price is the main concern — negotiate accordingly.
 
 GROUND-FLOOR BEDROOM INFERENCE — CRITICAL PRIORITY, USE ALL AVAILABLE SIGNALS:
 The buyer's parents will live on the ground floor. This is the SINGLE MOST IMPORTANT feature — treat it as a hard criterion.
@@ -137,6 +137,23 @@ Use all of these signals:
 COMMIT TO A DECISION on ground-floor bedroom. Only use "unknown" if ALL FOUR signals are genuinely absent AND no floor plan
 was provided. If you see a floor plan with a labeled bedroom/den/study/guest room on the main/first floor, mark it CONFIRMED.
 If you're 60%+ confident either way, pick a side and apply that score. A floor plan showing a bedroom = CONFIRMATION.
+
+BASEMENT SUITABLE FOR HOME GYM — IMPORTANT HARD CRITERION:
+Aki wants to set up a home gym in the basement. This is a strong requirement. Evaluate:
+1. BASEMENT PRESENCE: Does the listing have a basement? (no = strong negative)
+2. FINISH LEVEL: Is it finished (drywall, flooring, fixtures)? Finished is required for gym use. Unfinished/storage basements = not suitable.
+3. SIZE & USABILITY: Is it spacious enough for exercise equipment and movement? (look for "large", "spacious", "500+ sqft", "rec room", etc.)
+   - Tiny/cramped finished basements = not suitable (passed: false)
+   - Spacious finished basement = suitable (passed: true)
+4. GYM KEYWORDS IN DESCRIPTION: If description mentions "gym", "fitness room", "workout space", "exercise room", or "rubber flooring" = strong signal of suitability.
+
+Scoring:
+✅ Confirmed suitable (finished + spacious + gym keywords or visible in photos): passed: true, reason: "Spacious finished basement suitable for home gym"
+❌ Not confirmed/unsuitable (tiny finished, unfinished, or no basement): passed: false, reason: "Basement not suitable for home gym" or "No basement for gym setup"
+❓ Unknown (basement mentioned but size/finish unclear): passed: null, reason: "Basement size/finish unclear, must verify on visit"
+
+If you see a basement photo that clearly shows ample space, high ceilings, and good finish = mark CONFIRMED.
+If description says "tiny" basement or shows it's filled with mechanical/storage = mark NOT CONFIRMED.
 
 ENRICHMENT DATA:
 - If school_data is provided in <listing_data>, factor school quality into your evaluation.

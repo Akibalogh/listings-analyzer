@@ -952,6 +952,7 @@ def _build_listing_data(listing_row: dict) -> dict:
         listing_data["basement"] = {
             "has_basement": bool(listing_row["has_basement"]),
             "type": listing_row.get("basement_type"),
+            "gym_suitable": listing_row.get("basement_gym_suitable"),
         }
 
     return listing_data
