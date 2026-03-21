@@ -1992,3 +1992,112 @@ class TestGarageTypeDetection:
         assert result["garage_count"] == 2
         # Type is None unless explicitly mentioned
         assert result["garage_type"] is None
+
+
+# ---------------------------------------------------------------------------
+# Energy efficiency detection
+# ---------------------------------------------------------------------------
+
+
+class TestEnergyEfficiencyDetection:
+    """Tests for parse_energy_efficiency() detection."""
+
+    def test_solar_detection(self):
+        """Should detect solar panels."""
+        from app.enrichment import parse_energy_efficiency
+
+        result = parse_energy_efficiency("Home has solar panels on the roof")
+        assert result["has_solar"] is True
+        assert result["has_geothermal"] is False
+
+    def test_geothermal_detection(self):
+        """Should detect geothermal heating."""
+        from app.enrichment import parse_energy_efficiency
+
+        result = parse_energy_efficiency("Geothermal heating and cooling system")
+        assert result["has_geothermal"] is True
+
+    def test_high_efficiency_furnace(self):
+        """Should detect high-efficiency HVAC systems."""
+        from app.enrichment import parse_energy_efficiency
+
+        result = parse_energy_efficiency("High-efficiency furnace with modern controls")
+        assert result["high_efficiency"] is True
+
+    def test_energy_star(self):
+        """Should detect Energy Star certification."""
+        from app.enrichment import parse_energy_efficiency
+
+        result = parse_energy_efficiency("Energy Star certified home")
+        assert result["high_efficiency"] is True
+
+    def test_no_efficiency_features(self):
+        """Should return False for all flags when no features found."""
+        from app.enrichment import parse_energy_efficiency
+
+        result = parse_energy_efficiency("Nice house in quiet neighborhood")
+        assert result["has_solar"] is False
+        assert result["has_geothermal"] is False
+        assert result["high_efficiency"] is False
+
+
+# ---------------------------------------------------------------------------
+# Views detection
+# ---------------------------------------------------------------------------
+
+
+class TestViewsDetection:
+    """Tests for parse_views() detection."""
+
+    def test_water_view_detection(self):
+        """Should detect water views."""
+        from app.enrichment import parse_views
+
+        result = parse_views("Beautiful lake view from the master bedroom")
+        assert result["has_water_view"] is True
+        assert result["has_mountain_view"] is False
+
+    def test_mountain_view_detection(self):
+        """Should detect mountain views."""
+        from app.enrichment import parse_views
+
+        result = parse_views("Stunning mountain range views")
+        assert result["has_mountain_view"] is True
+
+    def test_city_view_detection(self):
+        """Should detect city/skyline views."""
+        from app.enrichment import parse_views
+
+        result = parse_views("City skyline views from upper floors")
+        assert result["has_city_view"] is True
+
+    def test_waterfront_view(self):
+        """Should detect waterfront property."""
+        from app.enrichment import parse_views
+
+        result = parse_views("Waterfront property with direct water access")
+        assert result["has_water_view"] is True
+
+    def test_panoramic_view_quality(self):
+        """Should detect panoramic view quality."""
+        from app.enrichment import parse_views
+
+        result = parse_views("Panoramic views from terrace")
+        assert result["view_quality"] == "panoramic"
+
+    def test_scenic_view_quality(self):
+        """Should detect scenic view quality."""
+        from app.enrichment import parse_views
+
+        result = parse_views("Scenic views of the countryside")
+        assert result["view_quality"] == "scenic"
+
+    def test_no_views(self):
+        """Should return False for all view types when none found."""
+        from app.enrichment import parse_views
+
+        result = parse_views("Standard suburban home")
+        assert result["has_water_view"] is False
+        assert result["has_mountain_view"] is False
+        assert result["has_city_view"] is False
+        assert result["view_quality"] is None
