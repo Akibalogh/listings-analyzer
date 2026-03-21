@@ -2937,7 +2937,7 @@ async function toggleLiked(listingId, currentVal, btn) {
     if (res.ok) {
       var listing = allListings.find(function(l) { return l.id === listingId; });
       if (listing) listing.liked = newVal;
-      btn.textContent = newVal ? '\u2665 For Parents \u2014 click to remove' : 'Like for Parents';
+      btn.textContent = newVal ? '\u2665 Liked \u2014 click to remove' : 'Like';
       btn.className = 'liked-btn' + (newVal ? ' liked' : '');
       var card = document.getElementById('card-' + listingId);
       if (card) {
@@ -2945,7 +2945,7 @@ async function toggleLiked(listingId, currentVal, btn) {
         var existingBadge = summary ? summary.querySelector('.liked-badge') : null;
         if (newVal && !existingBadge && summary) {
           var arrow = summary.querySelector('.card-expand-arrow');
-          var badge = el('span', {className: 'liked-badge'}, '\u2665 For Parents');
+          var badge = el('span', {className: 'liked-badge'}, '\u2665 Liked');
           summary.insertBefore(badge, arrow);
         } else if (!newVal && existingBadge) {
           existingBadge.remove();
