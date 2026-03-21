@@ -45,7 +45,7 @@ You want:
 
 ### Data Enrichment
 - **School data** — SchoolDigger API (free DEV tier, 20 calls/day) fetches nearby school rankings by zip code; cached in DB to avoid rate limit; displayed on cards and fed into AI scoring
-- **Transit commute times** — Google Routes API (Essentials tier, 10K free/month) calculates commute to Brookfield Place NYC (next weekday 8 AM); always drive-to-station + transit (the only mode — no walking/bus routes); station overrides map towns to their nearest Metro-North station (e.g., Cortlandt Manor → Croton-Harmon, Chappaqua/Millwood/New Castle → Chappaqua, Armonk/North Castle → North White Plains); displayed as badge on dashboard cards
+- **Transit commute times** — Google Routes API (Essentials tier, 10K free/month) calculates commute to Brookfield Place NYC (230 Vesey St, 10281) next weekday 8 AM; drive-to-station + transit (the only mode); station overrides map towns to nearest Metro-North station (e.g., Dobbs Ferry → Dobbs Ferry, Cortlandt Manor → Croton-Harmon, Chappaqua/Millwood/New Castle → Chappaqua, Armonk/North Castle → North White Plains); displayed as commute badge on dashboard
 - **Address-based dedup** — Normalized address keys (Avenue→Ave, Street→St, New York→NY, etc.) prevent duplicate listings across different email parsers; keys are recomputed on every startup so normalization improvements apply retroactively; startup dedup pass merges any duplicates that emerge, keeping the listing with toured status / most data
 
 ## 3. User Flow
@@ -478,7 +478,7 @@ Mobile-first single-page app served at `/` (`app/templates/dashboard.html`).
 - **Filter isolation fix** — Toured and Want to Go filter chips bypass all display preferences (hidePending, hidePassed, hideLowScore); regression test added
 - **Filter count fix** — Toured and Want to Go chip counts now include listings with any status (pending/passed); previously pending listings with tour_requested=True were excluded from the count due to early-return in display prefs logic
 - **Mobile header compact mode** — header collapses to icon-only buttons on screens ≤640px
-- **Redfin bot detection mitigation** — scraper now: (1) rotates User-Agent across 5 browser signatures to avoid fingerprinting, (2) adds Referer, DNT, and Connection headers for realism, (3) retries Redfin URLs twice with different User-Agents and delays between attempts, (4) detects "unknown address" bot-block pages and switches to fallback sources (OneKey MLS, Jina Reader) earlier
+- **Redfin bot detection + rate-limit mitigation** — scraper now: (1) rotates User-Agent across 5 browser signatures to avoid fingerprinting, (2) adds Referer, DNT, and Connection headers for realism, (3) retries Redfin URLs with exponential backoff delays (1-2s, 3-5s, 5-8s per retry), (4) detects "unknown address" bot-block pages and switches to fallback sources (OneKey MLS, Jina Reader) earlier, (5) bulk scrape operations add 2-3s delays between listing requests to respect Redfin rate limits
 - Ground-floor bedroom scoring changed from binary reject to point-based: +15 confirmed, -20/-25 confirmed absent, -10/-15 verifiable unknown, -3/-5 missing-data unknown
 - Two-tier unknown penalty in AI prompt: verifiable unknowns (images present, feature unconfirmed) = 10–15 pt deduction; missing-data unknowns (no floor plan) = 3–5 pt mild deduction
 - Address normalization: hyphens stripped from both address and town (fixes Croton-On-Hudson duplication)
@@ -502,6 +502,19 @@ Mobile-first single-page app served at `/` (`app/templates/dashboard.html`).
 - **Metro-North station proximity** — static 61-station dataset (Harlem/Hudson/New Haven lines), stores `station_json` (96.5% coverage)
 - **Description parsers** — `parse_garage_count()`, `parse_hoa_amount()`, `parse_pool_flag()`, `parse_basement()`, `parse_year_built()` — pure regex, no API calls; wired into `_enrich_all()` for automatic backfill
 - **Criteria v47–v52** — calibration rebalance, commute scoring, power line/flood zone/station scoring, structured data references for garage/pool/basement/HOA
+
+### Phase 4.1 (v7 Data Quality Fixes — Mar 21, 2026)
+**Commute Calculation Fix**
+- **Issue:** Dobbs Ferry listings (and other Westchester towns) returning 122+ minute commute times to Brookfield Place
+- **Root cause:** Missing station override for Dobbs Ferry in `_STATION_OVERRIDES` dict; system generated invalid station string `"dobbs ferry train station, NY"` that Google Routes API couldn't geocode
+- **Fix:** Added `"dobbs ferry": "Dobbs Ferry"` override (commit c418efa)
+- **Impact:** Dobbs Ferry now correctly uses Dobbs Ferry Metro-North (Hudson Line), restoring realistic ~35–40 minute commute estimates
+
+**AI Scorer Ground-Floor Bedroom Detection**
+- **Issue:** Listings with clear first-floor bedrooms in floor plans marked as "not confirmed" (Cherry Hill Ct, Law Rd, etc.)
+- **Root cause:** AI example output template showed bedroom as "unknown", anchoring scorer to reject floor plan evidence; prompt lacked explicit enforcement
+- **Fix:** Updated example to show confirmed bedroom; rephrased critical instructions: "If floor plan shows bedroom on main floor = CONFIRMATION" (commit 20f45fb)
+- **Impact:** Scorer now reliably detects and confirms ground-floor bedrooms from floor plan images; de-risks "parents' floor" criterion evaluation
 
 ### Phase 5 (Future)
 - Comps engine
