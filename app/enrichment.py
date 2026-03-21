@@ -1733,6 +1733,92 @@ def parse_basement(description: str | None) -> dict:
     return {"has_basement": None, "basement_type": None, "basement_gym_suitable": None, "source": "description_parse"}
 
 
+def parse_energy_efficiency(description: str | None) -> dict:
+    """Detect energy efficiency features from listing description.
+
+    Returns:
+        dict with keys:
+          - has_solar (bool): True if solar panels mentioned
+          - has_geothermal (bool): True if geothermal mentioned
+          - high_efficiency (bool): True if high-efficiency systems mentioned
+          - source (str): "description_parse"
+    """
+    if not description:
+        return {"has_solar": False, "has_geothermal": False, "high_efficiency": False, "source": "description_parse"}
+
+    text = description.lower()
+
+    has_solar = bool(re.search(r"\bsolar\s+(?:panel|roof|array|thermal|powered)\b|\bsolar\b", text))
+
+    has_geothermal = bool(re.search(r"\bgeothermal\b|\bgeo[\s-]?thermal\b", text))
+
+    high_efficiency = bool(re.search(
+        r"\b(?:energy[\s-]?(?:efficient|saving)|high[\s-]?efficiency|energy[\s-]?star|"
+        r"efficient\s+(?:hvac|heating|cooling)|modern\s+systems|upgraded\s+systems|"
+        r"high[\s-]?efficiency\s+(?:furnace|boiler|system))\b",
+        text
+    ))
+
+    return {
+        "has_solar": has_solar,
+        "has_geothermal": has_geothermal,
+        "high_efficiency": high_efficiency,
+        "source": "description_parse"
+    }
+
+
+def parse_views(description: str | None) -> dict:
+    """Detect quality views from listing description.
+
+    Returns:
+        dict with keys:
+          - has_water_view (bool): True if water/lake/river/ocean views mentioned
+          - has_mountain_view (bool): True if mountain/hill views mentioned
+          - has_city_view (bool): True if city/skyline views mentioned
+          - view_quality (str | None): "panoramic", "panoramic_views", "scenic", or None
+          - source (str): "description_parse"
+    """
+    if not description:
+        return {
+            "has_water_view": False,
+            "has_mountain_view": False,
+            "has_city_view": False,
+            "view_quality": None,
+            "source": "description_parse"
+        }
+
+    text = description.lower()
+
+    has_water_view = bool(re.search(
+        r"\b(?:water\s+view|lake\s+view|river\s+view|ocean\s+view|waterfront|water\s+access)\b",
+        text
+    ))
+
+    has_mountain_view = bool(re.search(
+        r"\b(?:mountain\s+view|hill\s+view|mountain\s+range|scenic\s+view|rolling\s+hills)\b",
+        text
+    ))
+
+    has_city_view = bool(re.search(
+        r"\b(?:city\s+view|skyline|city\s+skyline|urban\s+view|manhattan\s+view)\b",
+        text
+    ))
+
+    view_quality = None
+    if re.search(r"\bpanoramic\s+view|\bpanoramic\b", text):
+        view_quality = "panoramic"
+    elif re.search(r"\bscenic\s+view|\bbeautiful\s+view|\bspectacular\s+view", text):
+        view_quality = "scenic"
+
+    return {
+        "has_water_view": has_water_view,
+        "has_mountain_view": has_mountain_view,
+        "has_city_view": has_city_view,
+        "view_quality": view_quality,
+        "source": "description_parse"
+    }
+
+
 def infer_property_type_from_description(description: str | None) -> str | None:
     """Infer property type from description keywords when not available from parser.
 
