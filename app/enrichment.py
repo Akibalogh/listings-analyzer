@@ -1819,6 +1819,105 @@ def parse_views(description: str | None) -> dict:
     }
 
 
+def parse_outdoor_features(description: str | None) -> dict:
+    """Detect outdoor features and privacy from listing description.
+
+    Returns:
+        dict with keys:
+          - has_fenced_yard (bool): True if fenced yard/property mentioned
+          - has_patio_deck (bool): True if patio/deck/terrace mentioned
+          - has_mature_trees (bool): True if mature trees or landscaping mentioned
+          - privacy_level (str | None): "private", "secluded", or None
+          - source (str): "description_parse"
+    """
+    if not description:
+        return {
+            "has_fenced_yard": False,
+            "has_patio_deck": False,
+            "has_mature_trees": False,
+            "privacy_level": None,
+            "source": "description_parse"
+        }
+
+    text = description.lower()
+
+    has_fenced_yard = bool(re.search(
+        r"\bfenced\s+(?:yard|property|lot)\b|\bfencing\b|\bprivate\s+fence\b",
+        text
+    ))
+
+    has_patio_deck = bool(re.search(
+        r"\b(?:patio|deck|terrace|screened\s+porch|covered\s+porch|pergola)\b",
+        text
+    ))
+
+    has_mature_trees = bool(re.search(
+        r"\b(?:mature\s+(?:trees|landscaping)|established\s+(?:trees|landscape)|"
+        r"large\s+trees|wooded\s+lot|tree[\s-]?lined)\b",
+        text
+    ))
+
+    privacy_level = None
+    if re.search(r"\bsecluded\b|\bvery\s+private\b|\bhighly\s+private\b", text):
+        privacy_level = "secluded"
+    elif re.search(r"\bprivate\s+(?:yard|property|lot|setting)\b|\bprivacy\b", text):
+        privacy_level = "private"
+
+    return {
+        "has_fenced_yard": has_fenced_yard,
+        "has_patio_deck": has_patio_deck,
+        "has_mature_trees": has_mature_trees,
+        "privacy_level": privacy_level,
+        "source": "description_parse"
+    }
+
+
+def parse_lot_characteristics(description: str | None) -> dict:
+    """Detect lot size and quality characteristics from description.
+
+    Returns:
+        dict with keys:
+          - lot_size_indicator (str | None): "large", "small", "oversized", "corner", etc.
+          - lot_count (int | None): Number of lots if multiple lots mentioned
+          - corner_lot (bool): True if corner lot mentioned
+          - source (str): "description_parse"
+    """
+    if not description:
+        return {
+            "lot_size_indicator": None,
+            "lot_count": None,
+            "corner_lot": False,
+            "source": "description_parse"
+        }
+
+    text = description.lower()
+
+    # Detect lot size indicators
+    lot_size_indicator = None
+    if re.search(r"\b(?:oversized|extra[\s-]?large|generous|expansive)\s+lot\b|\b(?:over\s+)?1\s+acre\b", text):
+        lot_size_indicator = "oversized"
+    elif re.search(r"\b(?:large|spacious)\s+lot\b", text):
+        lot_size_indicator = "large"
+    elif re.search(r"\b(?:small|compact)\s+lot\b", text):
+        lot_size_indicator = "small"
+
+    # Detect multiple lots
+    lot_count = None
+    m = re.search(r"\b([2-9])\s+(?:adjoining|adjacent)?\s*lots?\b", text)
+    if m:
+        lot_count = int(m.group(1))
+
+    # Detect corner lot
+    corner_lot = bool(re.search(r"\bcorner\s+lot\b|\bcorner\s+property\b", text))
+
+    return {
+        "lot_size_indicator": lot_size_indicator,
+        "lot_count": lot_count,
+        "corner_lot": corner_lot,
+        "source": "description_parse"
+    }
+
+
 def infer_property_type_from_description(description: str | None) -> str | None:
     """Infer property type from description keywords when not available from parser.
 
