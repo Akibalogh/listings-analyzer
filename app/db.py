@@ -563,6 +563,7 @@ def _migrate_add_columns():
         ("listings", "enriched_at", "TEXT"),
         ("listings", "tour_requested", "BOOLEAN DEFAULT FALSE"),
         ("listings", "passed", "BOOLEAN DEFAULT FALSE"),
+        ("listings", "liked", "BOOLEAN DEFAULT FALSE"),
         ("listings", "year_built", "INTEGER"),
         ("listings", "list_date", "TEXT"),
         ("listings", "property_tax_json", "TEXT"),
@@ -925,6 +926,17 @@ def mark_listing_passed(listing_id: int, passed: bool):
         cur.execute(
             f"UPDATE listings SET passed = {ph} WHERE id = {ph}",
             (passed, listing_id),
+        )
+
+
+def mark_listing_liked(listing_id: int, liked: bool):
+    """Mark (or un-mark) a listing as liked (worth showing to parents)."""
+    ph = _placeholder()
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            f"UPDATE listings SET liked = {ph} WHERE id = {ph}",
+            (liked, listing_id),
         )
 
 

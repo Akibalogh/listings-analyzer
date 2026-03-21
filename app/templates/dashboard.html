@@ -1013,6 +1013,22 @@
     flex-shrink: 0;
   }
 
+  .liked-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 4px 10px;
+    border-radius: 100px;
+    font-size: 10px;
+    font-weight: 700;
+    white-space: nowrap;
+    letter-spacing: 0.5px;
+    background: #fce7f3;
+    color: #be185d;
+    border: 1px solid #fbcfe8;
+    flex-shrink: 0;
+  }
+
   /* Pending badge */
   .pending-badge {
     display: inline-flex;
@@ -1066,6 +1082,23 @@
   .passed-btn:hover { border-color: var(--yellow); color: var(--yellow); }
   .passed-btn.passed { background: var(--yellow-bg); border-color: #fde68a; color: var(--yellow); }
   .passed-btn.passed:hover { background: #fef2f2; border-color: #fecaca; color: #dc2626; }
+
+  /* Liked button (in expanded detail) */
+  .liked-btn {
+    background: transparent;
+    border: 1.5px solid var(--border);
+    color: var(--text-muted);
+    padding: 6px 12px;
+    border-radius: 8px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s;
+    white-space: nowrap;
+  }
+  .liked-btn:hover { border-color: #ec4899; color: #ec4899; }
+  .liked-btn.liked { background: #fce7f3; border-color: #fbcfe8; color: #ec4899; }
+  .liked-btn.liked:hover { background: #ffe7f0; border-color: #ffb3d9; color: #be185d; }
 
   /* Sold button (in expanded detail) */
   .sold-btn {
@@ -1476,9 +1509,10 @@
   </div>
 
   <div class="controls" id="controls">
-    <button class="filter-chip active" data-filter="all">All</button>
-    <button class="filter-chip" data-filter="not-reject">Active</button>
+    <button class="filter-chip active" data-filter="all">Active</button>
+    <button class="filter-chip" data-filter="not-reject">Strong Match+</button>
     <button class="filter-chip" data-filter="Toured">Toured</button>
+    <button class="filter-chip" data-filter="Liked">Liked for Parents</button>
     <button class="filter-chip" data-filter="Want to Go">Want to Go</button>
     <button class="filter-chip" data-filter="Passed">Passed</button>
     <select class="sort-select" id="sortSelect" onchange="applySort()">
@@ -1607,6 +1641,7 @@ var allListings = [];
 var _filterRoutes = {
   '/want-to-go': 'Want to Go',
   '/toured': 'Toured',
+  '/liked': 'Liked',
   '/passed': 'Passed',
   '/non-reject': 'not-reject',
 };
@@ -1870,10 +1905,11 @@ window.addEventListener('popstate', function() {
 });
 
 function updateFilterCounts() {
-  var counts = { all: 0, 'not-reject': 0, 'Toured': 0, 'Want to Go': 0, 'Passed': 0 };
+  var counts = { all: 0, 'not-reject': 0, 'Toured': 0, 'Want to Go': 0, 'Liked': 0, 'Passed': 0 };
   allListings.forEach(function(l) {
     if (l.toured) counts['Toured']++;
     if (l.tour_requested) counts['Want to Go']++;
+    if (l.liked) counts['Liked']++;
     if (l.passed) { counts['Passed']++; if (_displayPrefs.hidePassed) return; }
     var isPending = ['Pending','Sold','Under Contract','Closed'].indexOf(l.listing_status || '') >= 0;
     if (_displayPrefs.hidePending && isPending) return;
@@ -1898,6 +1934,8 @@ function render() {
     items = items.filter(function(l) { return l.passed; });
   } else if (activeFilter === 'Toured') {
     items = items.filter(function(l) { return l.toured; });
+  } else if (activeFilter === 'Liked') {
+    items = items.filter(function(l) { return l.liked; });
   } else if (activeFilter === 'Want to Go') {
     items = items.filter(function(l) { return l.tour_requested; });
   } else {
@@ -2016,6 +2054,10 @@ function buildCard(l) {
   if (l.passed) {
     summary.appendChild(el('span', {className: 'passed-badge'}, 'Passed'));
   }
+  /* Liked badge (visible in compact row) */
+  if (l.liked) {
+    summary.appendChild(el('span', {className: 'liked-badge'}, '♥ For Parents'));
+  }
   /* Pending badge (visible in compact row) */
   var pendingStatuses = ['Pending', 'Under Contract', 'Closed'];
   if (pendingStatuses.indexOf(l.listing_status || '') >= 0) {
@@ -2047,6 +2089,10 @@ function buildCard(l) {
       className: 'passed-btn' + (l.passed ? ' passed' : ''),
       onclick: function(e) { e.stopPropagation(); togglePassed(l.id, l.passed, passedBtn); }
     }, l.passed ? '\u2713 Passed \u2014 click to undo' : 'Pass');
+    var likedBtn = el('button', {
+      className: 'liked-btn' + (l.liked ? ' liked' : ''),
+      onclick: function(e) { e.stopPropagation(); toggleLiked(l.id, l.liked, likedBtn); }
+    }, l.liked ? '\u2665 For Parents \u2014 click to remove' : 'Like for Parents');
     var soldBtn = el('button', {
       className: 'sold-btn',
       onclick: function(e) { e.stopPropagation(); markSold(l.id); }
@@ -2054,6 +2100,7 @@ function buildCard(l) {
     actionsRow.appendChild(tourReqBtn);
     actionsRow.appendChild(tourBtn);
     actionsRow.appendChild(passedBtn);
+    actionsRow.appendChild(likedBtn);
     actionsRow.appendChild(soldBtn);
     if (aiFailed) {
       var retryBtn = el('button', {
@@ -2864,6 +2911,42 @@ async function togglePassed(listingId, currentVal, btn) {
       }
       updateFilterCounts();
       showToast(newVal ? 'Marked as Passed' : 'Passed removed');
+    } else {
+      var err = await res.json();
+      showToast('Error: ' + (err.detail || 'failed'));
+    }
+  } catch (e) {
+    showToast('Network error');
+  }
+}
+
+async function toggleLiked(listingId, currentVal, btn) {
+  var newVal = !currentVal;
+  try {
+    var res = await fetch('/listings/' + listingId + '/liked', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({liked: newVal})
+    });
+    if (res.ok) {
+      var listing = allListings.find(function(l) { return l.id === listingId; });
+      if (listing) listing.liked = newVal;
+      btn.textContent = newVal ? '\u2665 For Parents \u2014 click to remove' : 'Like for Parents';
+      btn.className = 'liked-btn' + (newVal ? ' liked' : '');
+      var card = document.getElementById('card-' + listingId);
+      if (card) {
+        var summary = card.querySelector('.card-summary');
+        var existingBadge = summary ? summary.querySelector('.liked-badge') : null;
+        if (newVal && !existingBadge && summary) {
+          var arrow = summary.querySelector('.card-expand-arrow');
+          var badge = el('span', {className: 'liked-badge'}, '\u2665 For Parents');
+          summary.insertBefore(badge, arrow);
+        } else if (!newVal && existingBadge) {
+          existingBadge.remove();
+        }
+      }
+      updateFilterCounts();
+      showToast(newVal ? 'Marked for Parents' : 'Removed from Parents list');
     } else {
       var err = await res.json();
       showToast('Error: ' + (err.detail || 'failed'));

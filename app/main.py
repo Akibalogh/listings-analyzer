@@ -483,6 +483,20 @@ async def toggle_passed(request: Request, listing_id: int):
     return {"listing_id": listing_id, "passed": passed}
 
 
+@app.post("/listings/{listing_id}/liked")
+async def toggle_liked(request: Request, listing_id: int):
+    """Flag or un-flag a listing as liked (worth showing to parents). Requires auth."""
+    _require_auth(request)
+    listing = db.get_listing_by_id(listing_id)
+    if not listing:
+        raise HTTPException(status_code=404, detail=f"Listing #{listing_id} not found")
+
+    body = await request.json()
+    liked = bool(body.get("liked", True))
+    db.mark_listing_liked(listing_id, liked)
+    return {"listing_id": listing_id, "liked": liked}
+
+
 @app.post("/listings/{listing_id}/agent")
 async def set_agent(request: Request, listing_id: int):
     """Set the agent name for a listing. Requires auth or manage key."""
