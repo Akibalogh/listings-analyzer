@@ -1519,6 +1519,17 @@
 
       <div class="pref-row">
         <div class="pref-label">
+          Hide toured listings
+          <small>Listings marked as Toured won't appear in All view</small>
+        </div>
+        <label class="toggle-switch">
+          <input type="checkbox" id="prefHideToured" onchange="saveDisplayPrefs()">
+          <span class="toggle-track"></span>
+        </label>
+      </div>
+
+      <div class="pref-row">
+        <div class="pref-label">
           Hide pending/sold listings
           <small>Listings marked Pending or Sold won't appear in All view</small>
         </div>
@@ -1606,7 +1617,7 @@ var currentUser = null;
 var googleClientId = null;
 
 /* ==== DISPLAY PREFERENCES (localStorage) ==== */
-var _displayPrefs = { hidePassed: true, hidePending: false, hideLowScore: false, defaultSort: 'score-desc' };
+var _displayPrefs = { hidePassed: true, hideToured: false, hidePending: false, hideLowScore: false, defaultSort: 'score-desc' };
 
 function loadDisplayPrefs() {
   try {
@@ -1622,6 +1633,7 @@ function loadDisplayPrefs() {
 
 function saveDisplayPrefs() {
   _displayPrefs.hidePassed = document.getElementById('prefHidePassed').checked;
+  _displayPrefs.hideToured = document.getElementById('prefHideToured').checked;
   _displayPrefs.hidePending = document.getElementById('prefHidePending').checked;
   _displayPrefs.hideLowScore = document.getElementById('prefHideLowScore').checked;
   _displayPrefs.defaultSort = document.getElementById('prefDefaultSort').value;
@@ -1631,10 +1643,12 @@ function saveDisplayPrefs() {
 
 function syncPrefsUI() {
   var hp = document.getElementById('prefHidePassed');
+  var ht = document.getElementById('prefHideToured');
   var hpend = document.getElementById('prefHidePending');
   var hls = document.getElementById('prefHideLowScore');
   var ds = document.getElementById('prefDefaultSort');
   if (hp) hp.checked = _displayPrefs.hidePassed;
+  if (ht) ht.checked = _displayPrefs.hideToured;
   if (hpend) hpend.checked = _displayPrefs.hidePending;
   if (hls) hls.checked = _displayPrefs.hideLowScore;
   if (ds) ds.value = _displayPrefs.defaultSort;
@@ -1889,6 +1903,9 @@ function render() {
   } else {
     if (_displayPrefs.hidePassed) {
       items = items.filter(function(l) { return !l.passed; });
+    }
+    if (_displayPrefs.hideToured) {
+      items = items.filter(function(l) { return !l.toured; });
     }
     if (_displayPrefs.hidePending) {
       items = items.filter(function(l) {
