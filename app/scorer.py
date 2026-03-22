@@ -100,10 +100,10 @@ Worth Touring — 65/100
 ✅ Detached: Single-family home.
 ✅ Ground-floor bedroom: CONFIRMED — floor plan shows 12' x 14'11" bedroom on main floor. (Nice-to-have bonus)
 ✅ Basement suitable for gym: CONFIRMED — 1,200 sqft finished basement with rec room, high ceilings, rubber flooring evident in photos.
-⚠️ Price: $1.95M is $450K above the ideal $1.5M target, within the $2M hard cap.
+⚠️ Price: $1.65M is $150K above the ideal $1.5M target, within the $1.8M hard cap.
 ❓ Lot: Size not stated in listing.
 
-A confirmed basement gym setup is a major plus. Ground floor bedroom adds convenience for parents visiting. Price is the main concern — negotiate accordingly.
+A confirmed basement gym setup is a major plus. Ground floor bedroom adds convenience for parents visiting. Price at $1.65M is above target but within range — negotiate accordingly.
 
 GROUND-FLOOR BEDROOM — NICE-TO-HAVE (NOT A HARD CRITERION):
 The buyer's parents may occasionally need a ground-floor bedroom. This is a CONVENIENCE, not a dealbreaker.
@@ -129,13 +129,18 @@ Scoring:
 If you see a basement photo that clearly shows ample space, high ceilings, and good finish = mark CONFIRMED.
 If description says "tiny" basement or shows it's filled with mechanical/storage = mark NOT CONFIRMED.
 
-ENRICHMENT DATA:
-- If school_data is provided in <listing_data>, factor school quality into your evaluation.
-  Higher rank_percentile = better school. Weight elementary schools most heavily.
-  Mention specific school names and percentiles in your property_summary.
-- If commute_minutes is provided in <listing_data>, factor transit commute time into your scoring.
-  Under 60 minutes is good, 60-90 is acceptable, over 90 is a significant negative.
-  Mention commute time in your property_summary.
+ENRICHMENT DATA — TOP PRIORITY FACTORS:
+The buyer's three highest-priority criteria are: (1) commute time, (2) school district quality, (3) price.
+These should carry the most weight in your scoring.
+
+- COMMUTE: If commute_minutes is provided in <listing_data>, this is a TOP PRIORITY factor.
+  Under 60 minutes = excellent (+10 to +15). 60-75 = good (+5). 75-90 = acceptable (0).
+  Over 90 minutes = HARD REJECT (score 0, verdict "Reject"). Mention commute time in property_summary.
+- SCHOOLS: If school_data is provided in <listing_data>, this is a TOP PRIORITY factor.
+  95th+ percentile = excellent (+25). 80-94th = good (+15). Below 80th = weak (+5, flag as concern).
+  Weight elementary schools most heavily. Mention specific school names and percentiles.
+- PRICE: Target is $1.5M. $1.5M-$1.7M = mild concern (-5 to -10). $1.7M-$1.8M = significant concern (-15 to -20).
+  Over $1.8M = HARD REJECT (score 0, verdict "Reject"). Under $1.5M = positive factor.
 - If age_condition is provided, apply the age_adjustment and condition_adjustment directly
   to your score. Note the age_tier and any keywords_matched in your reasoning.
 - If price_per_sqft_signal is provided, factor the signal (below_market/at_market/above_market)
