@@ -9,6 +9,9 @@ All notable changes to Listings Analyzer are documented here.
 ### Added
 - **"Liked" status** — new listing status for marking properties to revisit or share. Independent from "Passed" and "Toured". `POST /listings/{id}/liked` endpoint (auth-only) toggles the status. Dashboard shows "Like" / "♥ Liked — click to remove" button in expanded detail, "♥ Liked" badge on card summary, and "Liked" filter chip with count. Status persists across page reloads in database.
 
+### Fixed
+- **Active filter chip count mismatch** — The "Active" chip count now respects the "Hide low-scoring listings" display preference. Previously counted 4 listings but only 3 were rendered when Reject/Weak Match listings were hidden. Count calculation now matches render() filter logic.
+
 ### Changed
 - **Scoring curves: commute & price gradual penalties** — Replaced hard rejects with smooth penalty curves. Commute: 90–120 min = −1 to −2 pts/min over 90; 120+ min = −40+ pts. Price: $1.5–1.65M = −5 to −10 pts; $1.65–1.75M = −15 to −20 pts; $1.75M+ = −25 to −40 pts. Can approach $1.75M if other factors excellent. No auto-reject on commute or price.
 - **School hard reject threshold** — Hard reject only if below 50th percentile. Missing school data is excluded from scoring (not penalized as unknown). 50–79th = weak/caution; 80th+ = good/excellent.
