@@ -1,7 +1,7 @@
 # Product Requirements Document
 
 **Product:** Listing Analyzer
-**Owner:** Aki
+**Owner:** Home buyer
 **Objective:** Automated Gmail alert ingestion → parse listings → AI-powered scoring against editable buyer criteria → mobile-friendly dashboard.
 
 ---
@@ -397,7 +397,7 @@ Mobile-first single-page app served at `/` (`app/templates/dashboard.html`).
 - `POST /manage/prune-sold` — check Redfin URLs via Jina Reader for sold/off-market status; dry-run by default, `?fix=true` deletes sold listings
 - `POST /manage/update-criteria` — save new criteria instructions and trigger re-score without Google OAuth session (body: `{"instructions": "...", "created_by": "..."}`, `?sequential=true` for sequential mode)
 - `POST /manage/update-listing` — update individual listing fields by ID without re-scraping (body: `{"listing_id": 62, "year_built": 1994}`); allowed fields: year_built, price, sqft, bedrooms, bathrooms, address, town, state, zip_code, property_type, lot_acres, list_date, listing_status; add `"force": true` to overwrite non-null values
-- `POST /listings/{id}/agent` — set agent_name on a listing (body: `{"agent_name": "Matt Hermoza"}`); accepts auth session or MANAGE_KEY
+- `POST /listings/{id}/agent` — set agent_name on a listing (body: `{"agent_name": "Agent Name"}`); accepts auth session or MANAGE_KEY
 - `GET /manage/senders` — list distinct email senders with listing counts; requires auth or MANAGE_KEY
 
 ## 9. Key Technical Decisions
@@ -486,7 +486,7 @@ Mobile-first single-page app served at `/` (`app/templates/dashboard.html`).
 - Commute is drive-to-station + transit only: pure transit (walking/bus) removed entirely for consistent, comparable commute times across all listings
 - Station overrides expanded: Cortlandt Manor → Croton-Harmon; Chappaqua/Millwood/New Castle → Chappaqua; Armonk/North Castle → North White Plains
 - `POST /manage/update-criteria` endpoint for criteria updates without Google OAuth (protected by MANAGE_KEY)
-- **Agent tagging** — `AGENT_MAP` env var maps email senders / domains to agent names (e.g. `redfin.com:Ken Wile,bronwyneharris@gmail.com:Bronwyn`); auto-applied at poll time and backfilled on startup; shown as "Shared by {name}" note in listing detail card
+- **Agent tagging** — `AGENT_MAP` env var maps email senders / domains to agent names (e.g. `redfin.com:Redfin Agent,broker@example.com:Broker Name`); auto-applied at poll time and backfilled on startup; shown as "Shared by {name}" note in listing detail card
 - **Filter isolation fix** — Toured and Want to Go filter chips bypass all display preferences (hidePending, hidePassed, hideLowScore); regression test added
 - **Filter count fix** — Toured and Want to Go chip counts now include listings with any status (pending/passed); previously pending listings with tour_requested=True were excluded from the count due to early-return in display prefs logic
 - **Mobile header compact mode** — header collapses to icon-only buttons on screens ≤640px

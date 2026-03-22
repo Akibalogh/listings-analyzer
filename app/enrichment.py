@@ -767,7 +767,7 @@ def _geocode_address(address: str | None, town: str | None, state: str | None) -
             resp = client.get(
                 _NOMINATIM_URL,
                 params={"q": query, "format": "json", "limit": 1},
-                headers={"User-Agent": "listings-analyzer/1.0 (contact: aki@bitsafe.finance)"},
+                headers={"User-Agent": "listings-analyzer/1.0"},
             )
             _nominatim_last_call = time.time()
             resp.raise_for_status()
@@ -951,7 +951,7 @@ def fetch_flood_zone(
                     "outFields": "FLD_ZONE,ZONE_SUBTY",
                     "f": "json",
                 },
-                headers={"User-Agent": "listings-analyzer/1.0 (contact: aki@bitsafe.finance)"},
+                headers={"User-Agent": "listings-analyzer/1.0"},
             )
             resp.raise_for_status()
             data = resp.json()
@@ -1114,7 +1114,7 @@ def _nys_parcel_query(county: str, st_nbr: str, street_prefix: str) -> list[dict
     req = urllib.request.Request(
         _NYS_PARCELS_URL,
         data=data,
-        headers={"User-Agent": "listings-analyzer/1.0 (contact: aki@bitsafe.finance)"},
+        headers={"User-Agent": "listings-analyzer/1.0"},
     )
     with urllib.request.urlopen(req, timeout=15) as resp:
         result = json.loads(resp.read())

@@ -113,7 +113,7 @@ Note it in property_summary as ✅ if present or ⚠️ if absent, but do not tr
 Look for signals: "first floor bedroom", "in-law suite", "bedroom on main", "den", "study", ranch layouts, etc.
 
 BASEMENT — STRONG REQUIREMENT (FINISHED OR UNFINISHED):
-Aki wants a basement — finished or unfinished. This is a major priority. Evaluate:
+The buyer wants a basement — finished or unfinished. This is a major priority. Evaluate:
 1. BASEMENT PRESENCE: Does the listing have a basement? (no basement = STRONG PENALTY, −25 to −40 pts)
 2. FINISH LEVEL: Finished is better (can use immediately), unfinished is acceptable (can be finished later).
 3. SIZE & USABILITY: Look for "spacious", "large", "500+ sqft", "rec room", "high ceiling", etc.

@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     slack_webhook_url: str = ""
 
     # Agent name mapping: "email_or_domain:Agent Name,email_or_domain:Agent Name"
-    # e.g. "jhermoza7@gmail.com:Matt Hermoza,redfin.com:Redfin"
+    # e.g. "redfin.com:Redfin Agent,broker@example.com:Broker Name"
     agent_map: str = ""
 
     # AI evaluation model
