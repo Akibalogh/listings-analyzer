@@ -112,35 +112,44 @@ is a positive factor worth 5-10 bonus points, but its absence should NOT trigger
 Note it in property_summary as ✅ if present or ⚠️ if absent, but do not treat it as a hard pass/fail criterion.
 Look for signals: "first floor bedroom", "in-law suite", "bedroom on main", "den", "study", ranch layouts, etc.
 
-BASEMENT SUITABLE FOR HOME GYM — IMPORTANT HARD CRITERION:
-Aki wants to set up a home gym in the basement. This is a strong requirement. Evaluate:
-1. BASEMENT PRESENCE: Does the listing have a basement? (no = strong negative)
-2. FINISH LEVEL: Is it finished (drywall, flooring, fixtures)? Finished is required for gym use. Unfinished/storage basements = not suitable.
-3. SIZE & USABILITY: Is it spacious enough for exercise equipment and movement? (look for "large", "spacious", "500+ sqft", "rec room", etc.)
-   - Tiny/cramped finished basements = not suitable (passed: false)
-   - Spacious finished basement = suitable (passed: true)
-4. GYM KEYWORDS IN DESCRIPTION: If description mentions "gym", "fitness room", "workout space", "exercise room", or "rubber flooring" = strong signal of suitability.
+BASEMENT — STRONG REQUIREMENT (FINISHED OR UNFINISHED):
+Aki wants a basement — finished or unfinished. This is a major priority. Evaluate:
+1. BASEMENT PRESENCE: Does the listing have a basement? (no basement = STRONG PENALTY, −25 to −40 pts)
+2. FINISH LEVEL: Finished is better (can use immediately), unfinished is acceptable (can be finished later).
+3. SIZE & USABILITY: Look for "spacious", "large", "500+ sqft", "rec room", "high ceiling", etc.
+   - Spacious (finished or unfinished) = bonus (passed: true)
+   - Tiny/cramped basement = penalty (passed: false, but still has a basement)
+4. GYM POTENTIAL: Finished basements with gym keywords ("gym", "fitness", "workout", "rubber flooring") = strong bonus.
+   Unfinished basements with ample space = moderate bonus (room to finish for gym).
 
 Scoring:
-✅ Confirmed suitable (finished + spacious + gym keywords or visible in photos): passed: true, reason: "Spacious finished basement suitable for home gym"
-❌ Not confirmed/unsuitable (tiny finished, unfinished, or no basement): passed: false, reason: "Basement not suitable for home gym" or "No basement for gym setup"
-❓ Unknown (basement mentioned but size/finish unclear): passed: null, reason: "Basement size/finish unclear, must verify on visit"
+✅ Confirmed spacious basement (finished or unfinished): passed: true, reason: "Spacious basement, suitable for gym"
+⚠️ Confirmed small basement: passed: false, reason: "Basement present but small/cramped"
+❌ No basement: passed: false, reason: "No basement"
+❓ Unknown (mention of basement but size unclear): passed: null, reason: "Basement presence/size unclear"
 
-If you see a basement photo that clearly shows ample space, high ceilings, and good finish = mark CONFIRMED.
-If description says "tiny" basement or shows it's filled with mechanical/storage = mark NOT CONFIRMED.
+If you see a basement photo showing ample space and good headroom = CONFIRMED suitable.
+If description says "tiny" or "crawl space" = CONFIRMED not suitable.
+Unfinished basement with high ceilings and square footage = CONFIRMED suitable (can be finished).
 
 ENRICHMENT DATA — TOP PRIORITY FACTORS:
 The buyer's three highest-priority criteria are: (1) commute time, (2) school district quality, (3) price.
 These should carry the most weight in your scoring.
 
 - COMMUTE: If commute_minutes is provided in <listing_data>, this is a TOP PRIORITY factor.
-  Under 60 minutes = excellent (+10 to +15). 60-75 = good (+5). 75-90 = acceptable (0).
-  Over 90 minutes = HARD REJECT (score 0, verdict "Reject"). Mention commute time in property_summary.
+  Apply a SMOOTH PENALTY CURVE based on total minutes (drive-to-station + transit):
+  Under 60 min = excellent (+10 to +15). 60–75 min = good (+5). 75–90 min = acceptable (0).
+  90–120 min = gradual penalty (−1 to −2 pts per minute over 90). Over 120 min = significant concern (−40+ pts).
+  Mention commute time in property_summary. Use this curve, not a binary hard reject.
 - SCHOOLS: If school_data is provided in <listing_data>, this is a TOP PRIORITY factor.
-  95th+ percentile = excellent (+25). 80-94th = good (+15). Below 80th = weak (+5, flag as concern).
+  HARD REJECT if below 50th percentile (score 0, verdict "Reject").
+  95th+ percentile = excellent (+25). 80–94th = good (+15). 50–79th = weak/caution (+5, flag as concern).
   Weight elementary schools most heavily. Mention specific school names and percentiles.
-- PRICE: Target is $1.5M. $1.5M-$1.7M = mild concern (-5 to -10). $1.7M-$1.8M = significant concern (-15 to -20).
-  Over $1.8M = HARD REJECT (score 0, verdict "Reject"). Under $1.5M = positive factor.
+  Note: Missing school data is EXCLUDED from scoring (not penalized as unknown).
+- PRICE: Target is $1.5M. Apply a SMOOTH PENALTY CURVE:
+  Under $1.5M = positive factor (+5 to +10 for deals). $1.5M–$1.65M = mild concern (−5 to −10 pts).
+  $1.65M–$1.75M = moderate concern (−15 to −20 pts, approaching max). Over $1.75M = strong concern (−25 to −40 pts).
+  Can potentially go to $1.75M if everything else is excellent, but expect heavy penalty. Never auto-reject on price alone.
 - If age_condition is provided, apply the age_adjustment and condition_adjustment directly
   to your score. Note the age_tier and any keywords_matched in your reasoning.
 - If price_per_sqft_signal is provided, factor the signal (below_market/at_market/above_market)
