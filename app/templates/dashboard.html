@@ -1922,6 +1922,8 @@ function updateFilterCounts() {
     if (l.passed) { counts['Passed']++; if (_displayPrefs.hidePassed) return; }
     var isPending = ['Pending','Sold','Under Contract','Closed'].indexOf(l.listing_status || '') >= 0;
     if (_displayPrefs.hidePending && isPending) return;
+    // Exclude low-scoring listings if preference is set (matches render() logic for Active)
+    if (_displayPrefs.hideLowScore && (l.verdict === 'Reject' || l.verdict === 'Weak Match')) return;
     counts['all']++;
     if (l.verdict !== 'Reject') counts['not-reject']++;
   });
