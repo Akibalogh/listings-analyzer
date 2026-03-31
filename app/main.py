@@ -702,7 +702,7 @@ async def add_listing_from_url(request: Request):
                 _url, address=_address, town=_town, state=_state, zip_code=_zip,
             )
 
-            # Extract structured data
+            # Extract structured data — try direct HTTP first, fall back to description text
             price = beds = baths = sqft = year_built = list_date = lot_acres = None
             try:
                 with httpx.Client(timeout=10, follow_redirects=True, headers={
@@ -721,6 +721,21 @@ async def add_listing_from_url(request: Request):
                             lot_acres = stats.get("lot_acres")
             except Exception:
                 pass
+
+            # Fallback: extract structured data from the description text if direct HTTP missed fields
+            if desc and not all([price, beds, baths, sqft]):
+                desc_stats = _extract_property_stats(desc)
+                if desc_stats:
+                    if not price: price = desc_stats.get("price")
+                    if not beds: beds = desc_stats.get("bedrooms")
+                    if not baths: baths = desc_stats.get("bathrooms")
+                    if not sqft: sqft = desc_stats.get("sqft")
+                    if not year_built: year_built = desc_stats.get("year_built")
+                    if not list_date: list_date = desc_stats.get("list_date")
+                    if not lot_acres: lot_acres = desc_stats.get("lot_acres")
+                    if any([price, beds, baths, sqft]):
+                        logger.info(f"Listing #{lid}: extracted stats from description fallback: "
+                                    f"price={price}, beds={beds}, baths={baths}, sqft={sqft}")
 
             # Update listing with scraped data
             fields = {k: v for k, v in {
