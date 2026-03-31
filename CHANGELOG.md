@@ -10,6 +10,7 @@ All notable changes to Listings Analyzer are documented here.
 - **"Liked" status** — new listing status for marking properties to revisit or share. Independent from "Passed" and "Toured". `POST /listings/{id}/liked` endpoint (auth-only) toggles the status. Dashboard shows "Like" / "♥ Liked — click to remove" button in expanded detail, "♥ Liked" badge on card summary, and "Liked" filter chip with count. Status persists across page reloads in database.
 
 ### Fixed
+- **Structured data missing when adding Redfin listings from URL** — When adding a listing via the "+ Add Listing" bar, the scraper fetched the description successfully via Jina Reader but extracted structured fields (price, sqft, beds, baths) via a separate direct HTTP request. Redfin blocks direct HTTP from cloud IPs (403), leaving price/sqft/beds/baths null even though the description already contained all the data. Added fallback: if direct HTTP misses any core fields, `_extract_property_stats()` now also parses them from the already-scraped description text.
 - **Active filter chip count mismatch** — The "Active" chip count now respects the "Hide low-scoring listings" display preference. Previously counted 4 listings but only 3 were rendered when Reject/Weak Match listings were hidden. Count calculation now matches render() filter logic.
 
 ### Changed

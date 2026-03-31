@@ -115,6 +115,7 @@ Primary alert source is OneKey MLS NY email alerts.
 - **Selector-first extraction**: targeted CSS selectors (`section#overview` for OneKey, `div#house-info` / `.remarksContainer` for Redfin) are tried first; keyword-based fallback only used when no selector matches — prevents navigation/UI text from beating the real description
 - Image extraction: targeted CDN selectors (Redfin CDN, CloudFront for OneKey, Coldwell Banker), skips icons/thumbnails
 - Description + images fed to AI evaluator for deeper assessment (basement detection, amenities, condition)
+- **Structured data fallback**: when adding a listing from URL, structured fields (price, sqft, beds, baths) are extracted via direct HTTP first; if Redfin blocks the request (403 from cloud IP), the scraper falls back to parsing the same fields from the already-scraped description text via `_extract_property_stats()`
 
 ### Reprocessing
 - `POST /reprocess` re-fetches all previously processed emails from Gmail
