@@ -657,6 +657,17 @@ async def add_listing_from_url(request: Request):
                 zip_code = zip_code or redfin_match.group(4)
             address = addr_slug.title()
 
+    # If we still have no address or town and the resolved URL doesn't match a valid Redfin
+    # listing path, reject with a clear error instead of silently creating a blank listing.
+    if address is None and town is None and not REDFIN_URL_ADDR_RE.search(resolved_url):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Could not extract address from this URL. Please use the full Redfin listing URL "
+                "(e.g., https://www.redfin.com/NY/Town/Address/home/12345) or check that the link is still active."
+            ),
+        )
+
     # Check for duplicates by address
     if address and town:
         address_key = normalize_address(address, town, state)
