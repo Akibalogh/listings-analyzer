@@ -657,6 +657,11 @@ async def add_listing_from_url(request: Request):
             with httpx.Client(timeout=10, follow_redirects=True, headers={"User-Agent": _browser_ua}) as client:
                 resp = client.head(url)
                 resolved_url = str(resp.url)
+                # Strip tracking query params from Redfin URLs immediately after redirect resolution
+                # (utm_source, utm_medium, etc. cause HTTP 405 on subsequent GET requests)
+                if "redfin.com" in resolved_url and "?" in resolved_url:
+                    resolved_url = resolved_url.split("?")[0]
+                    logger.info(f"Stripped query params from resolved Redfin URL: {resolved_url}")
         except Exception:
             resolved_url = url
 
