@@ -1072,6 +1072,25 @@
     cursor: help;
   }
 
+  /* Uncertain score badge — shown when AI confidence is low or many unknowns */
+  .uncertain-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 4px 10px;
+    border-radius: 100px;
+    font-size: 10px;
+    font-weight: 700;
+    white-space: nowrap;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    background: #fff7ed;
+    color: #c2410c;
+    border: 1px solid #fed7aa;
+    flex-shrink: 0;
+    cursor: help;
+  }
+
   /* Passed button (in expanded detail) */
   .passed-btn {
     background: transparent;
@@ -2022,10 +2041,16 @@ function buildCard(l) {
   // A listing is processing iff its concerns still contain the initial placeholder sentinel.
   // enriched_at alone is unreliable (manually-added listings never set it).
   var isProcessing = !aiFailed && concerns.length === 1 && concerns[0] === 'Pending enrichment';
+  // Detect uncertain score: AI confidence is "low" OR ≥2 hard requirements are unknown (passed: null).
+  var unknownHardCount = hardResults.filter(function(hr) { return hr.passed === null; }).length;
+  var isUncertain = !aiFailed && !isProcessing && l.evaluation_method === 'ai' &&
+    (l.confidence === 'low' || unknownHardCount >= 2);
   var displayVerdict = (aiFailed || isProcessing) ? 'Pending' : l.verdict;
   var verdictClass = 'verdict ' + verdictCSSClass(displayVerdict);
-  var scoreColor = (aiFailed || isProcessing) ? 'var(--text-faint)' : scoreBarColor(l.score || 0, displayVerdict);
-  var scoreDisplay = (aiFailed || isProcessing) ? '…' : (l.score != null ? String(l.score) : '?');
+  var scoreColor = (aiFailed || isProcessing) ? 'var(--text-faint)' :
+    (isUncertain ? 'var(--text-muted)' : scoreBarColor(l.score || 0, displayVerdict));
+  var scoreDisplay = (aiFailed || isProcessing) ? '…' :
+    (isUncertain && l.score != null ? '~' + l.score : (l.score != null ? String(l.score) : '?'));
   var priceSqft = (l.price && l.sqft) ? '$' + Math.round(l.price / l.sqft).toLocaleString() : null;
 
   var card = el('div', {className: 'card' + ((aiFailed || isProcessing) ? ' card-ai-failed' : ''), id: 'card-' + l.id});
@@ -2073,6 +2098,12 @@ function buildCard(l) {
   }
   if (l.evaluation_method === 'ai_failed') {
     badgeRow.appendChild(el('span', {className: 'ai-failed-badge', title: 'AI evaluation failed — score is a placeholder. Will retry on next rescore.'}, '\u26a0 Score pending'));
+  }
+  if (isUncertain) {
+    var uncertainTitle = unknownHardCount >= 2
+      ? unknownHardCount + ' key requirements couldn\u2019t be verified — score may change once data is confirmed. Use \u21bb Retry to re-score.'
+      : 'AI confidence is low due to missing data — score may not be reliable. Use \u21bb Retry to re-score.';
+    badgeRow.appendChild(el('span', {className: 'uncertain-badge', title: uncertainTitle}, '\u2753 Score uncertain'));
   }
   if (badgeRow.children.length > 0) {
     info.appendChild(badgeRow);
@@ -2124,6 +2155,17 @@ function buildCard(l) {
         }
       }, '\u21bb Retry scoring');
       actionsRow.appendChild(retryBtn);
+    } else if (isUncertain) {
+      var retryUncertainBtn = el('button', {
+        className: 'sold-btn',
+        style: 'background: #fff7ed; color: #c2410c; border-color: #fed7aa;',
+        title: 'Re-score now — useful after manually adding missing data',
+        onclick: function(e) {
+          e.stopPropagation();
+          retryScoring(l.id, retryUncertainBtn);
+        }
+      }, '\u21bb Re-score');
+      actionsRow.appendChild(retryUncertainBtn);
     }
     detailInner.appendChild(actionsRow);
   }
@@ -2142,7 +2184,7 @@ function buildCard(l) {
   /* Score bar */
   var scoreFill = el('div', {className: 'score-fill', style: 'width:' + (l.score || 0) + '%;background:' + scoreColor});
   var scoreRow = el('div', {className: 'score-row'}, [
-    el('span', {className: 'score-label', style: 'color:' + scoreColor}, l.score != null ? String(l.score) : '?'),
+    el('span', {className: 'score-label', style: 'color:' + scoreColor}, scoreDisplay),
     el('div', {className: 'score-bar'}, [scoreFill]),
     el('span', {className: 'confidence-badge'}, (l.confidence || '') + ' conf')
   ]);
