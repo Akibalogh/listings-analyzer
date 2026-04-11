@@ -2019,13 +2019,14 @@ function buildCard(l) {
   var baths = l.bathrooms != null ? String(l.bathrooms) : '?';
   var address = l.address || 'Unknown Address';
   var aiFailed = l.evaluation_method === 'ai_failed';
-  var displayVerdict = aiFailed ? 'Pending' : l.verdict;
+  var isProcessing = !aiFailed && !l.enriched_at && l.score === 0 && l.confidence === 'low';
+  var displayVerdict = (aiFailed || isProcessing) ? 'Pending' : l.verdict;
   var verdictClass = 'verdict ' + verdictCSSClass(displayVerdict);
-  var scoreColor = aiFailed ? 'var(--text-faint)' : scoreBarColor(l.score || 0, displayVerdict);
-  var scoreDisplay = aiFailed ? '?' : (l.score != null ? String(l.score) : '?');
+  var scoreColor = (aiFailed || isProcessing) ? 'var(--text-faint)' : scoreBarColor(l.score || 0, displayVerdict);
+  var scoreDisplay = (aiFailed || isProcessing) ? '…' : (l.score != null ? String(l.score) : '?');
   var priceSqft = (l.price && l.sqft) ? '$' + Math.round(l.price / l.sqft).toLocaleString() : null;
 
-  var card = el('div', {className: 'card' + (aiFailed ? ' card-ai-failed' : ''), id: 'card-' + l.id});
+  var card = el('div', {className: 'card' + ((aiFailed || isProcessing) ? ' card-ai-failed' : ''), id: 'card-' + l.id});
 
   /* === Compact summary row (always visible) === */
   var summary = el('div', {className: 'card-summary', onclick: function(e) {
