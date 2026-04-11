@@ -627,19 +627,50 @@ async def add_listing_from_url(request: Request):
     if REDFIN_URL_ADDR_RE.search(url):
         resolved_url = url
     else:
+        _browser_ua = (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        )
         try:
-            with httpx.Client(timeout=10, follow_redirects=True) as client:
+            with httpx.Client(timeout=10, follow_redirects=True, headers={"User-Agent": _browser_ua}) as client:
                 resp = client.head(url)
                 resolved_url = str(resp.url)
         except Exception:
             resolved_url = url
+
+        # If still rate-limited, try Jina Reader to extract the real listing URL from page content
+        if "ratelimited." in resolved_url:
+            try:
+                jina_url = f"https://r.jina.ai/{url}"
+                with httpx.Client(timeout=15, follow_redirects=True, headers={"User-Agent": _browser_ua}) as client:
+                    jina_resp = client.get(jina_url)
+                    jina_body = jina_resp.text
+                # Jina includes "URL Source: https://www.redfin.com/..." in the response body
+                import re as _re
+                jina_match = _re.search(r"URL Source:\s*(https://www\.redfin\.com/\S+)", jina_body)
+                if jina_match:
+                    resolved_url = jina_match.group(1).rstrip(")")
+                    logger.info(f"Resolved short URL {url} via Jina Reader to {resolved_url}")
+                else:
+                    resolved_url = "ratelimited."  # keep sentinel to trigger fallback below
+            except Exception as jina_exc:
+                logger.warning(f"Jina Reader fallback failed for {url}: {jina_exc}")
+                resolved_url = "ratelimited."  # keep sentinel
 
         # If rate-limited but user provided fields, use those instead
         if "ratelimited." in resolved_url and (address or town):
             logger.info(f"Redfin rate-limited {url}, but user provided address fields — proceeding")
             resolved_url = url  # Keep original URL for scraping attempts in background
         elif "ratelimited." in resolved_url:
-            raise HTTPException(status_code=429, detail="Redfin rate-limited this request. Try again in a few minutes.")
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "This short URL could not be resolved. "
+                    "Try using the full Redfin listing URL "
+                    "(e.g., https://www.redfin.com/NY/Town/Address/home/12345)."
+                ),
+            )
 
         # If the resolved URL was redirected away from a valid listing page,
         # fall back to the original URL for both address parsing and scraping.
