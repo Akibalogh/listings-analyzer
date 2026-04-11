@@ -323,6 +323,7 @@ def reprocess_emails(request: Request):
     }
 
 
+@app.get("/all", response_class=HTMLResponse)
 @app.get("/want-to-go", response_class=HTMLResponse)
 @app.get("/toured", response_class=HTMLResponse)
 @app.get("/passed", response_class=HTMLResponse)
