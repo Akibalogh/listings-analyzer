@@ -726,6 +726,37 @@ class TestExtractPropertyStats:
         assert stats["year_built"] == 2005
         assert stats["list_date"] == "2026-01-20"
 
+    def test_extracts_sqft_from_square_foot_singular(self):
+        """'square foot' (singular) should be matched, not just 'square feet'."""
+        # Regression: regex previously only matched 'square feet', missing 'square foot'
+        text = "10 Shadow Tree Ln is a 5,850 square foot multi-family home"
+        stats = _extract_property_stats(text)
+        assert stats is not None
+        assert stats["sqft"] == 5850
+
+    def test_sqft_prefers_home_size_over_lot_size(self):
+        """When lot sqft appears before living sqft, picks the largest (home) value."""
+        # Regression: first-match logic returned lot size (436) instead of home size (5850)
+        text = (
+            "10 Shadow Tree Ln is a 5,850 square foot home on a 436 square foot lot "
+            "with 3 bedrooms and 4.5 bathrooms. 436 sq ft Lot Size"
+        )
+        stats = _extract_property_stats(text)
+        assert stats is not None
+        assert stats["sqft"] == 5850
+
+    def test_sqft_ignores_round_multiples_of_500_as_filter_values(self):
+        """Round values like 1000, 1500, 2000 should be skipped (likely UI filter values)."""
+        html = """<html><body>
+        <div>$1,100,000 3 beds 2 bath</div>
+        <div>2,000 sqft</div>
+        <div>2,437 sqft</div>
+        </body></html>"""
+        stats = _extract_property_stats(html)
+        assert stats is not None
+        # 2000 is a round 500-multiple (filter value), 2437 is the real sqft
+        assert stats["sqft"] == 2437
+
 
 class TestRedinFallsBackToOneKeyMLSSearch:
     """Tests for Redfin URLs falling back to OneKey MLS DDG search when no MLS ID."""

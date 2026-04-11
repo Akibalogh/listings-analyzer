@@ -2019,7 +2019,9 @@ function buildCard(l) {
   var baths = l.bathrooms != null ? String(l.bathrooms) : '?';
   var address = l.address || 'Unknown Address';
   var aiFailed = l.evaluation_method === 'ai_failed';
-  var isProcessing = !aiFailed && !l.enriched_at && l.score === 0 && l.confidence === 'low';
+  // A listing is processing iff its concerns still contain the initial placeholder sentinel.
+  // enriched_at alone is unreliable (manually-added listings never set it).
+  var isProcessing = !aiFailed && concerns.length === 1 && concerns[0] === 'Pending enrichment';
   var displayVerdict = (aiFailed || isProcessing) ? 'Pending' : l.verdict;
   var verdictClass = 'verdict ' + verdictCSSClass(displayVerdict);
   var scoreColor = (aiFailed || isProcessing) ? 'var(--text-faint)' : scoreBarColor(l.score || 0, displayVerdict);
