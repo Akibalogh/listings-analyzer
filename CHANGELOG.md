@@ -4,6 +4,18 @@ All notable changes to Listings Analyzer are documented here.
 
 ---
 
+## [2026-04-11] — v8 fixes
+
+### Fixed
+- **`/all` route 404 on page reload** — The "All" filter chip uses `history.pushState` to push `/all` to the browser URL. Reloading the page on that URL returned 404 because the server had no handler for `/all`. Fixed: added `@app.get("/all")` to `filtered_dashboard()` alongside the other SPA filter routes (`/toured`, `/passed`, etc.).
+- **iOS share links (redf.in) fail with 405 on scrape** — iOS share links resolve via HEAD redirect to full Redfin URLs with tracking query params (`?utm_source=ios_share&utm_medium=share&...`). Redfin returns HTTP 405 when the app then tries to scrape those URLs. Fixed: query params are now stripped from Redfin URLs immediately after the HEAD redirect resolves (inside the try block), before any scraping or storage. Effect: `redf.in/xxxxx` short URLs from iOS share sheets now add and scrape correctly.
+- **AI Criteria button hidden for anonymous users** — The `✨ AI Criteria` header button had class `auth-only`, making it invisible to logged-out users. The `openCriteria()` JS function already had full read-only guards (textarea `readOnly = true`, Save button hidden, maintenance section hidden, "Sign in to edit criteria" note shown). Fixed: removed `auth-only` from the button class so anonymous users can view the active scoring criteria in read-only mode.
+
+### Added
+- **Tests for v8 fixes** — `tests/test_v8_fixes.py` covers SPA route availability (all filter chip routes return 200), Redfin query param stripping logic, and dashboard criteria button visibility/read-only state.
+
+---
+
 ## [Unreleased]
 
 ### Added
@@ -186,6 +198,16 @@ All notable changes to Listings Analyzer are documented here.
 - **URL backfill via DuckDuckGo** — `/manage/scrape-descriptions` now searches DuckDuckGo for Redfin URLs for listings that have address+town but no URL; found URLs are saved before description scraping begins
 - **Data-quality fix mode** — no longer deletes no-URL listings (only no-address); no-URL listings are real but just lack a clickable link
 - `_rescore_all()` refactored: first pass collects IDs needing rescore (lightweight, no images loaded), then processes in chunks — build → submit → poll → process → free memory per chunk
+
+---
+
+## [2026-04-11] — v8 fixes
+
+### Fixed
+- **`/all` route returning 404** — The "All" filter chip uses `history.pushState` to push `/all` to the browser URL; reloading on `/all` returned 404 because the server had no handler. Fixed: added `@app.get("/all")` route to `filtered_dashboard()` in `app/main.py`.
+- **iOS share links (redf.in) failing with 405** — iOS share links resolve via HEAD redirect to full Redfin URLs with tracking params (`utm_source=ios_share`, etc.), which caused HTTP 405 from Redfin during scraping. First fix stripped params after the rate-limit check (too late); second fix strips params immediately after HEAD resolution, inside the try block. iOS share links now work end-to-end.
+- **AI Criteria button hidden from anonymous users** — Button had class `auth-only`, hiding it from logged-out users. The `openCriteria()` JS already enforced read-only mode for unauthenticated users (textarea disabled, save hidden, "Sign in to edit" note). Fixed: removed `auth-only` from the button class so anonymous users can view (but not edit) the active scoring criteria.
+- **Null price treated as Reject** — Listings with missing or null price were being scored as Reject due to the price hard-requirement criterion failing. Fixed: scorer prompt now instructs the AI to treat null/unknown price as missing data (no penalty, `passed: null`) and score the listing on its other merits. All 42 listings force-rescored with `?force=true`.
 
 ---
 
