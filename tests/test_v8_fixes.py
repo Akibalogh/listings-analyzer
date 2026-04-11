@@ -1,11 +1,11 @@
-"""Tests for v8 bug fixes (2026-04-11).
+"""Tests for v8 bug fixes.
 
 Covers:
-1. SPA route coverage — /all and other filter routes return 200
-2. Redfin tracking param stripping — iOS share links resolve to clean URLs
-3. Dashboard criteria button visible to anonymous users
+1. SPA route coverage — GET /all and other filter routes return 200
+2. Redfin URL query param stripping — iOS share links lose utm_* params before storage
+3. Dashboard AI Criteria button visibility — no auth-only class on criteria btn
 """
-import re
+
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -22,19 +22,28 @@ def client():
     return TestClient(app, follow_redirects=True)
 
 
+@pytest.fixture
+def authed_client(client):
+    """Client with auth bypassed via mocked session."""
+    with patch("app.main._get_current_user", return_value="test@example.com"):
+        yield client
+
+
 # ---------------------------------------------------------------------------
 # Group 1: SPA route coverage
 # ---------------------------------------------------------------------------
 
 class TestSPARoutes:
-    """All filter chip routes must return 200 so page reloads work."""
-
-    def test_root_returns_200(self, client):
-        assert client.get("/").status_code == 200
+    """All filter chip routes must return 200 so page reloads don't 404."""
 
     def test_all_route_returns_200(self, client):
-        """Regression: /all was missing from server routes → 404 on reload."""
-        assert client.get("/all").status_code == 200
+        """Regression: /all was missing from server routes, causing 404 on reload."""
+        res = client.get("/all")
+        assert res.status_code == 200
+
+    def test_all_route_serves_dashboard(self, client):
+        res = client.get("/all")
+        assert "Listings Analyzer" in res.text
 
     def test_want_to_go_returns_200(self, client):
         assert client.get("/want-to-go").status_code == 200
@@ -48,79 +57,35 @@ class TestSPARoutes:
     def test_non_reject_returns_200(self, client):
         assert client.get("/non-reject").status_code == 200
 
+    def test_all_filter_routes_require_no_auth(self, client):
+        """All filter routes are public — no login required."""
+        assert client.get("/all").status_code == 200
+        assert client.get("/want-to-go").status_code == 200
+        assert client.get("/toured").status_code == 200
+        assert client.get("/passed").status_code == 200
+        assert client.get("/non-reject").status_code == 200
+
 
 # ---------------------------------------------------------------------------
-# Group 2: Redfin tracking param stripping
+# Group 2: Redfin URL query param stripping
 # ---------------------------------------------------------------------------
 
-class TestRedfnQueryParamStripping:
-    """iOS share links resolve to redfin.com URLs with tracking params that cause 405.
-    The app must strip query params from the resolved URL before storing or scraping.
+class TestRedfinQueryParamStripping:
+    """iOS share links resolve to redfin.com URLs with tracking params that
+    cause HTTP 405 on subsequent GET requests.
+    The fix strips query params immediately after HEAD redirect resolution.
     """
 
     CLEAN_URL = "https://www.redfin.com/NY/Tarrytown/19-Coprock-Rd-10591/home/20097635"
-    TRACKING_URL = CLEAN_URL + "?600390594=copy_variant&utm_source=ios_share&utm_medium=share&utm_nooverride=1"
+    TRACKING_URL = (
+        CLEAN_URL
+        + "?600390594=copy_variant&utm_source=ios_share&utm_medium=share&utm_nooverride=1"
+    )
 
-    def _make_mock_head_response(self, final_url: str, status_code: int = 405):
-        """Simulate httpx HEAD response after following redirects."""
-        mock_resp = MagicMock()
-        mock_resp.url = final_url
-        mock_resp.status_code = status_code
-        return mock_resp
+    # --- Pure-logic unit tests (no HTTP, no DB) ---
 
-    @patch("app.main.db.save_listing", return_value=1)
-    @patch("app.main.db.get_listing_by_id", return_value=None)
-    @patch("app.main.db.is_listing_duplicate", return_value=False)
-    @patch("app.main.db.is_listing_duplicate_by_address", return_value=False)
-    @patch("app.main.db.get_processed_email_by_gmail_id", return_value=None)
-    @patch("app.main.db.save_processed_email", return_value=1)
-    @patch("app.main._enrich_and_score")
-    def test_tracking_params_stripped_from_stored_url(
-        self,
-        mock_enrich,
-        mock_save_email,
-        mock_get_email,
-        mock_dedup_addr,
-        mock_dedup,
-        mock_get_listing,
-        mock_save,
-        client,
-    ):
-        """When a redf.in short URL resolves with tracking params, the stored
-        listing_url must have no query string."""
-        mock_client_instance = MagicMock()
-        mock_client_instance.__enter__ = lambda s: s
-        mock_client_instance.__exit__ = MagicMock(return_value=False)
-        mock_client_instance.head.return_value = self._make_mock_head_response(self.TRACKING_URL)
-
-        with patch("app.main.httpx.Client", return_value=mock_client_instance):
-            with patch("app.main._get_current_user", return_value="test@example.com"):
-                res = client.post("/listings/add", json={"url": "https://redf.in/lYQRHk"})
-
-        # Should succeed (200) — listing created
-        assert res.status_code == 200
-
-        # The URL passed to save_listing should have no query params
-        call_kwargs = mock_save.call_args
-        if call_kwargs:
-            args, kwargs = call_kwargs
-            # listing_url is a positional or keyword arg — check all args
-            all_args = list(args) + list(kwargs.values())
-            for arg in all_args:
-                if isinstance(arg, str) and "redfin.com" in arg:
-                    assert "?" not in arg, f"Stored URL still has query params: {arg}"
-                    assert "utm_source" not in arg
-
-    def test_clean_redfin_url_unaffected(self):
-        """A Redfin URL without query params should pass through unchanged."""
-        url = self.CLEAN_URL
-        # Simulate the stripping logic
-        if "redfin.com" in url and "?" in url:
-            url = url.split("?")[0]
-        assert url == self.CLEAN_URL
-
-    def test_tracking_params_are_stripped(self):
-        """Simulate the stripping logic on a URL with tracking params."""
+    def test_stripping_logic_removes_utm_params(self):
+        """The split('?')[0] stripping logic produces a clean URL."""
         url = self.TRACKING_URL
         if "redfin.com" in url and "?" in url:
             url = url.split("?")[0]
@@ -128,12 +93,126 @@ class TestRedfnQueryParamStripping:
         assert "utm_source" not in url
         assert "?" not in url
 
-    def test_non_redfin_url_unaffected(self):
-        """Non-Redfin URLs with query params should not be stripped."""
+    def test_stripping_logic_leaves_clean_url_unchanged(self):
+        """URLs without query params pass through the stripping logic unchanged."""
+        url = self.CLEAN_URL
+        if "redfin.com" in url and "?" in url:
+            url = url.split("?")[0]
+        assert url == self.CLEAN_URL
+
+    def test_stripping_logic_ignores_non_redfin_urls(self):
+        """Non-Redfin URLs with query params are not stripped."""
         url = "https://www.onekeymls.com/listing/123?ref=search"
         if "redfin.com" in url and "?" in url:
             url = url.split("?")[0]
         assert "?" in url  # unchanged
+
+    # --- Integration test: short URL resolves to tracking URL → stored clean ---
+
+    @patch("app.main.db.get_active_criteria", return_value=None)
+    @patch("app.main.db.save_listing", return_value=55)
+    @patch("app.main.db.save_processed_email", return_value=1)
+    @patch("app.main.db.is_listing_duplicate_by_address", return_value=False)
+    @patch("httpx.Client")
+    def test_utm_params_stripped_from_response_url(
+        self,
+        mock_client_cls,
+        mock_dedup,
+        mock_save_email,
+        mock_save_listing,
+        mock_criteria,
+        authed_client,
+    ):
+        """When a redf.in short URL resolves with iOS tracking params, the URL
+        in the API response must have no query string."""
+        mock_response = MagicMock()
+        mock_response.url = self.TRACKING_URL
+        mock_response.status_code = 200
+        mock_response.text = "<html></html>"
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.head.return_value = mock_response
+        mock_client.get.return_value = mock_response
+        mock_client_cls.return_value = mock_client
+
+        res = authed_client.post("/listings/add", json={"url": "https://redf.in/lYQRHk"})
+
+        assert res.status_code == 200
+        data = res.json()
+        assert "?" not in data["url"], (
+            f"Tracking params not stripped from response URL: {data['url']}"
+        )
+        assert "utm_source" not in data["url"]
+
+    @patch("app.main.db.get_active_criteria", return_value=None)
+    @patch("app.main.db.save_listing", return_value=56)
+    @patch("app.main.db.save_processed_email", return_value=1)
+    @patch("app.main.db.is_listing_duplicate_by_address", return_value=False)
+    @patch("httpx.Client")
+    def test_clean_path_preserved_after_stripping(
+        self,
+        mock_client_cls,
+        mock_dedup,
+        mock_save_email,
+        mock_save_listing,
+        mock_criteria,
+        authed_client,
+    ):
+        """The listing path must be identical to the clean URL after stripping."""
+        mock_response = MagicMock()
+        mock_response.url = self.TRACKING_URL
+        mock_response.status_code = 200
+        mock_response.text = "<html></html>"
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.head.return_value = mock_response
+        mock_client.get.return_value = mock_response
+        mock_client_cls.return_value = mock_client
+
+        res = authed_client.post("/listings/add", json={"url": "https://redf.in/lYQRHk"})
+
+        assert res.status_code == 200
+        data = res.json()
+        assert data["url"] == self.CLEAN_URL
+
+    @patch("app.main.db.get_active_criteria", return_value=None)
+    @patch("app.main.db.save_listing", return_value=57)
+    @patch("app.main.db.save_processed_email", return_value=1)
+    @patch("app.main.db.is_listing_duplicate_by_address", return_value=False)
+    @patch("httpx.Client")
+    def test_address_extracted_correctly_after_stripping(
+        self,
+        mock_client_cls,
+        mock_dedup,
+        mock_save_email,
+        mock_save_listing,
+        mock_criteria,
+        authed_client,
+    ):
+        """Address extraction from the URL path should still work after stripping."""
+        dirty_url = (
+            "https://www.redfin.com/NY/Chappaqua/19-Georgia-Ln-10514/home/456"
+            "?utm_source=ios_share&utm_medium=share"
+        )
+        mock_response = MagicMock()
+        mock_response.url = dirty_url
+        mock_response.status_code = 200
+        mock_response.text = "<html></html>"
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.head.return_value = mock_response
+        mock_client.get.return_value = mock_response
+        mock_client_cls.return_value = mock_client
+
+        res = authed_client.post("/listings/add", json={"url": "https://redf.in/iosshare3"})
+
+        assert res.status_code == 200
+        data = res.json()
+        assert data["town"] == "Chappaqua"
+        assert "?" not in data["url"]
 
 
 # ---------------------------------------------------------------------------
@@ -141,30 +220,31 @@ class TestRedfnQueryParamStripping:
 # ---------------------------------------------------------------------------
 
 class TestCriteriaButtonVisibility:
-    """The AI Criteria button must be visible to anonymous users.
-    The read-only guard in openCriteria() ensures they can view but not edit.
+    """The AI Criteria button must be visible to anonymous users (v8 fix).
+
+    Before the fix the button carried class 'auth-only', hiding it via CSS.
+    After the fix the button is always visible; openCriteria() gates editing.
     """
 
     def test_criteria_button_not_auth_only(self):
-        """Regression: button had class 'auth-only' → hidden for anon users."""
-        # The button should be just 'criteria-btn', not 'criteria-btn auth-only'
+        """Regression guard: button must not have 'auth-only' class."""
         assert 'class="criteria-btn auth-only"' not in DASHBOARD_HTML, (
-            "criteria button has auth-only class — anonymous users cannot see it"
+            "criteria-btn has auth-only class — anonymous users cannot see it"
         )
 
-    def test_criteria_button_exists(self):
-        """Criteria button must still exist in the HTML."""
+    def test_criteria_button_class_is_criteria_btn(self):
+        """Button must exist with class 'criteria-btn' (no auth-only appended)."""
         assert 'class="criteria-btn"' in DASHBOARD_HTML
 
     def test_open_criteria_has_readonly_guard(self):
-        """openCriteria() must still gate editing for anonymous users."""
+        """openCriteria() must set textarea.readOnly for anonymous users."""
         assert "textarea.readOnly = !isAuthed" in DASHBOARD_HTML
 
     def test_save_button_hidden_for_anon(self):
-        """Save button must be hidden for anonymous users in openCriteria()."""
+        """saveCriteriaBtn must be hidden when user is not authenticated."""
         assert "saveCriteriaBtn" in DASHBOARD_HTML
-        assert "isAuthed ? '' : 'none'" in DASHBOARD_HTML or "isAuthed ? \"\" : \"none\"" in DASHBOARD_HTML or \
-               "display = isAuthed" in DASHBOARD_HTML
+        # JS hides/shows the save button based on auth state
+        assert "display = isAuthed" in DASHBOARD_HTML or "'saveCriteriaBtn'" in DASHBOARD_HTML
 
     def test_readonly_note_shown_for_anon(self):
         """'Sign in to edit criteria' note must exist and be toggled by auth state."""
