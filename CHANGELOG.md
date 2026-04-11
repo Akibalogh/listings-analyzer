@@ -4,6 +4,18 @@ All notable changes to Listings Analyzer are documented here.
 
 ---
 
+## [2026-04-11] — v9: uncertain score UX
+
+### Added
+- **Uncertain score display** — When AI confidence is `low` OR ≥2 hard requirements are unknown (`passed: null`), listings now show:
+  - Score with `~` prefix (e.g. `~52`) to signal a tentative estimate
+  - `❓ Score uncertain` badge (orange, tooltip explains which criteria are unverified)
+  - `↻ Re-score` button so the user can retry after manually adding missing data
+  - Muted score color to visually distinguish uncertain from confident scores
+- This prevents misleading scores when a listing is added with insufficient data (no price, sqft, basement status, etc.)
+
+---
+
 ## [2026-04-11] — v8 fixes
 
 ### Fixed
