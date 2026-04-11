@@ -541,7 +541,7 @@ async def mark_sold(request: Request, listing_id: int):
 @app.post("/listings/{listing_id}/scrape")
 async def scrape_listing(request: Request, listing_id: int):
     """Set a listing URL, scrape the description, and re-score."""
-    from app.parsers.onehome import scrape_listing_description
+    from app.parsers.onehome import scrape_listing_description, _extract_property_stats
 
     key = request.headers.get("x-manage-key", "")
     if not (settings.manage_key and key == settings.manage_key):
@@ -568,6 +568,26 @@ async def scrape_listing(request: Request, listing_id: int):
 
     # Update the listing in DB
     db.update_listing_description(listing_id, url, description)
+
+    # Extract structured fields from description if listing is missing them
+    if description:
+        desc_stats = _extract_property_stats(description)
+        if desc_stats:
+            fields_to_update = {}
+            field_map = {
+                "price": "price",
+                "bedrooms": "bedrooms",
+                "bathrooms": "bathrooms",
+                "sqft": "sqft",
+                "year_built": "year_built",
+                "lot_acres": "lot_acres",
+            }
+            for stat_key, db_key in field_map.items():
+                if desc_stats.get(stat_key) is not None and not listing.get(db_key):
+                    fields_to_update[db_key] = desc_stats[stat_key]
+            if fields_to_update:
+                logger.info(f"Extracted structured fields from description for #{listing_id}: {fields_to_update}")
+                db.update_listing_fields_by_id(listing_id, force=True, **fields_to_update)
 
     # Attach scraped images if found
     if image_urls:

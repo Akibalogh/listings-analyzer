@@ -885,12 +885,15 @@ def _extract_property_stats(html: str) -> dict | None:
     if baths_match:
         result["bathrooms"] = int(baths_match.group(1))
 
-    # SqFt: skip round filter values
+    # SqFt: skip round filter values; pick the largest plausible home size
+    # (avoids picking lot sqft like 436 over living area like 5,850)
+    _sqft_candidates = []
     for sqft_match in _STATS_SQFT_RE.finditer(text):
         sqft = int(sqft_match.group(1).replace(",", ""))
-        if sqft % 500 != 0:
-            result["sqft"] = sqft
-            break
+        if sqft % 500 != 0 and 500 <= sqft <= 30000:
+            _sqft_candidates.append(sqft)
+    if _sqft_candidates:
+        result["sqft"] = max(_sqft_candidates)
 
     # Year built — try visible text first, then JSON-LD in raw HTML
     year_match = _YEAR_BUILT_RE.search(text)
