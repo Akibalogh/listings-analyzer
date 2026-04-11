@@ -150,6 +150,7 @@ These should carry the most weight in your scoring.
   Under $1.5M = positive factor (+5 to +10 for deals). $1.5M–$1.65M = mild concern (−5 to −10 pts).
   $1.65M–$1.75M = moderate concern (−15 to −20 pts, approaching max). Over $1.75M = strong concern (−25 to −40 pts).
   Can potentially go to $1.75M if everything else is excellent, but expect heavy penalty. Never auto-reject on price alone.
+  MISSING PRICE: If price is null/unknown/not listed, treat it as a "missing data" unknown — mark the price criterion as passed: null with reason "Price not listed". Do NOT reject or heavily penalize for a missing price. Score the listing on its other merits; flag price as unverifiable.
 - If age_condition is provided, apply the age_adjustment and condition_adjustment directly
   to your score. Note the age_tier and any keywords_matched in your reasoning.
 - If price_per_sqft_signal is provided, factor the signal (below_market/at_market/above_market)
