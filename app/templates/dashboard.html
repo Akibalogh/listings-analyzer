@@ -898,6 +898,22 @@
     text-align: right;
   }
 
+  /* Monthly cost section */
+  .cost-total-row {
+    margin-top: 6px;
+    padding-top: 6px;
+    border-top: 2px solid #e2e8f0 !important;
+    border-bottom: none !important;
+  }
+  .cost-total-row .prop-detail-label { color: var(--text-secondary); font-weight: 700; }
+  .cost-total-row .prop-detail-value { color: var(--text-primary); font-weight: 800; font-size: 13px; }
+  .cost-note {
+    font-size: 10px;
+    color: var(--text-faint);
+    margin-top: 6px;
+    line-height: 1.4;
+  }
+
   .school-row:last-child { border-bottom: none; }
   .school-name {
     color: var(--text-secondary);
@@ -2202,6 +2218,10 @@ function buildCard(l) {
     detailInner.appendChild(buildEnrichmentSection(l.commute_minutes, commuteData, schoolData));
   }
 
+  /* Monthly cost estimate (tax + utilities + maintenance + HOA) */
+  var costSection = buildMonthlyCosts(l);
+  if (costSection) detailInner.appendChild(costSection);
+
   /* Property details section (lot, garage, HOA, pool, basement, flood zone, tax) */
   var propDetails = buildPropertyDetails(l);
   if (propDetails) detailInner.appendChild(propDetails);
@@ -2361,6 +2381,141 @@ function buildEnrichmentSection(commuteMinutes, commuteData, schoolData) {
     }
     section.appendChild(schoolCard);
   }
+
+  return section;
+}
+
+/* ==== Monthly cost estimate ==== */
+/*
+ * Estimates: property tax, utilities (heat+electric+water), maintenance reserve, HOA.
+ * All estimates are rough — the goal is a ballpark all-in monthly cost, not precision.
+ *
+ * TAX:  Westchester effective rate ~2.2% of market value (avg across towns).
+ *       For NYC listings (source="nyc"), SODA gives assessed_value but no rate —
+ *       NYC residential effective rate ~0.9% of market value.
+ *       Fallback when no tax data: use price * 0.022 / 12 (Westchester default).
+ *
+ * UTILITIES: baseline by sqft bucket + age adjustment.
+ *   Westchester is mixed gas/oil heating territory; oil tends to run higher.
+ *   Benchmarks (annual): ~$4k-8k heating, $2k-4k electric, ~$1k water+sewer.
+ *   Simplified formula: sqft * $1.80/sqft/yr for total utilities (covers heat+electric+water).
+ *   Age adjustment: pre-1970 = +25%, 1970-1989 = +10%, 1990-2009 = 0%, 2010+ = -15%.
+ *   If sqft unknown, estimate from bedrooms (3br≈1800, 4br≈2500, 5br≈3200).
+ *
+ * MAINTENANCE: 1% of purchase price per year (conservative; range is 1-2%).
+ *   If price unknown, skip (can't estimate without anchor).
+ *
+ * HOA: use stored hoa_monthly directly.
+ */
+function estimateMonthlyCosts(l) {
+  var taxData = parseJSON(l.property_tax_json, null);
+
+  /* --- Property tax --- */
+  var taxMonthly = null;
+  var taxNote = '';
+  if (taxData) {
+    // Use school_taxable if available (Westchester ORPTS); fall back to assessed_value
+    var taxableVal = taxData.school_taxable || taxData.assessed_value || null;
+    var mktVal = taxData.market_value || null;
+    if (mktVal) {
+      // Direct market value → apply effective rate
+      var rate = (taxData.source === 'nyc') ? 0.009 : 0.022;
+      taxMonthly = Math.round(mktVal * rate / 12);
+      taxNote = 'Tax est. from market value @ ' + (rate * 100).toFixed(1) + '% eff. rate';
+    } else if (taxableVal && l.price) {
+      // Westchester fractional assessment: assessed is typically 1-5% of market value.
+      // Skip derived-from-assessed approach (too unreliable across towns); use price instead.
+      taxMonthly = Math.round(l.price * 0.022 / 12);
+      taxNote = 'Tax est. from sale price @ 2.2% (Westchester avg)';
+    } else if (l.price) {
+      taxMonthly = Math.round(l.price * 0.022 / 12);
+      taxNote = 'Tax est. from sale price @ 2.2% (Westchester avg)';
+    }
+  } else if (l.price) {
+    taxMonthly = Math.round(l.price * 0.022 / 12);
+    taxNote = 'Tax est. from sale price @ 2.2% (Westchester avg)';
+  }
+
+  /* --- Utilities (heat + electric + water) --- */
+  var sqftEst = l.sqft;
+  var sqftIsEst = false;
+  if (!sqftEst) {
+    // Estimate sqft from bedrooms
+    var bedRooms = l.bedrooms || 4;
+    sqftEst = bedRooms <= 2 ? 1200 : bedRooms === 3 ? 1800 : bedRooms === 4 ? 2500 : bedRooms === 5 ? 3200 : 3800;
+    sqftIsEst = true;
+  }
+  var baseUtilPerSqft = 1.80; // $/sqft/yr
+  var ageAdj = 1.0;
+  var ageNote = '';
+  if (l.year_built) {
+    if (l.year_built < 1970)      { ageAdj = 1.25; ageNote = 'older home (+25%)'; }
+    else if (l.year_built < 1990) { ageAdj = 1.10; ageNote = 'pre-1990 (+10%)'; }
+    else if (l.year_built >= 2010){ ageAdj = 0.85; ageNote = 'newer home (-15%)'; }
+  }
+  var utilMonthly = Math.round(sqftEst * baseUtilPerSqft * ageAdj / 12);
+
+  /* --- Maintenance reserve (1% of price/yr) --- */
+  var maintMonthly = l.price ? Math.round(l.price * 0.01 / 12) : null;
+
+  /* --- HOA --- */
+  var hoaMonthly = (l.hoa_monthly != null && l.hoa_monthly > 0) ? l.hoa_monthly : 0;
+
+  /* --- Total --- */
+  var components = [taxMonthly, utilMonthly, maintMonthly, hoaMonthly].filter(function(v) { return v != null; });
+  var total = components.reduce(function(a, b) { return a + b; }, 0);
+
+  return {
+    taxMonthly: taxMonthly,
+    taxNote: taxNote,
+    utilMonthly: utilMonthly,
+    sqftIsEst: sqftIsEst,
+    ageNote: ageNote,
+    maintMonthly: maintMonthly,
+    hoaMonthly: hoaMonthly,
+    total: total,
+    hasData: components.length > 0,
+  };
+}
+
+function buildMonthlyCosts(l) {
+  var c = estimateMonthlyCosts(l);
+  if (!c.hasData) return null;
+
+  var section = el('div', {className: 'prop-details-section'});
+  section.appendChild(el('h5', {className: 'prop-details-heading'}, 'Est. Monthly Costs'));
+  var grid = el('div', {className: 'prop-details-grid'});
+
+  function addRow(label, value, extraClass) {
+    var row = el('div', {className: 'prop-detail-row' + (extraClass ? ' ' + extraClass : '')}, [
+      el('span', {className: 'prop-detail-label'}, label),
+      el('span', {className: 'prop-detail-value'}, value)
+    ]);
+    grid.appendChild(row);
+  }
+
+  if (c.taxMonthly != null) {
+    addRow('Property Tax', '$' + c.taxMonthly.toLocaleString() + '/mo');
+  }
+  var utilLabel = 'Utilities' + (c.sqftIsEst ? ' (est sqft)' : '');
+  addRow(utilLabel, '$' + c.utilMonthly.toLocaleString() + '/mo');
+  if (c.maintMonthly != null) {
+    addRow('Maintenance (1%)', '$' + c.maintMonthly.toLocaleString() + '/mo');
+  }
+  if (c.hoaMonthly > 0) {
+    addRow('HOA', '$' + c.hoaMonthly.toLocaleString() + '/mo');
+  }
+
+  addRow('Total (excl. mortgage)', '$' + c.total.toLocaleString() + '/mo', 'cost-total-row');
+
+  section.appendChild(grid);
+
+  // Footnote
+  var noteText = 'Rough estimates only. ';
+  if (c.taxNote) noteText += c.taxNote + '. ';
+  if (c.ageNote) noteText += 'Utilities adjusted for ' + c.ageNote + '. ';
+  noteText += 'Maintenance = 1% of price/yr.';
+  section.appendChild(el('div', {className: 'cost-note'}, noteText));
 
   return section;
 }
@@ -2762,15 +2917,17 @@ function updateDataConfidence() {
 
   /* Weighted fields: [key, weight, hasValue fn] */
   var weights = [
-    ['description',      0.20, function(l) { return !!l.description; }],
-    ['images',           0.15, function(l) { var imgs = parseJSON(l.image_urls_json, []); return imgs.length > 0; }],
-    ['school_data_json', 0.15, function(l) { return !!l.school_data_json; }],
-    ['commute_minutes',  0.15, function(l) { return l.commute_minutes != null; }],
-    ['year_built',       0.10, function(l) { return l.year_built != null; }],
-    ['lot_acres',        0.08, function(l) { return l.lot_acres != null; }],
-    ['has_basement',     0.07, function(l) { return l.has_basement != null; }],
-    ['property_tax_json',0.05, function(l) { return !!l.property_tax_json; }],
+    ['description',      0.18, function(l) { return !!l.description; }],
+    ['images',           0.13, function(l) { var imgs = parseJSON(l.image_urls_json, []); return imgs.length > 0; }],
+    ['school_data_json', 0.13, function(l) { return !!l.school_data_json; }],
+    ['commute_minutes',  0.13, function(l) { return l.commute_minutes != null; }],
+    ['year_built',       0.09, function(l) { return l.year_built != null; }],
+    ['lot_acres',        0.07, function(l) { return l.lot_acres != null; }],
+    ['has_basement',     0.06, function(l) { return l.has_basement != null; }],
+    ['property_tax_json',0.06, function(l) { return !!l.property_tax_json; }],
     ['garage_count',     0.05, function(l) { return l.garage_count != null; }],
+    ['price',            0.05, function(l) { return l.price != null; }],
+    ['sqft',             0.05, function(l) { return l.sqft != null; }],
   ];
 
   /* Compute average weighted completeness across all listings */
@@ -2783,7 +2940,7 @@ function updateDataConfidence() {
   var avg = Math.round((totalScore / allListings.length) * 100);
 
   /* Per-field coverage % for tooltip */
-  var labels = ['Description','Images','Schools','Commute','Year Built','Lot Size','Basement','Tax','Garage'];
+  var labels = ['Description','Images','Schools','Commute','Year Built','Lot Size','Basement','Tax','Garage','Price','Sqft'];
   var fieldCounts = weights.map(function(w) {
     return Math.round(allListings.filter(function(l) { return w[2](l); }).length * 100 / allListings.length);
   });
