@@ -698,6 +698,11 @@ async def add_listing_from_url(request: Request):
         if not REDFIN_URL_ADDR_RE.search(resolved_url) and REDFIN_URL_ADDR_RE.search(url):
             resolved_url = url
 
+        # Strip query params from Redfin URLs — tracking params (utm_source, etc.) cause 405 errors
+        if "redfin.com" in resolved_url and "?" in resolved_url:
+            resolved_url = resolved_url.split("?")[0]
+            logger.info(f"Stripped query params from Redfin URL: {resolved_url}")
+
     # Extract address from Redfin URL path if not provided by user
     if not address:
         redfin_match = REDFIN_URL_ADDR_RE.search(resolved_url)
