@@ -2066,7 +2066,7 @@ function buildCard(l) {
   var scoreColor = (aiFailed || isProcessing) ? 'var(--text-faint)' :
     (isUncertain ? 'var(--text-muted)' : scoreBarColor(l.score || 0, displayVerdict));
   var scoreDisplay = (aiFailed || isProcessing) ? '…' :
-    (isUncertain && l.score != null ? '~' + l.score : (l.score != null ? String(l.score) : '?'));
+    (isUncertain && l.score != null ? l.score + '?' : (l.score != null ? String(l.score) : '?'));
   var priceSqft = (l.price && l.sqft) ? '$' + Math.round(l.price / l.sqft).toLocaleString() : null;
 
   var card = el('div', {className: 'card' + ((aiFailed || isProcessing) ? ' card-ai-failed' : ''), id: 'card-' + l.id});
@@ -2682,6 +2682,7 @@ async function saveImages(listingId, urls, section, inp) {
 }
 
 async function rescoreListing(listingId) {
+  if (!currentUser) { showToast('Sign in to rescore listings'); return; }
   showToast('Re-scoring...');
   try {
     var res = await fetch('/listings/' + listingId + '/rescore', {method: 'POST'});
@@ -2690,11 +2691,11 @@ async function rescoreListing(listingId) {
       showToast('Re-scored: ' + data.verdict + ' (' + data.score + ')');
       loadListings();
     } else {
-      var err = await res.json();
-      showToast('Error: ' + (err.detail || 'failed'));
+      var err = await res.json().catch(function() { return {}; });
+      showToast('Error: ' + (err.detail || res.status));
     }
   } catch (e) {
-    showToast('Network error');
+    showToast('Network error — try refreshing');
   }
 }
 
@@ -3189,6 +3190,11 @@ async function markSold(listingId) {
 
 /* ==== Retry AI Scoring ==== */
 async function retryScoring(listingId, btn) {
+  if (!currentUser) {
+    showToast('Sign in to rescore listings');
+    return;
+  }
+  var origText = btn.textContent;
   btn.disabled = true;
   btn.textContent = 'Retrying\u2026';
   try {
@@ -3212,12 +3218,12 @@ async function retryScoring(listingId, btn) {
       var err = await res.json().catch(function() { return {}; });
       showToast('Rescore failed: ' + (err.detail || res.status));
       btn.disabled = false;
-      btn.textContent = '\u21bb Retry scoring';
+      btn.textContent = origText;
     }
   } catch (e) {
-    showToast('Network error');
+    showToast('Network error — try refreshing');
     btn.disabled = false;
-    btn.textContent = '\u21bb Retry scoring';
+    btn.textContent = origText;
   }
 }
 
@@ -3311,7 +3317,15 @@ async function fetchPollStatus() {
     var extra = found > 0 ? ' · ' + found + ' new' : '';
     if (poll.last_error) {
       color = 'red';
-      extra = ' · error';
+      // Show a human-readable error label
+      var errMsg = poll.last_error;
+      if (errMsg.indexOf('invalid_grant') >= 0) {
+        extra = ' · Gmail auth expired';
+      } else if (errMsg.indexOf('timeout') >= 0 || errMsg.indexOf('Timeout') >= 0) {
+        extra = ' · timeout';
+      } else {
+        extra = ' · error';
+      }
     }
 
     el.innerHTML = '<span class="status-dot ' + color + '"></span>Checked ' + timeAgo + extra;
