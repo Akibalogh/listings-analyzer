@@ -21,13 +21,21 @@ PROCESSED_LABEL = "ListingsAnalyzer/Processed"
 
 
 def _build_service():
-    """Build Gmail API service from refresh token."""
+    """Build Gmail API service from refresh token.
+
+    Checks the DB for an overridden refresh token first (set via the
+    /manage/gmail-reauth flow), falling back to the GMAIL_REFRESH_TOKEN env var.
+    """
+    from app import db  # local import to avoid circular at module load
     creds_data = settings.gmail_credentials
     client_config = creds_data.get("installed", creds_data.get("web", {}))
 
+    # DB-stored token takes precedence (updated via web OAuth flow)
+    refresh_token = db.get_app_state("gmail_refresh_token") or settings.gmail_refresh_token
+
     creds = Credentials(
         token=None,
-        refresh_token=settings.gmail_refresh_token,
+        refresh_token=refresh_token,
         token_uri="https://oauth2.googleapis.com/token",
         client_id=client_config["client_id"],
         client_secret=client_config["client_secret"],

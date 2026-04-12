@@ -1030,3 +1030,14 @@ def set_app_state(key: str, value: str) -> None:
                 )
     except Exception:
         logger.warning(f"set_app_state failed for key={key}", exc_info=True)
+
+
+def delete_app_state(key: str) -> None:
+    """Delete a value from the persistent app_state KV store."""
+    ph = _placeholder()
+    try:
+        with get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(f"DELETE FROM app_state WHERE key = {ph}", (key,))
+    except Exception:
+        logger.warning(f"delete_app_state failed for key={key}", exc_info=True)

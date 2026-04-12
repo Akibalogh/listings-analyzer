@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from app import db
 from app.auth import (
@@ -1514,6 +1514,105 @@ def manage_poll(request: Request):
         "listings_processed": len(results),
         "results": results,
     }
+
+
+_GMAIL_OAUTH_SCOPES = [
+    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/gmail.modify",
+]
+_GMAIL_OAUTH_STATE_KEY = "gmail_oauth_state"
+
+
+@app.get("/manage/gmail-reauth")
+def gmail_reauth_start(request: Request):
+    """Start the Gmail OAuth re-authorization flow.
+
+    Generates a Google OAuth URL and redirects the browser there.
+    Protected by manage key passed as a query param for phone-friendly use:
+      GET /manage/gmail-reauth?key=<manage_key>
+    """
+    key = request.query_params.get("key", "")
+    if not settings.manage_key or key != settings.manage_key:
+        raise HTTPException(status_code=403, detail="Invalid or missing key")
+
+    creds_data = settings.gmail_credentials
+    client_config = creds_data.get("web", creds_data.get("installed", {}))
+    if not client_config:
+        raise HTTPException(status_code=500, detail="GMAIL_CREDENTIALS_JSON not configured")
+
+    import secrets as secrets_mod
+    from google_auth_oauthlib.flow import Flow
+
+    # Build redirect URI from current request host
+    redirect_uri = str(request.base_url).rstrip("/") + "/manage/gmail-callback"
+
+    # State token to prevent CSRF
+    state = secrets_mod.token_urlsafe(16)
+    db.set_app_state(_GMAIL_OAUTH_STATE_KEY, state)
+
+    flow = Flow.from_client_config(
+        {"web": client_config} if "web" not in creds_data else creds_data,
+        scopes=_GMAIL_OAUTH_SCOPES,
+        redirect_uri=redirect_uri,
+    )
+    auth_url, _ = flow.authorization_url(
+        access_type="offline",
+        prompt="consent",
+        state=state,
+    )
+    return RedirectResponse(auth_url)
+
+
+@app.get("/manage/gmail-callback")
+def gmail_reauth_callback(request: Request):
+    """Handle the OAuth callback, save new refresh token, show success page."""
+    # Verify state
+    saved_state = db.get_app_state(_GMAIL_OAUTH_STATE_KEY)
+    returned_state = request.query_params.get("state", "")
+    if not saved_state or returned_state != saved_state:
+        raise HTTPException(status_code=400, detail="Invalid OAuth state — possible CSRF. Try again.")
+
+    code = request.query_params.get("code")
+    if not code:
+        error = request.query_params.get("error", "unknown error")
+        raise HTTPException(status_code=400, detail=f"OAuth error: {error}")
+
+    creds_data = settings.gmail_credentials
+    client_config = creds_data.get("web", creds_data.get("installed", {}))
+
+    from google_auth_oauthlib.flow import Flow
+    redirect_uri = str(request.base_url).rstrip("/") + "/manage/gmail-callback"
+
+    flow = Flow.from_client_config(
+        {"web": client_config} if "web" not in creds_data else creds_data,
+        scopes=_GMAIL_OAUTH_SCOPES,
+        redirect_uri=redirect_uri,
+        state=saved_state,
+    )
+    flow.fetch_token(code=code)
+    refresh_token = flow.credentials.refresh_token
+
+    if not refresh_token:
+        raise HTTPException(
+            status_code=400,
+            detail="Google did not return a refresh token. If you previously authorized this app, "
+                   "go to myaccount.google.com/permissions, revoke access for this app, then try again."
+        )
+
+    # Save to DB — gmail.py's _build_service() checks here first
+    db.set_app_state("gmail_refresh_token", refresh_token)
+    db.delete_app_state(_GMAIL_OAUTH_STATE_KEY)
+    logger.info("Gmail refresh token updated via web OAuth flow")
+
+    return HTMLResponse("""
+    <html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+    <style>body{font-family:-apple-system,sans-serif;max-width:400px;margin:60px auto;padding:20px;text-align:center}
+    h2{color:#16a34a}p{color:#475569;line-height:1.6}.back{display:inline-block;margin-top:20px;padding:12px 24px;
+    background:#2563eb;color:#fff;border-radius:8px;text-decoration:none;font-weight:600}</style></head>
+    <body><h2>&#10003; Gmail connected!</h2>
+    <p>The refresh token has been saved. The poller will use it on the next scheduled run.</p>
+    <a href="/" class="back">Back to listings</a></body></html>
+    """)
 
 
 @app.post("/manage/cleanup")
