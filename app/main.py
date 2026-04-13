@@ -1543,8 +1543,12 @@ def gmail_reauth_start(request: Request):
     import secrets as secrets_mod
     from google_auth_oauthlib.flow import Flow
 
-    # Build redirect URI from current request host
-    redirect_uri = str(request.base_url).rstrip("/") + "/manage/gmail-callback"
+    # Build redirect URI — force https (Fly.io terminates TLS at the proxy,
+    # so request.base_url reports http:// but Google requires https://)
+    base = str(request.base_url).rstrip("/")
+    if base.startswith("http://") and "localhost" not in base:
+        base = "https://" + base[7:]
+    redirect_uri = base + "/manage/gmail-callback"
 
     # State token to prevent CSRF
     state = secrets_mod.token_urlsafe(16)
@@ -1581,7 +1585,10 @@ def gmail_reauth_callback(request: Request):
     client_config = creds_data.get("web", creds_data.get("installed", {}))
 
     from google_auth_oauthlib.flow import Flow
-    redirect_uri = str(request.base_url).rstrip("/") + "/manage/gmail-callback"
+    base = str(request.base_url).rstrip("/")
+    if base.startswith("http://") and "localhost" not in base:
+        base = "https://" + base[7:]
+    redirect_uri = base + "/manage/gmail-callback"
 
     flow = Flow.from_client_config(
         {"web": client_config} if "web" not in creds_data else creds_data,
