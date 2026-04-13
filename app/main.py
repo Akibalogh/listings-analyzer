@@ -1596,15 +1596,39 @@ def gmail_reauth_callback(request: Request):
         redirect_uri=redirect_uri,
         state=saved_state,
     )
-    flow.fetch_token(code=code)
+    try:
+        flow.fetch_token(code=code)
+    except Exception as e:
+        logger.error(f"Gmail OAuth token exchange failed: {e}")
+        # Show a friendly retry page instead of a 500
+        manage_key = settings.manage_key or ""
+        retry_url = f"/manage/gmail-reauth?key={manage_key}"
+        return HTMLResponse(f"""
+        <html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+        <style>body{{font-family:-apple-system,sans-serif;max-width:400px;margin:60px auto;padding:20px;text-align:center}}
+        h2{{color:#dc2626}}p{{color:#475569;line-height:1.6}}.retry{{display:inline-block;margin-top:20px;padding:12px 24px;
+        background:#2563eb;color:#fff;border-radius:8px;text-decoration:none;font-weight:600}}</style></head>
+        <body><h2>&#10060; Token exchange failed</h2>
+        <p>Google rejected the authorization code. This can happen if the app restarted between steps or the link was used twice.</p>
+        <a href="{retry_url}" class="retry">Try again</a></body></html>
+        """, status_code=400)
+
     refresh_token = flow.credentials.refresh_token
 
     if not refresh_token:
-        raise HTTPException(
-            status_code=400,
-            detail="Google did not return a refresh token. If you previously authorized this app, "
-                   "go to myaccount.google.com/permissions, revoke access for this app, then try again."
-        )
+        manage_key = settings.manage_key or ""
+        retry_url = f"/manage/gmail-reauth?key={manage_key}"
+        return HTMLResponse(f"""
+        <html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+        <style>body{{font-family:-apple-system,sans-serif;max-width:400px;margin:60px auto;padding:20px;text-align:center}}
+        h2{{color:#f59e0b}}p{{color:#475569;line-height:1.6}}.retry{{display:inline-block;margin-top:20px;padding:12px 24px;
+        background:#2563eb;color:#fff;border-radius:8px;text-decoration:none;font-weight:600}}</style></head>
+        <body><h2>&#9888; No refresh token received</h2>
+        <p>Google didn't return a refresh token. Go to
+        <a href="https://myaccount.google.com/connections">myaccount.google.com/connections</a>,
+        revoke access for "Listings Analyzer", then try again.</p>
+        <a href="{retry_url}" class="retry">Try again</a></body></html>
+        """, status_code=400)
 
     # Save to DB — gmail.py's _build_service() checks here first
     db.set_app_state("gmail_refresh_token", refresh_token)
