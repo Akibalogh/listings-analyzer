@@ -1552,7 +1552,6 @@ def gmail_reauth_start(request: Request):
 
     # State token to prevent CSRF
     state = secrets_mod.token_urlsafe(16)
-    db.set_app_state(_GMAIL_OAUTH_STATE_KEY, state)
 
     flow = Flow.from_client_config(
         {"web": client_config} if "web" not in creds_data else creds_data,
@@ -1564,15 +1563,40 @@ def gmail_reauth_start(request: Request):
         prompt="consent",
         state=state,
     )
+
+    # Persist state + code_verifier (PKCE) together so the callback can reconstruct the flow.
+    # code_verifier is generated internally by Flow; we need to store it because the callback
+    # creates a new Flow object and must supply the same verifier for Google to accept the exchange.
+    import json as _json
+    code_verifier = flow.code_verifier  # bytes or None
+    oauth_state = _json.dumps({
+        "state": state,
+        "code_verifier": code_verifier.decode() if isinstance(code_verifier, bytes) else code_verifier,
+    })
+    db.set_app_state(_GMAIL_OAUTH_STATE_KEY, oauth_state)
+
     return RedirectResponse(auth_url)
 
 
 @app.get("/manage/gmail-callback")
 def gmail_reauth_callback(request: Request):
     """Handle the OAuth callback, save new refresh token, show success page."""
-    # Verify state
-    saved_state = db.get_app_state(_GMAIL_OAUTH_STATE_KEY)
+    import json as _json
+
+    # Load persisted state + PKCE code_verifier
+    raw_state = db.get_app_state(_GMAIL_OAUTH_STATE_KEY)
     returned_state = request.query_params.get("state", "")
+
+    saved_state = None
+    code_verifier = None
+    if raw_state:
+        try:
+            parsed = _json.loads(raw_state)
+            saved_state = parsed.get("state")
+            code_verifier = parsed.get("code_verifier")
+        except Exception:
+            saved_state = raw_state  # legacy: plain string state (no PKCE)
+
     if not saved_state or returned_state != saved_state:
         raise HTTPException(status_code=400, detail="Invalid OAuth state — possible CSRF. Try again.")
 
@@ -1596,6 +1620,9 @@ def gmail_reauth_callback(request: Request):
         redirect_uri=redirect_uri,
         state=saved_state,
     )
+    # Restore the PKCE code_verifier so Google accepts the token exchange
+    if code_verifier:
+        flow.code_verifier = code_verifier
     try:
         flow.fetch_token(code=code)
     except Exception as e:
