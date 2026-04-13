@@ -4,6 +4,26 @@ All notable changes to Listings Analyzer are documented here.
 
 ---
 
+## [2026-04-13] — Jina parser improvements
+
+### Fixed
+- **Price regex** — Changed from `FOR SALE\n` to `For\s+sale\s*\n+` (case-insensitive, multi-newline) to match actual Jina-rendered Redfin output
+- **Sqft regex** — Fixed pattern to handle multiline spacing between value and "sq ft"
+- **Garage regex** — Made "spaces" optional so `"2 car garage Parking"` matches (not just `"2 garage spaces Parking"`)
+
+### Added
+- **Beds extraction** — New `_JINA_BEDS_RE` regex for `"4\n\nbd"` pattern
+- **Baths extraction** — New `_JINA_BATHS_RE` regex for `"3.5 ba"` pattern (half-bath support)
+- **Year built extraction** — New `_JINA_YEAR_BUILT_RE` regex for `"1867 Year Built"` pattern
+- **Title fallback** — Falls back to `Title: ... - 4 beds/3 baths` when stats block isn't parsed
+- **`listing_fields` updated** — `manage/scrape-descriptions` now persists bedrooms, bathrooms, year_built from Jina scrapes
+- **38 unit tests** — New `tests/test_jina_parser.py` covering all Jina parser extraction paths
+
+### Data backfill
+- Manually backfilled price, sqft, beds, baths, year_built for listings 781–785
+
+---
+
 ## [2026-04-11] — v9: uncertain score UX
 
 ### Added

@@ -2513,13 +2513,19 @@ _JINA_PROPERTY_TYPE_RE = _re.compile(
     r"(Single-family|Multi-family|Condo|Townhouse|Mobile[/ ]home|Co-op|Land|Commercial|Residential)\s*\n?Property Type",
     _re.IGNORECASE,
 )
-_JINA_GARAGE_RE = _re.compile(r"(\d+)\s+(?:car\s+)?garage\s+spaces?\s*\n?Parking", _re.IGNORECASE)
+_JINA_GARAGE_RE = _re.compile(r"(\d+)\s+(?:car\s+)?garage(?:\s+spaces?)?\s*\n?Parking", _re.IGNORECASE)
 _JINA_TAX_RE = _re.compile(r"Tax Annual Amount:\s*\$([\d,]+(?:\.\d+)?)", _re.IGNORECASE)
 _JINA_HOA_RE = _re.compile(r"\$([\d,]+(?:\.\d+)?)\s*/\s*(?:month|mo)\s*HOA", _re.IGNORECASE)
 _JINA_LOT_ACRES_RE = _re.compile(r"([\d.]+)\s+acres?\s*\n?Lot Size", _re.IGNORECASE)
 _JINA_LOT_SQFT_RE = _re.compile(r"([\d,]+)\s+sq\s*ft\s*\n?Lot Size", _re.IGNORECASE)
-_JINA_PRICE_RE = _re.compile(r"FOR SALE\s*\n\s*\$([\d,]+)", _re.IGNORECASE)
-_JINA_SQFT_RE = _re.compile(r"([\d,]+)\s*\n?sq ft\s*\n?(\d+\s+bd|$)", _re.IGNORECASE)
+_JINA_PRICE_RE = _re.compile(r"For\s+sale\s*\n+\s*\$([\d,]+)", _re.IGNORECASE)
+_JINA_SQFT_RE = _re.compile(r"([\d,]+)\s*\n+\s*sq\s*ft\b", _re.IGNORECASE)
+_JINA_BEDS_RE = _re.compile(r"(\d+)\s*\n+\s*bd\b", _re.IGNORECASE)
+_JINA_BATHS_RE = _re.compile(r"([\d.]+)\s+ba\b", _re.IGNORECASE)
+_JINA_YEAR_BUILT_RE = _re.compile(r"(\d{4})\s+Year\s+Built\b", _re.IGNORECASE)
+_JINA_TITLE_STATS_RE = _re.compile(
+    r"^Title:.*?-\s*(\d+)\s*bed[^/\n]*/?\s*([\d.]+)\s*bath", _re.IGNORECASE | _re.MULTILINE
+)
 _JINA_LIST_DATE_RE = _re.compile(
     r"(?:Listed:|Date Listed:|Active since:|On market since:)\s*([\w]+ \d+, \d{4}|\d{1,2}/\d{1,2}/\d{2,4})",
     _re.IGNORECASE,
@@ -2593,13 +2599,67 @@ def _parse_jina_redfin(text: str) -> dict:
             except ValueError:
                 pass
 
-    # Price (only if clearly marked FOR SALE)
+    # Price (only if clearly marked For sale)
     price_match = _JINA_PRICE_RE.search(text)
     if price_match:
         try:
             price = int(price_match.group(1).replace(",", ""))
             if price >= 100000:
                 result["price"] = price
+        except ValueError:
+            pass
+
+    # Sqft (living area — NOT lot sqft)
+    sqft_match = _JINA_SQFT_RE.search(text)
+    if sqft_match:
+        try:
+            sqft = int(sqft_match.group(1).replace(",", ""))
+            if 300 <= sqft <= 30000:
+                result["sqft"] = sqft
+        except ValueError:
+            pass
+
+    # Beds
+    beds_match = _JINA_BEDS_RE.search(text)
+    if beds_match:
+        try:
+            result["bedrooms"] = int(beds_match.group(1))
+        except ValueError:
+            pass
+
+    # Baths (may be fractional like 3.5 — round to nearest 0.5)
+    baths_match = _JINA_BATHS_RE.search(text)
+    if baths_match:
+        try:
+            baths = float(baths_match.group(1))
+            # Half-bath support: 3.5 → 3.5, 3 → 3
+            result["bathrooms"] = int(baths) if baths == int(baths) else round(baths, 1)
+        except ValueError:
+            pass
+
+    # Fallback: extract beds/baths from Jina Title line if not already found
+    if "bedrooms" not in result or "bathrooms" not in result:
+        title_match = _JINA_TITLE_STATS_RE.search(text)
+        if title_match:
+            if "bedrooms" not in result:
+                try:
+                    result["bedrooms"] = int(title_match.group(1))
+                except ValueError:
+                    pass
+            if "bathrooms" not in result:
+                try:
+                    baths = float(title_match.group(2))
+                    result["bathrooms"] = int(baths) if baths == int(baths) else round(baths, 1)
+                except ValueError:
+                    pass
+
+    # Year built
+    yb_match = _JINA_YEAR_BUILT_RE.search(text)
+    if yb_match:
+        try:
+            yr = int(yb_match.group(1))
+            if 1800 <= yr <= 2030:
+                result["year_built"] = yr
         except ValueError:
             pass
 
@@ -2839,7 +2899,7 @@ def manage_scrape_redfin(request: Request):
 
         # Split into enrichment vs listing fields
         enrichment_fields = {"property_tax_json", "garage_count", "garage_type", "hoa_monthly", "list_date"}
-        listing_fields = {"property_type", "lot_acres", "price", "sqft"}
+        listing_fields = {"property_type", "lot_acres", "price", "sqft", "bedrooms", "bathrooms", "year_built"}
 
         enrich = {k: v for k, v in parsed.items() if k in enrichment_fields}
         fields = {k: v for k, v in parsed.items() if k in listing_fields}
