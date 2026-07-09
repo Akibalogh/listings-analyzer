@@ -1888,6 +1888,8 @@ def _scrape_descriptions_worker():
 
 
 def _scrape_descriptions_sync():
+    from app.parsers.onehome import _search_redfin_url, scrape_listing_description, scrape_listing_structured_data
+
     listing_ids = db.get_all_listing_ids()
     urls_found = 0
     scraped = 0
