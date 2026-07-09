@@ -42,7 +42,7 @@ class Settings(BaseSettings):
     agent_map: str = ""
 
     # AI evaluation model
-    ai_eval_model: str = "claude-opus-4-6"
+    ai_eval_model: str = "claude-haiku-4-5-20251001"
 
     # SchoolDigger API (free dev tier: 20 calls/day)
     schooldigger_app_id: str = ""
