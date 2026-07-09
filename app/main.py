@@ -3530,3 +3530,221 @@ def manage_rescrape_unknowns(request: Request):
         "error_details": errors[:10],  # First 10 errors
     }
 
+
+@app.post("/manage/import-csv")
+async def manage_import_csv(request: Request):
+    """Bulk-import listings from a Redfin CSV export.
+
+    Accepts multipart form upload of a Redfin CSV. Creates listings with the
+    structured data from the CSV (price, beds, baths, sqft, year_built, etc.),
+    deduplicates by address, then background-enriches each new listing
+    (scrape description/images, commute, schools, AI score).
+
+    Protected by MANAGE_KEY env var.
+    """
+    import csv
+    import io
+    import math
+
+    from app.enrichment import normalize_address, fetch_commute_time, fetch_school_data
+    from app.models import ParsedListing, ScoringResult
+    from app.parsers.onehome import scrape_listing_description, _extract_property_stats
+
+    key = request.headers.get("x-manage-key", "")
+    if not settings.manage_key or key != settings.manage_key:
+        raise HTTPException(status_code=403, detail="Invalid or missing management key")
+
+    content_type = request.headers.get("content-type", "")
+    if "multipart" in content_type:
+        form = await request.form()
+        upload = form.get("file")
+        if not upload:
+            raise HTTPException(status_code=400, detail="No file uploaded")
+        raw = (await upload.read()).decode("utf-8-sig")
+    else:
+        raw = (await request.body()).decode("utf-8-sig")
+
+    reader = csv.DictReader(io.StringIO(raw))
+    rows = list(reader)
+    if not rows:
+        return {"imported": 0, "skipped": 0, "errors": []}
+
+    url_col = [c for c in rows[0].keys() if c.startswith("URL (")]
+    url_key = url_col[0] if url_col else "URL"
+
+    imported = 0
+    skipped = 0
+    skipped_addresses = []
+    errors = []
+    new_listing_ids = []
+
+    for row in rows:
+        try:
+            address = (row.get("ADDRESS") or "").strip()
+            town = (row.get("CITY") or "").strip()
+            state = (row.get("STATE OR PROVINCE") or "").strip()
+            zip_code = (row.get("ZIP OR POSTAL CODE") or "").strip()
+            url = (row.get(url_key) or "").strip()
+            mls_id = (row.get("MLS#") or "").strip() or None
+
+            if not address or not town:
+                continue
+
+            address_key = normalize_address(address, town, state)
+            if address_key and db.is_listing_duplicate_by_address(address_key):
+                skipped += 1
+                skipped_addresses.append(f"{address}, {town}")
+                continue
+
+            price_raw = row.get("PRICE", "")
+            price = int(float(price_raw)) if price_raw else None
+            sqft_raw = row.get("SQUARE FEET", "")
+            sqft = int(float(sqft_raw)) if sqft_raw else None
+            beds_raw = row.get("BEDS", "")
+            beds = int(float(beds_raw)) if beds_raw else None
+            baths_raw = row.get("BATHS", "")
+            baths = float(baths_raw) if baths_raw else None
+            year_raw = row.get("YEAR BUILT", "")
+            year_built = int(float(year_raw)) if year_raw else None
+            lot_raw = row.get("LOT SIZE", "")
+            lot_acres = round(float(lot_raw) / 43560, 2) if lot_raw else None
+            status = (row.get("STATUS") or "Active").strip()
+
+            email_id = db.save_processed_email(
+                gmail_id=f"csv-import-{mls_id or address}",
+                message_id="",
+                sender="redfin-csv",
+                subject=f"CSV import: {address}, {town}",
+                parser_used="redfin-csv",
+                listings_found=1,
+            )
+
+            listing = ParsedListing(
+                source_format="redfin-csv",
+                address=address,
+                town=town,
+                state=state,
+                zip_code=zip_code,
+                mls_id=mls_id,
+                price=price,
+                sqft=sqft,
+                bedrooms=beds,
+                bathrooms=int(baths) if baths else None,
+                property_type=row.get("PROPERTY TYPE", "Single Family Residential"),
+                listing_status=status,
+                listing_url=url or None,
+                year_built=year_built,
+                lot_acres=lot_acres,
+            )
+
+            placeholder_score = ScoringResult(
+                score=0, verdict="Reject", hard_results=[], soft_points={},
+                concerns=["Pending enrichment"], confidence="low",
+            )
+            enrichment = {}
+            if address_key:
+                enrichment["address_key"] = address_key
+
+            listing_id = db.save_listing(listing, placeholder_score, email_id, enrichment)
+            new_listing_ids.append(listing_id)
+            imported += 1
+
+        except Exception as e:
+            errors.append({"address": row.get("ADDRESS", "?"), "error": str(e)})
+
+    def _background_enrich(listing_ids: list[int]):
+        import httpx
+        for lid in listing_ids:
+            try:
+                saved = db.get_listing_by_id(lid)
+                if not saved:
+                    continue
+                _url = saved.get("listing_url") or ""
+                _address = saved.get("address")
+                _town = saved.get("town")
+                _state = saved.get("state")
+                _zip = saved.get("zip_code")
+
+                desc, imgs = None, []
+                if _url:
+                    desc, imgs = scrape_listing_description(
+                        _url, address=_address, town=_town, state=_state, zip_code=_zip,
+                    )
+
+                price = beds = baths = sqft_s = year_b = list_d = lot_a = None
+                if _url:
+                    try:
+                        with httpx.Client(timeout=10, follow_redirects=True, headers={
+                            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+                        }) as client:
+                            page_resp = client.get(_url)
+                            if page_resp.status_code == 200:
+                                stats = _extract_property_stats(page_resp.text)
+                                if stats:
+                                    list_d = stats.get("list_date")
+                    except Exception:
+                        pass
+
+                with db.get_connection() as conn:
+                    cur = conn.cursor()
+                    ph = db._placeholder()
+                    if desc:
+                        cur.execute(f"UPDATE listings SET description = {ph} WHERE id = {ph}", (desc, lid))
+                    if list_d:
+                        cur.execute(f"UPDATE listings SET list_date = {ph} WHERE id = {ph}", (list_d, lid))
+                    conn.commit()
+
+                if imgs:
+                    db.add_listing_images(lid, imgs)
+
+                enrichment_data = {}
+                if _zip:
+                    school_json = fetch_school_data(_zip, _state)
+                    if school_json:
+                        enrichment_data["school_data_json"] = school_json
+                if _address and _town:
+                    commute = fetch_commute_time(_address, _town, _state, _zip)
+                    if commute:
+                        enrichment_data["commute_minutes"] = commute.get("commute_minutes")
+                        enrichment_data["commute_data_json"] = commute.get("commute_data_json")
+                if enrichment_data:
+                    db.update_listing_fields_by_id(lid, force=True, **{
+                        k: v for k, v in enrichment_data.items() if k == "commute_minutes"
+                    })
+                    with db.get_connection() as conn:
+                        cur = conn.cursor()
+                        ph = db._placeholder()
+                        if "school_data_json" in enrichment_data:
+                            cur.execute(
+                                f"UPDATE listings SET school_data_json = {ph} WHERE id = {ph}",
+                                (json.dumps(enrichment_data["school_data_json"])
+                                 if isinstance(enrichment_data["school_data_json"], dict)
+                                 else enrichment_data["school_data_json"], lid),
+                            )
+                        if "commute_data_json" in enrichment_data:
+                            cur.execute(
+                                f"UPDATE listings SET commute_data_json = {ph} WHERE id = {ph}",
+                                (enrichment_data["commute_data_json"], lid),
+                            )
+                        conn.commit()
+
+                criteria = db.get_active_criteria()
+                if criteria:
+                    saved = db.get_listing_by_id(lid)
+                    if saved:
+                        _rescore_one_listing(saved, criteria)
+
+            except Exception as exc:
+                logger.error(f"Background enrich failed for CSV listing #{lid}: {exc}")
+
+    if new_listing_ids:
+        threading.Thread(target=_background_enrich, args=(new_listing_ids,), daemon=True).start()
+
+    return {
+        "imported": imported,
+        "skipped_duplicates": skipped,
+        "skipped_addresses": skipped_addresses[:20],
+        "errors": errors[:10],
+        "enrichment": "started in background" if new_listing_ids else "none needed",
+    }
+
