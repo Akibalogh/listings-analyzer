@@ -2,6 +2,7 @@
 
 import json
 import logging
+import random
 import threading
 import time
 from contextlib import asynccontextmanager
@@ -1841,20 +1842,52 @@ def manage_reprocess(request: Request):
     }
 
 
+_scrape_state: dict = {"in_progress": False, "result": None}
+
+
+@app.get("/manage/scrape-descriptions/status")
+def scrape_descriptions_status(request: Request):
+    """Check progress of background scrape-descriptions."""
+    key = request.headers.get("x-manage-key", "")
+    if not settings.manage_key or key != settings.manage_key:
+        raise HTTPException(status_code=403, detail="Invalid or missing management key")
+    return _scrape_state
+
+
 @app.post("/manage/scrape-descriptions")
 def manage_scrape_descriptions(request: Request):
     """Find URLs and scrape descriptions for listings.
 
     Phase 1: For listings WITHOUT a URL, search DuckDuckGo for a Redfin URL.
     Phase 2: For listings WITH a URL but no description, scrape the listing page.
-    Protected by MANAGE_KEY env var.
+    Protected by MANAGE_KEY env var. Runs in background thread.
     """
-    from app.parsers.onehome import _search_redfin_url, scrape_listing_description, scrape_listing_structured_data
-
     key = request.headers.get("x-manage-key", "")
     if not settings.manage_key or key != settings.manage_key:
         raise HTTPException(status_code=403, detail="Invalid or missing management key")
 
+    if _scrape_state["in_progress"]:
+        return {"status": "already_running"}
+
+    _scrape_state["in_progress"] = True
+    _scrape_state["result"] = None
+    threading.Thread(target=_scrape_descriptions_worker, daemon=True).start()
+    return {"status": "started"}
+
+
+def _scrape_descriptions_worker():
+    """Background worker for scrape-descriptions."""
+    try:
+        result = _scrape_descriptions_sync()
+        _scrape_state["result"] = result
+    except Exception as e:
+        logger.exception("Scrape descriptions worker failed")
+        _scrape_state["result"] = {"error": str(e)}
+    finally:
+        _scrape_state["in_progress"] = False
+
+
+def _scrape_descriptions_sync():
     listing_ids = db.get_all_listing_ids()
     urls_found = 0
     scraped = 0
