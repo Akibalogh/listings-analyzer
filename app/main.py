@@ -1481,7 +1481,7 @@ def manage_update_listing(request: Request, body: dict = {}):
         raise HTTPException(status_code=400, detail="Provide listing_id in JSON body")
 
     force = bool(body.get("force", False))
-    ALLOWED = {"year_built", "price", "sqft", "bedrooms", "bathrooms", "address", "town", "state", "zip_code", "property_type", "lot_acres", "list_date", "listing_status"}
+    ALLOWED = {"year_built", "price", "sqft", "bedrooms", "bathrooms", "address", "town", "state", "zip_code", "property_type", "lot_acres", "list_date", "listing_status", "listing_url", "mls_id"}
     fields = {k: v for k, v in body.items() if k in ALLOWED and v is not None}
     if not fields:
         raise HTTPException(status_code=400, detail=f"No valid fields provided. Allowed: {sorted(ALLOWED)}")
