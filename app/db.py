@@ -74,6 +74,18 @@ CREATE TABLE IF NOT EXISTS app_state (
     value TEXT,
     updated_at TEXT DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    listing_id INTEGER NOT NULL REFERENCES listings(id) ON DELETE CASCADE,
+    task_type TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(listing_id, task_type)
+);
 """
 
 # Postgres-compatible schema (uses SERIAL, TIMESTAMP, etc.)
@@ -135,6 +147,18 @@ CREATE TABLE IF NOT EXISTS app_state (
     key TEXT PRIMARY KEY,
     value TEXT,
     updated_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS jobs (
+    id SERIAL PRIMARY KEY,
+    listing_id INTEGER NOT NULL REFERENCES listings(id) ON DELETE CASCADE,
+    task_type TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE(listing_id, task_type)
 );
 """
 
@@ -200,6 +224,11 @@ def init_db():
 
     # Backfill agent_name from processed_emails sender using agent_map
     _backfill_agent_names()
+
+    # Requeue jobs orphaned by a crash/deploy mid-run
+    reset = reset_running_jobs()
+    if reset:
+        logger.info(f"Requeued {reset} jobs orphaned by restart")
 
     logger.info("Database initialized")
 
@@ -1041,3 +1070,203 @@ def delete_app_state(key: str) -> None:
             cur.execute(f"DELETE FROM app_state WHERE key = {ph}", (key,))
     except Exception:
         logger.warning(f"delete_app_state failed for key={key}", exc_info=True)
+
+
+# --- Job queue (persistent background work) ---
+
+JOB_MAX_ATTEMPTS = 3
+
+
+def enqueue_jobs(
+    listing_id: int, task_types: list[str], force: bool = False, requeue: bool = False,
+) -> int:
+    """Insert pending jobs for a listing. Idempotent via UNIQUE(listing_id, task_type).
+
+    Default: existing jobs (any status) are left untouched.
+    requeue=True (gap scan): terminal rows are resurrected because the caller
+    verified the data gap still exists — done rows get a full retry budget,
+    failed rows get exactly one attempt per scan (a permanently broken job
+    costs one retry per tick, not an infinite tight loop).
+    force=True: like requeue, but failed rows also get the full retry budget.
+    Pending/running rows are never touched. Returns rows inserted or reset.
+    """
+    ph = _placeholder()
+    pending = 0
+    with get_connection() as conn:
+        cur = conn.cursor()
+        for task_type in task_types:
+            if force or requeue:
+                failed_attempts = 0 if force else JOB_MAX_ATTEMPTS - 1
+                cur.execute(
+                    f"""INSERT INTO jobs (listing_id, task_type) VALUES ({ph}, {ph})
+                    ON CONFLICT (listing_id, task_type) DO UPDATE
+                    SET status = 'pending',
+                        attempts = CASE WHEN jobs.status = 'failed' THEN {ph} ELSE 0 END,
+                        last_error = NULL,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE jobs.status IN ('done', 'failed')""",
+                    (listing_id, task_type, failed_attempts),
+                )
+            else:
+                cur.execute(
+                    f"""INSERT INTO jobs (listing_id, task_type) VALUES ({ph}, {ph})
+                    ON CONFLICT (listing_id, task_type) DO NOTHING""",
+                    (listing_id, task_type),
+                )
+            pending += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+    return pending
+
+
+def claim_pending_jobs(
+    limit: int = 50,
+    task_order: list[str] | None = None,
+    exclude_ids: set[int] | None = None,
+) -> list[dict]:
+    """Atomically claim up to `limit` pending jobs: mark them running and return them.
+
+    A 'score' job is deferred while any other pending/running job exists for
+    the same listing, so scoring always sees settled enrichment data. Newest
+    listings are claimed first, so a listing the user just added doesn't wait
+    behind a backfill backlog. exclude_ids skips jobs the caller already
+    attempted this drain — their remaining retries happen on later drains
+    instead of hammering a failing endpoint back-to-back.
+    """
+    ph = _placeholder()
+    exclude = tuple(exclude_ids) if exclude_ids else ()
+    exclude_clause = ""
+    if exclude:
+        exclude_clause = f"AND id NOT IN ({', '.join([ph] * len(exclude))})"
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            f"""SELECT id, listing_id, task_type, attempts FROM jobs
+            WHERE status = 'pending' AND attempts < {ph}
+            {exclude_clause}
+            AND (task_type != 'score' OR NOT EXISTS (
+                SELECT 1 FROM jobs j2
+                WHERE j2.listing_id = jobs.listing_id
+                AND j2.task_type != 'score'
+                AND (j2.status = 'running'
+                     OR (j2.status = 'pending' AND j2.attempts < {ph}))
+            ))
+            ORDER BY listing_id DESC, id LIMIT {ph}""",
+            (JOB_MAX_ATTEMPTS, *exclude, JOB_MAX_ATTEMPTS, limit),
+        )
+        rows = cur.fetchall()
+        if settings.is_postgres:
+            columns = [desc[0] for desc in cur.description]
+            jobs = [dict(zip(columns, row)) for row in rows]
+        else:
+            jobs = [dict(row) for row in rows]
+
+        if not jobs:
+            return []
+        ids = tuple(j["id"] for j in jobs)
+        placeholders = ", ".join([ph] * len(ids))
+        cur.execute(
+            f"UPDATE jobs SET status = 'running', attempts = attempts + 1, "
+            f"updated_at = CURRENT_TIMESTAMP WHERE id IN ({placeholders})",
+            ids,
+        )
+
+    if task_order:
+        rank = {t: i for i, t in enumerate(task_order)}
+        jobs.sort(key=lambda j: (-j["listing_id"], rank.get(j["task_type"], 99)))
+    return jobs
+
+
+def complete_job(job_id: int) -> None:
+    """Mark a job as done."""
+    ph = _placeholder()
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            f"UPDATE jobs SET status = 'done', last_error = NULL, "
+            f"updated_at = CURRENT_TIMESTAMP WHERE id = {ph}",
+            (job_id,),
+        )
+
+
+def fail_job(job_id: int, error: str) -> None:
+    """Record a job failure: back to pending for retry, or failed if out of attempts."""
+    ph = _placeholder()
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            f"""UPDATE jobs SET
+                status = CASE WHEN attempts >= {ph} THEN 'failed' ELSE 'pending' END,
+                last_error = {ph}, updated_at = CURRENT_TIMESTAMP
+            WHERE id = {ph}""",
+            (JOB_MAX_ATTEMPTS, error[:500], job_id),
+        )
+
+
+def reset_running_jobs() -> int:
+    """Requeue jobs orphaned mid-run by a crash/deploy. Returns count reset.
+
+    A claimed job's attempt was already counted, so a job interrupted on its
+    final attempt goes straight to failed — otherwise it would sit pending
+    forever, invisible to the attempts < max claim filter.
+    """
+    ph = _placeholder()
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            f"""UPDATE jobs SET
+                status = CASE WHEN attempts >= {ph} THEN 'failed' ELSE 'pending' END,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE status = 'running'""",
+            (JOB_MAX_ATTEMPTS,),
+        )
+        return cur.rowcount or 0
+
+
+def delete_orphan_jobs() -> int:
+    """Delete jobs whose listing no longer exists (sold/pruned/deduped).
+
+    Needed on SQLite, where the FK's ON DELETE CASCADE is inert because
+    foreign_keys enforcement is off by default. Returns count deleted.
+    """
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "DELETE FROM jobs WHERE listing_id NOT IN (SELECT id FROM listings)"
+        )
+        return cur.rowcount or 0
+
+
+def get_score_metadata(listing_id: int) -> dict | None:
+    """Score metadata for one listing (see get_all_score_metadata for the shape)."""
+    ph = _placeholder()
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            f"SELECT criteria_version, scored_at, evaluation_method "
+            f"FROM scores WHERE listing_id = {ph}",
+            (listing_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        return {
+            "criteria_version": row[0],
+            "scored_at": row[1],
+            "evaluation_method": row[2],
+        }
+
+
+def job_counts() -> dict:
+    """Summary of job counts by status and by (task_type, status)."""
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT task_type, status, COUNT(*) FROM jobs GROUP BY task_type, status"
+        )
+        rows = cur.fetchall()
+    by_status: dict[str, int] = {}
+    by_task: dict[str, dict[str, int]] = {}
+    for row in rows:
+        task_type, status, count = row[0], row[1], row[2]
+        by_status[status] = by_status.get(status, 0) + count
+        by_task.setdefault(task_type, {})[status] = count
+    return {"by_status": by_status, "by_task": by_task}

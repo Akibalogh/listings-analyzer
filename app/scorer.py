@@ -26,6 +26,37 @@ logger = logging.getLogger(__name__)
 
 ALLOWED_VERDICTS = {"Strong Match", "Worth Touring", "Low Priority", "Weak Match", "Reject"}
 
+
+def deterministic_gate(listing_data: dict) -> ScoringResult | None:
+    """Check hard gates that need no AI judgment. Returns a Reject result or None.
+
+    Mirrors the hard requirements in the active criteria (v65: commute over
+    110 min = hard reject). Enforcing them in code makes the result
+    reproducible and skips the AI call entirely. Unknown values never gate —
+    only explicit failures do.
+    """
+    commute = listing_data.get("commute_minutes")
+    if commute is not None and commute > settings.commute_hard_limit_minutes:
+        reason = (
+            f"Commute {commute} min exceeds hard limit "
+            f"of {settings.commute_hard_limit_minutes} min"
+        )
+        return ScoringResult(
+            score=0,
+            verdict="Reject",
+            hard_results=[HardResult(
+                criterion="Commute to Brookfield Place",
+                passed=False,
+                value=f"{commute} min",
+                reason=reason,
+            )],
+            concerns=[reason],
+            confidence="high",
+            reasoning=reason,
+            evaluation_method="deterministic-gate",
+        )
+    return None
+
 # Max image size (5 MB) and fetch timeout (10s)
 _MAX_IMAGE_BYTES = 5 * 1024 * 1024
 _IMAGE_TIMEOUT = 10.0
@@ -417,6 +448,11 @@ def ai_score_listing(
         Tuple of (ScoringResult, reasoning_text).
         On failure, falls back to a basic ScoringResult with low confidence.
     """
+    gated = deterministic_gate(listing_data)
+    if gated is not None:
+        logger.info(f"Deterministic gate rejected listing: {gated.reasoning}")
+        return gated, gated.reasoning
+
     if not settings.anthropic_api_key:
         logger.error("AI evaluation requested but ANTHROPIC_API_KEY not set")
         result = ScoringResult(
@@ -436,7 +472,9 @@ def ai_score_listing(
         client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
         response = client.messages.create(
             model=settings.ai_eval_model,
-            max_tokens=2048,
+            # 2048 truncated mid-JSON on listings with rich scraped
+            # descriptions (unterminated-string parse failures)
+            max_tokens=4096,
             system=system_prompt,
             messages=[{"role": "user", "content": user_content}],
         )
@@ -533,7 +571,7 @@ def build_batch_request(
         "custom_id": custom_id,
         "params": {
             "model": settings.ai_eval_model,
-            "max_tokens": 2048,
+            "max_tokens": 4096,
             "system": system_prompt,
             "messages": [{"role": "user", "content": user_content}],
         },
