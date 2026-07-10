@@ -1077,26 +1077,35 @@ def delete_app_state(key: str) -> None:
 JOB_MAX_ATTEMPTS = 3
 
 
-def enqueue_jobs(listing_id: int, task_types: list[str], force: bool = False) -> int:
+def enqueue_jobs(
+    listing_id: int, task_types: list[str], force: bool = False, requeue: bool = False,
+) -> int:
     """Insert pending jobs for a listing. Idempotent via UNIQUE(listing_id, task_type).
 
     Default: existing jobs (any status) are left untouched.
-    force=True: existing done/failed jobs are reset to pending (running jobs
-    are never touched). Returns number of jobs now pending.
+    requeue=True (gap scan): terminal rows are resurrected because the caller
+    verified the data gap still exists — done rows get a full retry budget,
+    failed rows get exactly one attempt per scan (a permanently broken job
+    costs one retry per tick, not an infinite tight loop).
+    force=True: like requeue, but failed rows also get the full retry budget.
+    Pending/running rows are never touched. Returns rows inserted or reset.
     """
     ph = _placeholder()
     pending = 0
     with get_connection() as conn:
         cur = conn.cursor()
         for task_type in task_types:
-            if force:
+            if force or requeue:
+                failed_attempts = 0 if force else JOB_MAX_ATTEMPTS - 1
                 cur.execute(
                     f"""INSERT INTO jobs (listing_id, task_type) VALUES ({ph}, {ph})
                     ON CONFLICT (listing_id, task_type) DO UPDATE
-                    SET status = 'pending', attempts = 0, last_error = NULL,
+                    SET status = 'pending',
+                        attempts = CASE WHEN jobs.status = 'failed' THEN {ph} ELSE 0 END,
+                        last_error = NULL,
                         updated_at = CURRENT_TIMESTAMP
-                    WHERE jobs.status != 'running'""",
-                    (listing_id, task_type),
+                    WHERE jobs.status IN ('done', 'failed')""",
+                    (listing_id, task_type, failed_attempts),
                 )
             else:
                 cur.execute(
@@ -1108,20 +1117,31 @@ def enqueue_jobs(listing_id: int, task_types: list[str], force: bool = False) ->
     return pending
 
 
-def claim_pending_jobs(limit: int = 50, task_order: list[str] | None = None) -> list[dict]:
+def claim_pending_jobs(
+    limit: int = 50,
+    task_order: list[str] | None = None,
+    exclude_ids: set[int] | None = None,
+) -> list[dict]:
     """Atomically claim up to `limit` pending jobs: mark them running and return them.
 
     A 'score' job is deferred while any other pending/running job exists for
-    the same listing, so scoring always sees settled enrichment data. Jobs
-    are ordered by listing then task_order position, so per-listing
-    dependencies hold as long as the caller processes the list in order.
+    the same listing, so scoring always sees settled enrichment data. Newest
+    listings are claimed first, so a listing the user just added doesn't wait
+    behind a backfill backlog. exclude_ids skips jobs the caller already
+    attempted this drain — their remaining retries happen on later drains
+    instead of hammering a failing endpoint back-to-back.
     """
     ph = _placeholder()
+    exclude = tuple(exclude_ids) if exclude_ids else ()
+    exclude_clause = ""
+    if exclude:
+        exclude_clause = f"AND id NOT IN ({', '.join([ph] * len(exclude))})"
     with get_connection() as conn:
         cur = conn.cursor()
         cur.execute(
             f"""SELECT id, listing_id, task_type, attempts FROM jobs
             WHERE status = 'pending' AND attempts < {ph}
+            {exclude_clause}
             AND (task_type != 'score' OR NOT EXISTS (
                 SELECT 1 FROM jobs j2
                 WHERE j2.listing_id = jobs.listing_id
@@ -1129,8 +1149,8 @@ def claim_pending_jobs(limit: int = 50, task_order: list[str] | None = None) -> 
                 AND (j2.status = 'running'
                      OR (j2.status = 'pending' AND j2.attempts < {ph}))
             ))
-            ORDER BY listing_id, id LIMIT {ph}""",
-            (JOB_MAX_ATTEMPTS, JOB_MAX_ATTEMPTS, limit),
+            ORDER BY listing_id DESC, id LIMIT {ph}""",
+            (JOB_MAX_ATTEMPTS, *exclude, JOB_MAX_ATTEMPTS, limit),
         )
         rows = cur.fetchall()
         if settings.is_postgres:
@@ -1151,7 +1171,7 @@ def claim_pending_jobs(limit: int = 50, task_order: list[str] | None = None) -> 
 
     if task_order:
         rank = {t: i for i, t in enumerate(task_order)}
-        jobs.sort(key=lambda j: (j["listing_id"], rank.get(j["task_type"], 99)))
+        jobs.sort(key=lambda j: (-j["listing_id"], rank.get(j["task_type"], 99)))
     return jobs
 
 
@@ -1182,18 +1202,57 @@ def fail_job(job_id: int, error: str) -> None:
 
 
 def reset_running_jobs() -> int:
-    """Reset running jobs to pending (crash/deploy recovery). Returns count reset.
+    """Requeue jobs orphaned mid-run by a crash/deploy. Returns count reset.
 
-    A claimed job's attempt was already counted, so repeated crash loops
-    still exhaust attempts and land in failed rather than retrying forever.
+    A claimed job's attempt was already counted, so a job interrupted on its
+    final attempt goes straight to failed — otherwise it would sit pending
+    forever, invisible to the attempts < max claim filter.
+    """
+    ph = _placeholder()
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            f"""UPDATE jobs SET
+                status = CASE WHEN attempts >= {ph} THEN 'failed' ELSE 'pending' END,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE status = 'running'""",
+            (JOB_MAX_ATTEMPTS,),
+        )
+        return cur.rowcount or 0
+
+
+def delete_orphan_jobs() -> int:
+    """Delete jobs whose listing no longer exists (sold/pruned/deduped).
+
+    Needed on SQLite, where the FK's ON DELETE CASCADE is inert because
+    foreign_keys enforcement is off by default. Returns count deleted.
     """
     with get_connection() as conn:
         cur = conn.cursor()
         cur.execute(
-            "UPDATE jobs SET status = 'pending', updated_at = CURRENT_TIMESTAMP "
-            "WHERE status = 'running'"
+            "DELETE FROM jobs WHERE listing_id NOT IN (SELECT id FROM listings)"
         )
         return cur.rowcount or 0
+
+
+def get_score_metadata(listing_id: int) -> dict | None:
+    """Score metadata for one listing (see get_all_score_metadata for the shape)."""
+    ph = _placeholder()
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            f"SELECT criteria_version, scored_at, evaluation_method "
+            f"FROM scores WHERE listing_id = {ph}",
+            (listing_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        return {
+            "criteria_version": row[0],
+            "scored_at": row[1],
+            "evaluation_method": row[2],
+        }
 
 
 def job_counts() -> dict:

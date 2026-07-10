@@ -5,17 +5,26 @@ crashes — the failure mode of the old daemon-thread approach, where a
 restart mid-run silently dropped whatever work remained.
 
 Flow:
-  * Entry points (poller, /listings/add, /manage/import-csv) call
-    enqueue_listing() after saving a listing, then kick() to process
-    immediately without blocking the request.
-  * The hourly scheduler calls drain() every tick, picking up anything a
-    restart orphaned (init_db resets running -> pending on startup).
+  * /listings/add and /manage/import-csv call enqueue_listing() after saving
+    a listing, then kick() to process immediately without blocking the
+    request. (The poller still enriches inline during its poll; the gap scan
+    below repairs anything it misses.)
+  * The hourly scheduler tick calls enqueue_missing() + kick(): listings are
+    scanned for data gaps and repair jobs are enqueued — terminal job rows
+    are resurrected when their gap demonstrably still exists, so the system
+    converges without manual backfill calls. init_db resets jobs orphaned as
+    'running' by a restart.
   * Each task handler is idempotent: it no-ops (job -> done) when the data
     it would fetch is already present, so re-enqueueing is always safe.
+  * A job that fails is not retried within the same drain — its remaining
+    attempts (3 total) spread across later drains, giving transient failures
+    (rate limits, API blips, daily quotas) time to clear.
 
 Task types and per-listing order (score runs last, and is deferred by
 claim_pending_jobs until the listing's enrichment jobs have settled):
   scrape_desc  -> listing URL (search if missing), description, images
+  stats        -> price/beds/baths/sqft/year_built via page, description,
+                  or OneKeyMLS
   commute      -> door-to-door commute via Google Routes
   schools      -> SchoolDigger district data (zip-cached)
   score        -> AI evaluation against active criteria
@@ -23,9 +32,12 @@ claim_pending_jobs until the listing's enrichment jobs have settled):
 
 import json
 import logging
+import random
 import threading
+import time
 
 from app import db
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -48,17 +60,19 @@ def kick() -> None:
 def drain(max_jobs: int = 500) -> dict:
     """Process pending jobs until the queue is empty or max_jobs is hit.
 
-    Single-flight: concurrent calls return immediately. Failed jobs return
-    to pending and retry (up to db.JOB_MAX_ATTEMPTS claims total, counted
-    at claim time), then land in 'failed' with last_error recorded.
+    Single-flight: concurrent calls return immediately. A job that fails is
+    excluded from re-claiming for the rest of this drain; it retries on a
+    later drain until its attempts (counted at claim time) are exhausted.
     """
     if not _drain_lock.acquire(blocking=False):
         return {"status": "already_running"}
     try:
         processed = 0
-        failed = 0
-        while processed + failed < max_jobs:
-            batch = db.claim_pending_jobs(limit=20, task_order=TASK_ORDER)
+        failed_ids: set[int] = set()
+        while processed + len(failed_ids) < max_jobs:
+            batch = db.claim_pending_jobs(
+                limit=20, task_order=TASK_ORDER, exclude_ids=failed_ids,
+            )
             if not batch:
                 break
             for job in batch:
@@ -72,9 +86,9 @@ def drain(max_jobs: int = 500) -> dict:
                         f"(listing {job['listing_id']}) failed: {e}"
                     )
                     db.fail_job(job["id"], str(e))
-                    failed += 1
-        result = {"processed": processed, "failed": failed}
-        if processed or failed:
+                    failed_ids.add(job["id"])
+        result = {"processed": processed, "failed": len(failed_ids)}
+        if processed or failed_ids:
             logger.info(f"Job drain finished: {result}")
         return result
     finally:
@@ -84,12 +98,19 @@ def drain(max_jobs: int = 500) -> dict:
 def enqueue_missing(force: bool = False) -> dict:
     """Scan all listings for data gaps and enqueue repair jobs.
 
-    Runs on every scheduler tick, so the system converges on complete data
-    without manual backfill calls. force=False (the default) leaves
-    attempts-exhausted failed jobs alone; force=True re-queues them.
+    Runs on every scheduler tick. Because each gap was just verified to still
+    exist, terminal job rows are resurrected (requeue semantics): done rows
+    retry with a full budget, failed rows get one attempt per scan. force=True
+    additionally restores the full budget on failed rows.
+
+    Score jobs are not enqueued while a criteria rescore is in flight —
+    otherwise every not-yet-rescored listing would be scored twice (once by
+    the rescore, once by the drain) at double the API cost.
     """
+    db.delete_orphan_jobs()
     criteria = db.get_active_criteria()
     score_meta = db.get_all_score_metadata()
+    rescore_running = db.rescore_state.get("in_progress", False)
     counts: dict[str, int] = {t: 0 for t in TASK_ORDER}
     for lid in db.get_all_listing_ids():
         listing = db.get_listing_by_id(lid)
@@ -108,7 +129,7 @@ def enqueue_missing(force: bool = False) -> dict:
             tasks.append("schools")
 
         meta = score_meta.get(lid)
-        needs_score = (
+        needs_score = not rescore_running and (
             bool(tasks)  # enrichment will change the data → rescore after
             or not meta
             or meta.get("evaluation_method") not in ("ai", "deterministic-gate")
@@ -117,9 +138,10 @@ def enqueue_missing(force: bool = False) -> dict:
         if needs_score:
             tasks.append("score")
         if tasks:
-            db.enqueue_jobs(lid, tasks, force=force)
-            for t in tasks:
-                counts[t] += 1
+            queued = db.enqueue_jobs(lid, tasks, force=force, requeue=True)
+            if queued:
+                for t in tasks:
+                    counts[t] += 1
     return counts
 
 
@@ -140,6 +162,10 @@ def _has_images(listing: dict) -> bool:
     try:
         return bool(json.loads(raw))
     except (json.JSONDecodeError, TypeError):
+        logger.warning(
+            f"Listing #{listing.get('id')}: unparseable image_urls_json "
+            f"({str(raw)[:80]!r}) — treating as no images"
+        )
         return False
 
 
@@ -161,6 +187,10 @@ def _handle_scrape_desc(listing: dict) -> None:
         if not url:
             raise RuntimeError("no listing URL and search found none")
 
+    # Space out scrapes — Redfin rate-limits bursts (same delay the legacy
+    # scrape-descriptions loop used)
+    time.sleep(2.0 + random.random())
+
     description, image_urls = scrape_listing_description(
         url,
         address=listing.get("address"),
@@ -169,10 +199,11 @@ def _handle_scrape_desc(listing: dict) -> None:
         zip_code=listing.get("zip_code"),
         mls_id=listing.get("mls_id"),
     )
-    if description and not listing.get("description"):
-        db.update_listing_description(listing["id"], url, description)
-    elif not listing.get("listing_url"):
-        db.update_listing_description(listing["id"], url, listing.get("description"))
+    # Persist the resolved URL and the best description we have; an existing
+    # description is never overwritten by a (possibly worse) rescrape
+    db.update_listing_description(
+        listing["id"], url, listing.get("description") or description,
+    )
     if image_urls:
         db.add_listing_images(listing["id"], image_urls)
     if not description and not image_urls and not listing.get("description"):
@@ -183,15 +214,21 @@ _STATS_FIELDS = ("price", "bedrooms", "bathrooms", "sqft", "year_built", "list_d
 
 
 def _handle_stats(listing: dict) -> None:
-    """Backfill structured fields from the listing page, falling back to the description."""
+    """Backfill structured fields from the listing page, description, or OneKeyMLS."""
     import httpx
-    from app.parsers.onehome import _extract_property_stats
+    from app.parsers.onehome import _extract_property_stats, scrape_listing_structured_data
 
     needed = [f for f in _STATS_FIELDS if listing.get(f) is None]
     if not needed:
         return
 
-    stats = None
+    merged: dict = {}
+
+    def _absorb(stats: dict | None) -> None:
+        for k, v in (stats or {}).items():
+            if k in _STATS_FIELDS and v is not None and k not in merged:
+                merged[k] = v
+
     url = listing.get("listing_url")
     if url:
         try:
@@ -200,20 +237,31 @@ def _handle_stats(listing: dict) -> None:
             }) as client:
                 resp = client.get(url)
                 if resp.status_code == 200:
-                    stats = _extract_property_stats(resp.text)
-        except Exception:
-            pass  # bot-blocked or unreachable — description fallback below
-    if not stats and listing.get("description"):
-        stats = _extract_property_stats(listing["description"])
-    if not stats:
-        raise RuntimeError("no structured stats extractable from page or description")
+                    _absorb(_extract_property_stats(resp.text))
+        except Exception as e:
+            logger.warning(
+                f"Listing #{listing['id']}: stats page fetch failed ({e}) — trying fallbacks"
+            )
 
-    fields = {
-        k: v for k, v in stats.items()
-        if k in _STATS_FIELDS and v is not None and listing.get(k) is None
-    }
-    if fields:
-        db.update_listing_fields_by_id(listing["id"], **fields)
+    # Per-field fallbacks: description text, then OneKeyMLS (server-rendered,
+    # reachable from cloud IPs where Redfin bot-blocks)
+    if listing.get("description") and any(f not in merged for f in needed):
+        _absorb(_extract_property_stats(listing["description"]))
+    if listing.get("address") and listing.get("town") and any(f not in merged for f in needed):
+        try:
+            _absorb(scrape_listing_structured_data(
+                listing["address"], listing["town"],
+                listing.get("state"), listing.get("zip_code"),
+            ))
+        except Exception as e:
+            logger.warning(f"Listing #{listing['id']}: OneKeyMLS stats fallback failed: {e}")
+
+    fields = {k: v for k, v in merged.items() if listing.get(k) is None}
+    if not fields:
+        raise RuntimeError(
+            f"no structured stats extractable (missing: {', '.join(needed)})"
+        )
+    db.update_listing_fields_by_id(listing["id"], **fields)
 
 
 def _handle_commute(listing: dict) -> None:
@@ -221,6 +269,8 @@ def _handle_commute(listing: dict) -> None:
 
     if listing.get("commute_minutes") is not None:
         return
+    if not settings.google_maps_api_key:
+        return  # not configured — leave the gap for when the key is set
     result = fetch_commute_time(
         listing.get("address"),
         listing.get("town"),
@@ -240,6 +290,8 @@ def _handle_schools(listing: dict) -> None:
 
     if listing.get("school_data_json"):
         return
+    if not settings.schooldigger_app_id or not settings.schooldigger_app_key:
+        return  # not configured — leave the gap for when the keys are set
     zip_code = listing.get("zip_code")
     if not zip_code:
         raise RuntimeError("no zip code — cannot fetch school data")
@@ -263,18 +315,19 @@ def _handle_score(listing: dict) -> None:
     if not criteria:
         raise RuntimeError("no active criteria — cannot score")
 
-    # Notify only on the first real scoring (new listing), not on rescores
-    prior = db.get_all_score_metadata().get(listing["id"])
-    first_real_score = not prior or prior.get("evaluation_method") not in ("ai", "deterministic-gate")
+    # Notify only for manual adds on their first real scoring — matching the
+    # old /listings/add behavior. CSV imports and gap-scan repairs of old
+    # listings must not burst-notify.
+    prior = db.get_score_metadata(listing["id"])
+    notify = (
+        listing.get("source_format") == "manual"
+        and (not prior or prior.get("evaluation_method") not in ("ai", "deterministic-gate"))
+    )
 
-    # Re-read: enrichment handlers in this drain updated the row
-    fresh = db.get_listing_by_id(listing["id"])
-    if not fresh:
-        return
-    score = _rescore_one_listing(fresh, criteria)
-    if first_real_score:
+    score = _rescore_one_listing(listing, criteria)
+    if notify:
         from app.notifier import notify_new_listing
-        notify_new_listing(fresh, score.score, score.verdict, score.evaluation_method)
+        notify_new_listing(listing, score.score, score.verdict, score.evaluation_method)
 
 
 _HANDLERS = {

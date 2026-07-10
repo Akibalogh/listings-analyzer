@@ -101,12 +101,13 @@ def _scheduled_poll_loop(interval_hours: int):
         except Exception:
             logger.exception("Scheduled prune-sold failed")
 
-        # Repair data gaps and drain the persistent job queue
+        # Repair data gaps and drain the persistent job queue. kick() (not a
+        # blocking drain) so a large backlog can't starve the next Gmail poll.
         try:
             enqueued = jobs.enqueue_missing()
             if any(enqueued.values()):
                 logger.info(f"Scheduled gap scan enqueued: {enqueued}")
-            jobs.drain()
+            jobs.kick()
         except Exception:
             logger.exception("Scheduled job drain failed")
 

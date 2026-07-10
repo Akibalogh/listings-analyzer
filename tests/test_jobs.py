@@ -123,6 +123,18 @@ class TestRetry:
         assert reset == 1
         assert db.job_counts()["by_status"] == {"pending": 1}
 
+    def test_orphan_on_final_attempt_goes_to_failed_not_zombie_pending(self, temp_db):
+        """A job interrupted mid-run on its last attempt must land in 'failed' —
+        a pending row at max attempts would be unclaimable forever."""
+        lid = _make_listing()
+        db.enqueue_jobs(lid, ["commute"])
+        for _ in range(db.JOB_MAX_ATTEMPTS - 1):
+            claimed = db.claim_pending_jobs()
+            db.fail_job(claimed[0]["id"], "boom")
+        db.claim_pending_jobs()  # final attempt, now 'running' at max attempts
+        db.reset_running_jobs()  # simulated crash/deploy
+        assert db.job_counts()["by_status"] == {"failed": 1}
+
 
 class TestDrain:
     def test_drain_processes_and_completes(self, temp_db, monkeypatch):
@@ -138,7 +150,7 @@ class TestDrain:
         assert ran == ["commute", "score"]
         assert db.job_counts()["by_status"] == {"done": 2}
 
-    def test_drain_records_failures(self, temp_db, monkeypatch):
+    def test_drain_retries_on_later_drains_not_immediately(self, temp_db, monkeypatch):
         lid = _make_listing()
         db.enqueue_jobs(lid, ["commute"])
 
@@ -146,10 +158,13 @@ class TestDrain:
             raise RuntimeError("no route found")
 
         monkeypatch.setattr(jobs, "_HANDLERS", {"commute": boom})
-        result = jobs.drain()
-        assert result["processed"] == 0
-        assert result["failed"] == db.JOB_MAX_ATTEMPTS  # immediate retries within one drain
-        assert db.job_counts()["by_status"] == {"failed": 1}
+        # One attempt per drain — transient failures aren't burned back-to-back
+        for expected_status in ("pending", "pending", "failed"):
+            result = jobs.drain()
+            assert result == {"processed": 0, "failed": 1}
+            assert db.job_counts()["by_status"] == {expected_status: 1}
+        # Attempts exhausted — nothing left to claim
+        assert jobs.drain() == {"processed": 0, "failed": 0}
 
     def test_drain_skips_deleted_listings(self, temp_db, monkeypatch):
         lid = _make_listing()
@@ -173,6 +188,50 @@ class TestEnqueueMissing:
         pending = db.job_counts()["by_status"]["pending"]
         assert pending == 5
 
+    def test_gap_scan_resurrects_done_jobs_while_gap_persists(self, temp_db):
+        """A done job must not block repair when its data gap still exists."""
+        lid = _make_listing(listing_url="https://www.redfin.com/NY/T/1-Test-St/home/1")
+        jobs.enqueue_missing()
+        # Simulate every job running but producing nothing (done, gap remains).
+        # Two claim rounds: 'score' is deferred until its siblings settle.
+        for _ in range(2):
+            for job in db.claim_pending_jobs(limit=50):
+                db.complete_job(job["id"])
+        assert db.job_counts()["by_status"] == {"done": 5}
+        counts = jobs.enqueue_missing()
+        assert counts["scrape_desc"] == 1
+        assert db.job_counts()["by_status"]["pending"] == 5
+
+    def test_gap_scan_gives_failed_jobs_one_attempt_per_scan(self, temp_db):
+        lid = _make_listing(listing_url="https://www.redfin.com/NY/T/1-Test-St/home/1")
+        db.enqueue_jobs(lid, ["commute"])
+        for _ in range(db.JOB_MAX_ATTEMPTS):
+            claimed = db.claim_pending_jobs()
+            db.fail_job(claimed[0]["id"], "boom")
+        assert db.job_counts()["by_task"]["commute"] == {"failed": 1}
+        jobs.enqueue_missing()
+        # Resurrected with exactly one attempt left
+        assert db.job_counts()["by_task"]["commute"] == {"pending": 1}
+        claimed = [j for j in db.claim_pending_jobs(limit=50) if j["task_type"] == "commute"]
+        assert len(claimed) == 1
+        db.fail_job(claimed[0]["id"], "boom again")
+        assert db.job_counts()["by_task"]["commute"] == {"failed": 1}
+
+    def test_gap_scan_skips_score_during_active_rescore(self, temp_db, monkeypatch):
+        _make_listing(listing_url="https://www.redfin.com/NY/T/1-Test-St/home/1")
+        monkeypatch.setitem(db.rescore_state, "in_progress", True)
+        counts = jobs.enqueue_missing()
+        assert counts["score"] == 0
+        assert counts["scrape_desc"] == 1  # enrichment still enqueued
+
+    def test_gap_scan_deletes_orphan_jobs(self, temp_db):
+        lid = _make_listing()
+        db.enqueue_jobs(lid, ["commute"])
+        with db.get_connection() as conn:
+            conn.cursor().execute("DELETE FROM listings WHERE id = ?", (lid,))
+        jobs.enqueue_missing()
+        assert db.job_counts()["by_status"] == {}
+
     def test_complete_listing_gets_no_jobs(self, temp_db):
         lid = _make_listing(
             price=1_000_000, sqft=3000, bedrooms=4, bathrooms=3, year_built=1990,
@@ -191,6 +250,32 @@ class TestEnqueueMissing:
         )
         counts = jobs.enqueue_missing()
         assert all(v == 0 for v in counts.values()), counts
+
+
+class TestScoreNotification:
+    def _score_listing(self, lid, monkeypatch):
+        from unittest.mock import MagicMock
+        scored = MagicMock()
+        scored.score, scored.verdict, scored.evaluation_method = 80, "Worth Touring", "ai"
+        rescore = MagicMock(return_value=scored)
+        notify = MagicMock()
+        monkeypatch.setattr("app.main._rescore_one_listing", rescore)
+        monkeypatch.setattr("app.notifier.notify_new_listing", notify)
+        db.save_criteria("test criteria", created_by="test")
+        jobs._handle_score(db.get_listing_by_id(lid))
+        return notify
+
+    def test_manual_add_first_score_notifies(self, temp_db, monkeypatch):
+        lid = _make_listing(source_format="manual")
+        notify = self._score_listing(lid, monkeypatch)
+        notify.assert_called_once()
+
+    def test_csv_import_never_notifies(self, temp_db, monkeypatch):
+        """The old import path scored without notifying — a 59-row CSV must not
+        burst-send Slack messages."""
+        lid = _make_listing(source_format="redfin-csv")
+        notify = self._score_listing(lid, monkeypatch)
+        notify.assert_not_called()
 
 
 class TestDeterministicGate:
