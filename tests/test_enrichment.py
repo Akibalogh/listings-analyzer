@@ -1865,20 +1865,25 @@ class TestEnrichmentLogging:
         assert "missing" in caplog.text.lower()
         assert "state" in caplog.text.lower()
 
-    def test_fetch_commute_time_logs_missing_address(self, caplog):
+    def test_fetch_commute_time_logs_missing_address(self, caplog, monkeypatch):
         """fetch_commute_time should log WARNING when address is missing."""
+        from app.config import settings
         from app.enrichment import fetch_commute_time
-        
+
+        # A configured API key is required to reach the missing-field check
+        monkeypatch.setattr(settings, "google_maps_api_key", "test-key")
         result = fetch_commute_time(address=None, town="Pleasantville", state="NY", zip_code="10570")
-        
+
         assert result is None
         assert "missing address" in caplog.text.lower()
         assert "WARNING" in caplog.text
 
-    def test_fetch_commute_time_logs_missing_town(self, caplog):
+    def test_fetch_commute_time_logs_missing_town(self, caplog, monkeypatch):
         """fetch_commute_time should log WARNING when town is missing."""
+        from app.config import settings
         from app.enrichment import fetch_commute_time
 
+        monkeypatch.setattr(settings, "google_maps_api_key", "test-key")
         result = fetch_commute_time(address="31 Pierce", town=None, state="NY", zip_code="10570")
 
         assert result is None

@@ -4,6 +4,22 @@ All notable changes to Listings Analyzer are documented here.
 
 ---
 
+## [2026-07-10] — Retire legacy scrape endpoint, green test suite
+
+### Removed
+- **`POST /manage/scrape-descriptions` (+ `/status`)** — fully superseded by the
+  job queue's `scrape_desc`/`stats` handlers and the hourly gap scan. Use
+  `POST /manage/backfill-jobs` instead. (`/manage/enrich` stays: its property
+  tax / flood zone / station lookups aren't queue tasks yet.)
+
+### Fixed
+- **Test suite is green (707 passed, 0 failed)** — updated 9 stale contract
+  tests (model default now Haiku, GFB prompt redesign, /listings/add 422
+  contracts, commute-logging needed an API key patched, batch max_tokens),
+  deleted 8 tests of the removed endpoint.
+
+---
+
 ## [2026-07-09] — Persistent job queue for background work
 
 ### Added
