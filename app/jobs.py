@@ -119,7 +119,9 @@ def enqueue_missing(force: bool = False) -> dict:
         tasks = []
         if not listing.get("description") or not _has_images(listing):
             tasks.append("scrape_desc")
-        core_stats = ("price", "sqft", "bedrooms", "bathrooms", "year_built")
+        # Core fields only — year_built/list_date are often unpublished, and
+        # re-scanning for them every tick would refetch pages for nothing
+        core_stats = ("price", "sqft", "bedrooms", "bathrooms")
         if (any(listing.get(f) is None for f in core_stats)
                 and (listing.get("listing_url") or listing.get("description"))):
             tasks.append("stats")
@@ -257,11 +259,20 @@ def _handle_stats(listing: dict) -> None:
             logger.warning(f"Listing #{listing['id']}: OneKeyMLS stats fallback failed: {e}")
 
     fields = {k: v for k, v in merged.items() if listing.get(k) is None}
-    if not fields:
+    if fields:
+        db.update_listing_fields_by_id(listing["id"], **fields)
+        return
+    # Fail (and retry) only when core scoring fields are still missing —
+    # year_built/list_date/lot_acres are often simply unpublished, and
+    # failing over them buries real errors in noise
+    core_missing = [f for f in ("price", "bedrooms", "bathrooms", "sqft") if listing.get(f) is None]
+    if core_missing:
         raise RuntimeError(
-            f"no structured stats extractable (missing: {', '.join(needed)})"
+            f"no structured stats extractable (missing core: {', '.join(core_missing)})"
         )
-    db.update_listing_fields_by_id(listing["id"], **fields)
+    logger.info(
+        f"Listing #{listing['id']}: optional stats unpublished ({', '.join(needed)}) — done"
+    )
 
 
 def _handle_commute(listing: dict) -> None:
