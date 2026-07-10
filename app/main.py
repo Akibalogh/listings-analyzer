@@ -5,6 +5,7 @@ import logging
 import threading
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
@@ -100,6 +101,18 @@ def _scheduled_poll_loop(interval_hours: int):
         except Exception:
             logger.exception("Scheduled prune-sold failed")
 
+        # Weekly Redfin search sync: discover listings the email alerts missed
+        try:
+            if _search_sync_due():
+                from app.poller import sync_search
+                report = sync_search()
+                db.set_app_state(
+                    "last_search_sync", datetime.now(timezone.utc).isoformat()
+                )
+                logger.info(f"Weekly search sync: {report}")
+        except Exception:
+            logger.exception("Weekly search sync failed")
+
         # Repair data gaps and drain the persistent job queue. kick() (not a
         # blocking drain) so a large backlog can't starve the next Gmail poll.
         try:
@@ -109,6 +122,21 @@ def _scheduled_poll_loop(interval_hours: int):
             jobs.kick()
         except Exception:
             logger.exception("Scheduled job drain failed")
+
+
+def _search_sync_due() -> bool:
+    """True when the last search sync is older than the configured interval."""
+    interval_days = settings.search_sync_interval_days
+    if interval_days <= 0 or not settings.redfin_search_url:
+        return False
+    last = db.get_app_state("last_search_sync")
+    if not last:
+        return True
+    try:
+        last_dt = datetime.fromisoformat(last)
+    except ValueError:
+        return True
+    return datetime.now(timezone.utc) - last_dt >= timedelta(days=interval_days)
 
 
 @asynccontextmanager
@@ -1441,6 +1469,23 @@ def manage_poll(request: Request):
         "listings_processed": len(results),
         "results": results,
     }
+
+
+@app.post("/manage/sync-search")
+def manage_sync_search(request: Request):
+    """Run the Redfin search sync now (the scheduler runs it weekly).
+
+    Scrapes the configured filter, adds unseen listings, and queues their
+    enrichment + scoring. Protected by MANAGE_KEY.
+    """
+    key = request.headers.get("x-manage-key", "")
+    if not settings.manage_key or key != settings.manage_key:
+        raise HTTPException(status_code=403, detail="Invalid or missing management key")
+
+    from app.poller import sync_search
+    report = sync_search()
+    db.set_app_state("last_search_sync", datetime.now(timezone.utc).isoformat())
+    return report
 
 
 @app.get("/manage/jobs")

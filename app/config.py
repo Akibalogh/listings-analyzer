@@ -48,6 +48,17 @@ class Settings(BaseSettings):
     # deterministically before any AI call (mirrors criteria hard requirements)
     commute_hard_limit_minutes: int = 110
 
+    # Redfin saved-search filter scraped by the weekly search sync.
+    # Override via REDFIN_SEARCH_URL when the filter changes.
+    redfin_search_url: str = (
+        "https://www.redfin.com/city/30738/NY/Yorktown/filter/"
+        "dyos-shape-id=98684490,property-type=house,min-price=1M,max-price=2.25M,"
+        "min-beds=4,min-sqft=2.25k-sqft,min-parking=1,basement-type=finished+unfinished"
+    )
+
+    # Days between search syncs (0 = disabled)
+    search_sync_interval_days: int = 7
+
     # SchoolDigger API (free dev tier: 20 calls/day)
     schooldigger_app_id: str = ""
     schooldigger_app_key: str = ""

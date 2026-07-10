@@ -326,12 +326,13 @@ def _handle_score(listing: dict) -> None:
     if not criteria:
         raise RuntimeError("no active criteria — cannot score")
 
-    # Notify only for manual adds on their first real scoring — matching the
-    # old /listings/add behavior. CSV imports and gap-scan repairs of old
-    # listings must not burst-notify.
+    # Notify on first real scoring for manual adds and weekly-search finds —
+    # the point of the search sync is hearing about new matches. CSV imports
+    # and gap-scan repairs of old listings must not burst-notify. (The
+    # notifier itself gates on Worth Touring / Strong Match.)
     prior = db.get_score_metadata(listing["id"])
     notify = (
-        listing.get("source_format") == "manual"
+        listing.get("source_format") in ("manual", "redfin-sync")
         and (not prior or prior.get("evaluation_method") not in ("ai", "deterministic-gate"))
     )
 
