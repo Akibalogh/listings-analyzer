@@ -4,6 +4,31 @@ All notable changes to Listings Analyzer are documented here.
 
 ---
 
+## [2026-07-09] — Persistent job queue for background work
+
+### Added
+- **`jobs` table + `app/jobs.py`** — enrichment and scoring now run as persistent,
+  idempotent jobs (`scrape_desc`, `stats`, `commute`, `schools`, `score`) that
+  survive deploys and crashes. Startup requeues jobs orphaned mid-run; the hourly
+  scheduler scans all listings for data gaps, enqueues repairs, and drains the
+  queue — the system converges on complete data without manual backfill calls.
+- **`GET /manage/jobs`** — queue counts by status and task type.
+- **`POST /manage/backfill-jobs`** — on-demand gap scan + drain (`?force=true`
+  re-queues jobs that exhausted their 3 retry attempts).
+- **Deterministic commute gate** — commute over `COMMUTE_HARD_LIMIT_MINUTES`
+  (default 110) rejects in code before any AI call: reproducible, free, and
+  applied in both sequential and batch scoring paths.
+- **`tests/test_jobs.py`** — 16 tests covering enqueue idempotency, claim/retry
+  semantics, score-after-enrichment deferral, orphan recovery, drain, gap
+  detection, and the commute gate.
+
+### Changed
+- **`/listings/add` and `/manage/import-csv`** no longer spawn bespoke daemon
+  threads — they enqueue the standard job pipeline and return. Slack
+  notification now fires on a listing's first real scoring only.
+
+---
+
 ## [2026-04-13] — Jina parser improvements
 
 ### Fixed
