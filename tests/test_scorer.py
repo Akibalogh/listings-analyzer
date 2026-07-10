@@ -218,7 +218,7 @@ class TestBatchHelpers:
         assert req["custom_id"] == "listing_42"
         assert "params" in req
         params = req["params"]
-        assert params["max_tokens"] == 2048
+        assert params["max_tokens"] == 4096
         assert "system" in params
         assert "messages" in params
         assert len(params["messages"]) == 1
@@ -486,11 +486,12 @@ class TestImageHintBlocks:
 class TestModelConfig:
     """Tests for AI model configuration."""
 
-    def test_default_model_is_opus(self):
-        """Scoring should use Opus by default for best reasoning quality."""
+    def test_default_model_is_haiku(self):
+        """Scoring defaults to Haiku — sufficient for structured criteria
+        matching and ~15x cheaper than Opus (changed 2026-07-09)."""
         from app.config import Settings
-        s = Settings()
-        assert s.ai_eval_model == "claude-opus-4-6"
+        s = Settings(_env_file=None)
+        assert s.ai_eval_model == "claude-haiku-4-5-20251001"
 
     def test_system_prompt_no_conditional_verdicts(self):
         """System prompt must forbid conditional verdicts like 'X if Y; otherwise Z'."""
@@ -507,32 +508,29 @@ class TestModelConfig:
 
 
 class TestGFBInference:
-    """Tests for GFB (ground-floor bedroom) 4-signal inference in system prompt."""
+    """Tests for the GFB (ground-floor bedroom) nice-to-have section in the system prompt."""
 
     def test_gfb_section_present_in_prompt(self):
-        """System prompt must contain GFB inference instructions."""
+        """System prompt must contain the GFB nice-to-have section."""
         blocks = _build_system_prompt()
         prompt = blocks[0]["text"]
-        assert "GROUND-FLOOR BEDROOM INFERENCE" in prompt
+        assert "GROUND-FLOOR BEDROOM — NICE-TO-HAVE" in prompt
 
-    def test_gfb_four_signals_present(self):
-        """System prompt must describe all 4 inference signals."""
+    def test_gfb_is_not_a_hard_criterion(self):
+        """GFB absence must not reject: it's a convenience with a stair-lift alternative."""
         blocks = _build_system_prompt()
         prompt = blocks[0]["text"]
-        assert "FLOOR PLAN IMAGES" in prompt
-        assert "DESCRIPTION TEXT" in prompt
-        assert "PHOTO EXAMINATION" in prompt
-        assert "PROPERTY TYPE" in prompt
+        assert "NOT A HARD CRITERION" in prompt
+        assert "stair lift" in prompt.lower()
 
-    def test_gfb_commit_instruction_present(self):
-        """Prompt must instruct Opus to commit at 60%+ confidence rather than defaulting unknown."""
+    def test_gfb_bonus_range_stated(self):
+        """Prompt must bound the GFB bonus so it can't dominate the score."""
         blocks = _build_system_prompt()
         prompt = blocks[0]["text"]
-        assert "60%" in prompt
-        assert "commit" in prompt.lower()
+        assert "5-10 bonus points" in prompt
 
     def test_gfb_ranch_inference_rule(self):
-        """Ranch-style homes should be noted as always having GFB."""
+        """Ranch-style homes should be noted as a GFB signal."""
         blocks = _build_system_prompt()
         prompt = blocks[0]["text"]
         assert "ranch" in prompt.lower() or "Ranch" in prompt
@@ -544,11 +542,11 @@ class TestGFBInference:
         assert "first floor bedroom" in prompt.lower() or "first floor bedroom" in prompt
         assert "in-law" in prompt.lower()
 
-    def test_gfb_negative_signals_listed(self):
-        """Negative signals like 'all bedrooms upstairs' should be mentioned."""
+    def test_gfb_absence_never_triggers_reject(self):
+        """The prompt must say absence should not trigger a reject or major penalty."""
         blocks = _build_system_prompt()
         prompt = blocks[0]["text"]
-        assert "all bedrooms upstairs" in prompt.lower() or "bedrooms upstairs" in prompt.lower()
+        assert "should NOT trigger a reject" in prompt
 
     def test_enrichment_data_instructions_present(self):
         """Prompt should tell AI how to use age_condition and price_per_sqft_signal."""
