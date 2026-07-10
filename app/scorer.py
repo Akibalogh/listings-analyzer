@@ -472,7 +472,9 @@ def ai_score_listing(
         client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
         response = client.messages.create(
             model=settings.ai_eval_model,
-            max_tokens=2048,
+            # 2048 truncated mid-JSON on listings with rich scraped
+            # descriptions (unterminated-string parse failures)
+            max_tokens=4096,
             system=system_prompt,
             messages=[{"role": "user", "content": user_content}],
         )
@@ -569,7 +571,7 @@ def build_batch_request(
         "custom_id": custom_id,
         "params": {
             "model": settings.ai_eval_model,
-            "max_tokens": 2048,
+            "max_tokens": 4096,
             "system": system_prompt,
             "messages": [{"role": "user", "content": user_content}],
         },
