@@ -200,14 +200,28 @@ def sync_search(max_pages: int = 5) -> dict:
     pages_fetched = 0
     errors: list[str] = []
 
+    def _fetch_page(page_url: str) -> str | None:
+        """Direct fetch first (Redfin SSRs the result list; occasionally works
+        from cloud IPs), then Jina Reader (authenticated if a key is set)."""
+        with httpx.Client(timeout=60, follow_redirects=True,
+                          headers={"User-Agent": _browser_ua}) as client:
+            try:
+                resp = client.get(page_url)
+                if resp.status_code == 200 and "/home/" in resp.text:
+                    return resp.text
+            except Exception as e:
+                logger.info(f"Search sync: direct fetch failed ({e}), trying Jina")
+            jina_headers = {"User-Agent": _browser_ua}
+            if settings.jina_api_key:
+                jina_headers["Authorization"] = f"Bearer {settings.jina_api_key}"
+            resp = client.get(f"https://r.jina.ai/{page_url}", headers=jina_headers)
+            resp.raise_for_status()
+            return resp.text
+
     for page in range(1, max_pages + 1):
         page_url = search_url if page == 1 else f"{search_url}/page-{page}"
         try:
-            with httpx.Client(timeout=60, follow_redirects=True,
-                              headers={"User-Agent": _browser_ua}) as client:
-                resp = client.get(f"https://r.jina.ai/{page_url}")
-                resp.raise_for_status()
-                body = resp.text
+            body = _fetch_page(page_url)
         except Exception as e:
             logger.error(f"Search sync: page {page} fetch failed: {e}")
             errors.append(f"page {page}: {e}")

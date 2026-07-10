@@ -59,6 +59,10 @@ class Settings(BaseSettings):
     # Days between search syncs (0 = disabled)
     search_sync_interval_days: int = 7
 
+    # Jina Reader API key (optional) — unauthenticated r.jina.ai is rate-limited
+    # per IP, which heavy scrape days can exhaust
+    jina_api_key: str = ""
+
     # SchoolDigger API (free dev tier: 20 calls/day)
     schooldigger_app_id: str = ""
     schooldigger_app_key: str = ""
