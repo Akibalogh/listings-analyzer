@@ -417,7 +417,8 @@ class TestAddListingFromUrl:
 
     @patch("httpx.Client")
     def test_rejects_ratelimited_redfin(self, mock_client_cls, authed_client):
-        """Redfin rate-limit redirect returns 429 instead of saving empty listing."""
+        """An unresolvable rate-limited short URL returns 422 with guidance to
+        use the full listing URL (Jina fallback exhausted, no address given)."""
         mock_response = MagicMock()
         mock_response.url = "https://ratelimited.redfin.com/"
         mock_client = MagicMock()
@@ -427,8 +428,8 @@ class TestAddListingFromUrl:
         mock_client_cls.return_value = mock_client
 
         res = authed_client.post("/listings/add", json={"url": "https://redf.in/abc"})
-        assert res.status_code == 429
-        assert "rate-limited" in res.json()["detail"].lower()
+        assert res.status_code == 422
+        assert "could not be resolved" in res.json()["detail"].lower()
 
     @patch("app.main.db.get_active_criteria", return_value=None)
     @patch("app.main.db.save_listing", return_value=80)
@@ -486,7 +487,8 @@ class TestAddListingFromUrl:
         self, mock_client_cls, mock_save_email, mock_save_listing,
         mock_criteria, authed_client
     ):
-        """Non-Redfin URL without parseable address still creates a listing."""
+        """A URL yielding no parseable address is rejected instead of silently
+        creating a blank listing."""
         mock_response = MagicMock()
         mock_response.url = "https://www.zillow.com/homedetails/123"
         mock_response.status_code = 200
@@ -499,10 +501,9 @@ class TestAddListingFromUrl:
         mock_client_cls.return_value = mock_client
 
         res = authed_client.post("/listings/add", json={"url": "https://www.zillow.com/homedetails/123"})
-        assert res.status_code == 200
-        data = res.json()
-        assert data["listing_id"] == 60
-        assert data["address"] is None
+        assert res.status_code == 422
+        assert "could not extract address" in res.json()["detail"].lower()
+        mock_save_listing.assert_not_called()
 
 
 class TestTourRequest:
@@ -704,183 +705,6 @@ class TestManageEndpoint:
         mock_settings.manage_key = "test-secret-key"
         res = client.post("/manage/sync-criteria", headers={"x-manage-key": "test-secret-key"})
         assert res.status_code == 404
-
-
-class TestManageScrapeDescriptions:
-    """Tests for POST /manage/scrape-descriptions."""
-
-    def test_scrape_descriptions_rejects_missing_key(self, client):
-        res = client.post("/manage/scrape-descriptions")
-        assert res.status_code == 403
-
-    def test_scrape_descriptions_rejects_wrong_key(self, client):
-        res = client.post("/manage/scrape-descriptions", headers={"x-manage-key": "wrong"})
-        assert res.status_code == 403
-
-    @patch("app.main.db.get_all_listing_ids", return_value=[])
-    @patch("app.main.settings")
-    def test_scrape_descriptions_empty_db(self, mock_settings, mock_ids, client):
-        mock_settings.manage_key = "test-key"
-        res = client.post("/manage/scrape-descriptions", headers={"x-manage-key": "test-key"})
-        assert res.status_code == 200
-        data = res.json()
-        assert data["listings_checked"] == 0
-        assert data["descriptions_scraped"] == 0
-        assert data["skipped"] == 0
-
-    @patch("app.main.db.get_active_criteria", return_value=None)
-    @patch("app.main.db.update_listing_description")
-    @patch("app.parsers.onehome.scrape_listing_description", return_value=("Beautiful 4BR colonial", ["https://img.com/1.jpg"]))
-    @patch("app.main.db.add_listing_images")
-    @patch("app.main.db.get_listing_by_id", return_value={
-        "id": 1, "address": "10 Test St", "town": "Rye", "state": "NY",
-        "zip_code": "10573", "mls_id": "123456",
-        "listing_url": "https://example.com/listing", "description": None,
-        "year_built": 2000, "lot_acres": 0.5,
-    })
-    @patch("app.main.db.get_all_listing_ids", return_value=[1])
-    @patch("app.main.settings")
-    def test_scrape_descriptions_scrapes_one(
-        self, mock_settings, mock_ids, mock_get, mock_add_imgs, mock_scrape,
-        mock_update, mock_criteria, client,
-    ):
-        mock_settings.manage_key = "test-key"
-        res = client.post("/manage/scrape-descriptions", headers={"x-manage-key": "test-key"})
-        assert res.status_code == 200
-        data = res.json()
-        assert data["descriptions_scraped"] == 1
-        assert data["images_found"] == 1
-        mock_update.assert_called_once_with(1, "https://example.com/listing", "Beautiful 4BR colonial")
-        mock_add_imgs.assert_called_once()
-
-    @patch("app.main.db.get_listing_by_id", return_value={
-        "id": 2, "address": "20 Test", "listing_url": None, "description": None,
-        "year_built": 2000, "lot_acres": 0.5,
-    })
-    @patch("app.main.db.get_all_listing_ids", return_value=[2])
-    @patch("app.main.settings")
-    def test_scrape_descriptions_skips_no_url_no_town(self, mock_settings, mock_ids, mock_get, client):
-        """No URL and no town — can't search DDG, so skipped."""
-        mock_settings.manage_key = "test-key"
-        res = client.post("/manage/scrape-descriptions", headers={"x-manage-key": "test-key"})
-        assert res.status_code == 200
-        data = res.json()
-        assert data["skipped"] == 1
-        assert data["descriptions_scraped"] == 0
-
-    @patch("app.parsers.onehome._search_redfin_url", return_value="https://www.redfin.com/NY/Scarsdale/196-Old-Army-Rd-10583/home/123")
-    @patch("app.main.db.get_connection")
-    @patch("app.main.db._placeholder", return_value="?")
-    @patch("app.parsers.onehome.scrape_listing_description", return_value=("Nice house", ["img1.jpg"]))
-    @patch("app.main.db.update_listing_description")
-    @patch("app.main.db.add_listing_images")
-    @patch("app.main.db.get_listing_by_id", return_value={
-        "id": 5, "address": "196 Old Army Rd", "town": "Scarsdale",
-        "state": "NY", "zip_code": "10583", "mls_id": None,
-        "listing_url": None, "description": None,
-        "year_built": 2000, "lot_acres": 0.5,
-    })
-    @patch("app.main.db.get_all_listing_ids", return_value=[5])
-    @patch("app.main.settings")
-    def test_scrape_descriptions_finds_url_via_ddg(
-        self, mock_settings, mock_ids, mock_get, mock_add_imgs,
-        mock_update, mock_scrape, mock_ph, mock_conn, mock_ddg, client
-    ):
-        """Listings without URL get one via DDG search, then get scraped."""
-        mock_settings.manage_key = "test-key"
-        mock_cur = mock_conn.return_value.__enter__.return_value.cursor.return_value
-        res = client.post("/manage/scrape-descriptions", headers={"x-manage-key": "test-key"})
-        assert res.status_code == 200
-        data = res.json()
-        assert data["urls_found"] == 1
-        assert data["descriptions_scraped"] == 1
-
-    @patch("app.main.db.get_listing_by_id", return_value={
-        "id": 3, "address": "30 Test", "listing_url": "https://example.com",
-        "description": "Already has a description",
-        "year_built": 2000, "lot_acres": 0.5,
-    })
-    @patch("app.main.db.get_all_listing_ids", return_value=[3])
-    @patch("app.main.settings")
-    def test_scrape_descriptions_skips_existing_description(self, mock_settings, mock_ids, mock_get, client):
-        mock_settings.manage_key = "test-key"
-        res = client.post("/manage/scrape-descriptions", headers={"x-manage-key": "test-key"})
-        assert res.status_code == 200
-        data = res.json()
-        assert data["skipped"] == 1
-        assert data["descriptions_scraped"] == 0
-
-    @patch("app.main._start_rescore")
-    @patch("app.main.db.get_active_criteria", return_value={"version": 5, "instructions": "criteria"})
-    @patch("app.main.db.update_listing_description")
-    @patch("app.parsers.onehome.scrape_listing_description", return_value=("New description", []))
-    @patch("app.main.db.get_listing_by_id", return_value={
-        "id": 1, "address": "10 Test", "listing_url": "https://example.com",
-        "description": None, "town": "Rye", "state": "NY", "zip_code": "10573", "mls_id": "999",
-        "year_built": 2000, "lot_acres": 0.5,
-    })
-    @patch("app.main.db.get_all_listing_ids", return_value=[1])
-    @patch("app.main.settings")
-    def test_scrape_descriptions_triggers_rescore(
-        self, mock_settings, mock_ids, mock_get, mock_scrape, mock_update,
-        mock_criteria, mock_rescore, client,
-    ):
-        mock_settings.manage_key = "test-key"
-        res = client.post("/manage/scrape-descriptions", headers={"x-manage-key": "test-key"})
-        assert res.status_code == 200
-        data = res.json()
-        assert data["rescore_started"] is True
-        mock_rescore.assert_called_once()
-
-    @patch("app.main.db.get_active_criteria", return_value=None)
-    @patch("app.parsers.onehome.scrape_listing_description", side_effect=Exception("Network error"))
-    @patch("app.main.db.get_listing_by_id", return_value={
-        "id": 1, "address": "10 Test", "listing_url": "https://example.com",
-        "description": None, "town": "Rye", "state": "NY", "zip_code": "10573", "mls_id": "111",
-        "price": 1000000, "year_built": 2000, "lot_acres": 0.5,
-    })
-    @patch("app.main.db.get_all_listing_ids", return_value=[1])
-    @patch("app.main.settings")
-    def test_scrape_descriptions_handles_errors(
-        self, mock_settings, mock_ids, mock_get, mock_scrape, mock_criteria, client,
-    ):
-        mock_settings.manage_key = "test-key"
-        res = client.post("/manage/scrape-descriptions", headers={"x-manage-key": "test-key"})
-        assert res.status_code == 200
-        data = res.json()
-        assert data["descriptions_scraped"] == 0
-        assert len(data["errors"]) == 1
-        assert "#1" in data["errors"][0]
-
-    @patch("app.main.db.get_active_criteria", return_value=None)
-    @patch("app.main.db.update_listing_fields_by_id")
-    @patch("app.parsers.onehome.scrape_listing_structured_data", return_value={
-        "price": 1499000, "bedrooms": 4, "bathrooms": 3, "sqft": 2800,
-    })
-    @patch("app.main.db.get_listing_by_id")
-    @patch("app.main.db.get_all_listing_ids", return_value=[10])
-    @patch("app.main.settings")
-    def test_scrape_descriptions_phase3_backfills_data(
-        self, mock_settings, mock_ids, mock_get, mock_structured, mock_update_fields,
-        mock_criteria, client,
-    ):
-        """Phase 3 backfills structured data for listings missing price/beds/baths/sqft."""
-        mock_settings.manage_key = "test-key"
-        # Listing has URL and description but no price/beds/baths/sqft
-        mock_get.return_value = {
-            "id": 10, "address": "19 Georgia Ln", "town": "Chappaqua",
-            "state": "NY", "zip_code": "10514", "mls_id": None,
-            "listing_url": "https://www.redfin.com/NY/Chappaqua/19-Georgia-Ln/home/123",
-            "description": "Nice house", "price": None, "bedrooms": None,
-            "bathrooms": None, "sqft": None, "year_built": 2000, "lot_acres": 0.5,
-        }
-        res = client.post("/manage/scrape-descriptions", headers={"x-manage-key": "test-key"})
-        assert res.status_code == 200
-        data = res.json()
-        assert data["data_backfilled"] == 1
-        mock_update_fields.assert_called_once_with(
-            10, price=1499000, bedrooms=4, bathrooms=3, sqft=2800,
-        )
 
 
 class TestManageEnrichEndpoint:
