@@ -33,7 +33,10 @@ PAGE_2 = """
 
 
 def _mock_jina(pages: list[str]):
-    """Return an httpx.Client mock whose .get yields the given page bodies in order."""
+    """Return an httpx.Client mock whose .get yields the given page bodies in order.
+
+    status_code=200 satisfies the direct-fetch path, so each page costs one get.
+    """
     client = MagicMock()
     client.__enter__ = MagicMock(return_value=client)
     client.__exit__ = MagicMock(return_value=False)
@@ -41,6 +44,7 @@ def _mock_jina(pages: list[str]):
     for body in pages:
         resp = MagicMock()
         resp.text = body
+        resp.status_code = 200
         resp.raise_for_status = MagicMock()
         responses.append(resp)
     client.get.side_effect = responses
@@ -153,9 +157,10 @@ class TestManageSyncSearchEndpoint:
         assert res.status_code == 403
 
     @patch("app.main.db.set_app_state")
-    @patch("app.poller.sync_search", return_value={"added": 3, "urls_found": 10})
+    @patch("app.poller.sync_search",
+           return_value={"pages_fetched": 2, "added": 3, "urls_found": 10})
     @patch("app.main.settings")
-    def test_triggers_sync(self, mock_settings, mock_sync, mock_state):
+    def test_triggers_sync_and_stamps(self, mock_settings, mock_sync, mock_state):
         mock_settings.manage_key = "test-key"
         client = TestClient(app)
         res = client.post("/manage/sync-search", headers={"x-manage-key": "test-key"})
@@ -163,3 +168,16 @@ class TestManageSyncSearchEndpoint:
         assert res.json()["added"] == 3
         mock_sync.assert_called_once()
         mock_state.assert_called_once()
+
+    @patch("app.main.db.set_app_state")
+    @patch("app.poller.sync_search",
+           return_value={"pages_fetched": 0, "added": 0, "errors": ["page 1: 403"]})
+    @patch("app.main.settings")
+    def test_total_failure_does_not_stamp(self, mock_settings, mock_sync, mock_state):
+        """A sync that fetched nothing must not consume the weekly slot —
+        the next hourly tick should retry."""
+        mock_settings.manage_key = "test-key"
+        client = TestClient(app)
+        res = client.post("/manage/sync-search", headers={"x-manage-key": "test-key"})
+        assert res.status_code == 200
+        mock_state.assert_not_called()

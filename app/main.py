@@ -106,9 +106,12 @@ def _scheduled_poll_loop(interval_hours: int):
             if _search_sync_due():
                 from app.poller import sync_search
                 report = sync_search()
-                db.set_app_state(
-                    "last_search_sync", datetime.now(timezone.utc).isoformat()
-                )
+                # Stamp only on success — a total failure (e.g. Jina rate
+                # limit) retries on the next hourly tick, not in a week
+                if report.get("pages_fetched", 0) > 0:
+                    db.set_app_state(
+                        "last_search_sync", datetime.now(timezone.utc).isoformat()
+                    )
                 logger.info(f"Weekly search sync: {report}")
         except Exception:
             logger.exception("Weekly search sync failed")
@@ -1484,7 +1487,8 @@ def manage_sync_search(request: Request):
 
     from app.poller import sync_search
     report = sync_search()
-    db.set_app_state("last_search_sync", datetime.now(timezone.utc).isoformat())
+    if report.get("pages_fetched", 0) > 0:
+        db.set_app_state("last_search_sync", datetime.now(timezone.utc).isoformat())
     return report
 
 
