@@ -82,6 +82,12 @@ class TestRedfinQueryParamStripping:
         + "?600390594=copy_variant&utm_source=ios_share&utm_medium=share&utm_nooverride=1"
     )
 
+    @pytest.fixture(autouse=True)
+    def _mock_job_queue(self):
+        """The endpoint enqueues background jobs — keep tests off the real DB."""
+        with patch("app.main.jobs.enqueue_listing"), patch("app.main.jobs.kick"):
+            yield
+
     # --- Pure-logic unit tests (no HTTP, no DB) ---
 
     def test_stripping_logic_removes_utm_params(self):

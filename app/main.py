@@ -11,7 +11,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
-from app import db
+from app import db, jobs
 from app.auth import (
     create_session_cookie,
     is_allowed_email,
@@ -101,6 +101,15 @@ def _scheduled_poll_loop(interval_hours: int):
         except Exception:
             logger.exception("Scheduled prune-sold failed")
 
+        # Repair data gaps and drain the persistent job queue
+        try:
+            enqueued = jobs.enqueue_missing()
+            if any(enqueued.values()):
+                logger.info(f"Scheduled gap scan enqueued: {enqueued}")
+            jobs.drain()
+        except Exception:
+            logger.exception("Scheduled job drain failed")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -115,6 +124,10 @@ async def lifespan(app: FastAPI):
         t.start()
     else:
         logger.info("Scheduled polling disabled (POLL_INTERVAL_HOURS=0)")
+
+    # Resume any jobs a previous deploy/crash orphaned (init_db already
+    # reset them to pending) without waiting for the first scheduler tick
+    jobs.kick()
 
     yield
 
@@ -619,12 +632,10 @@ async def scrape_listing(request: Request, listing_id: int):
 
 @app.post("/listings/add")
 async def add_listing_from_url(request: Request):
-    """Create a new listing from a URL. Scrapes, extracts data, and scores."""
-    import re
+    """Create a new listing from a URL, then queue enrichment + scoring jobs."""
     import httpx
-    from app.parsers.onehome import scrape_listing_description, _extract_property_stats
     from app.parsers.plaintext import REDFIN_URL_ADDR_RE
-    from app.enrichment import normalize_address, fetch_commute_time, fetch_school_data
+    from app.enrichment import normalize_address
     from app.models import ParsedListing, ScoringResult
 
     key = request.headers.get("x-manage-key", "")
@@ -767,111 +778,9 @@ async def add_listing_from_url(request: Request):
     )
     listing_id = db.save_listing(listing, placeholder_score, email_id, enrichment_initial)
 
-    # All slow I/O (scrape, structured data, enrichment, AI score) runs in background
-    def _enrich_and_score(lid: int, _url: str, _address: str | None, _town: str | None,
-                          _state: str | None, _zip: str | None, _address_key: str | None):
-        try:
-            # Scrape description + images
-            desc, imgs = scrape_listing_description(
-                _url, address=_address, town=_town, state=_state, zip_code=_zip,
-            )
-
-            # Extract structured data — try direct HTTP first, fall back to description text
-            price = beds = baths = sqft = year_built = list_date = lot_acres = None
-            try:
-                with httpx.Client(timeout=10, follow_redirects=True, headers={
-                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-                }) as client:
-                    page_resp = client.get(_url)
-                    if page_resp.status_code == 200:
-                        stats = _extract_property_stats(page_resp.text)
-                        if stats:
-                            price = stats.get("price")
-                            beds = stats.get("bedrooms")
-                            baths = stats.get("bathrooms")
-                            sqft = stats.get("sqft")
-                            year_built = stats.get("year_built")
-                            list_date = stats.get("list_date")
-                            lot_acres = stats.get("lot_acres")
-            except Exception:
-                pass
-
-            # Fallback: extract structured data from the description text if direct HTTP missed fields
-            if desc and not all([price, beds, baths, sqft]):
-                desc_stats = _extract_property_stats(desc)
-                if desc_stats:
-                    if not price: price = desc_stats.get("price")
-                    if not beds: beds = desc_stats.get("bedrooms")
-                    if not baths: baths = desc_stats.get("bathrooms")
-                    if not sqft: sqft = desc_stats.get("sqft")
-                    if not year_built: year_built = desc_stats.get("year_built")
-                    if not list_date: list_date = desc_stats.get("list_date")
-                    if not lot_acres: lot_acres = desc_stats.get("lot_acres")
-                    if any([price, beds, baths, sqft]):
-                        logger.info(f"Listing #{lid}: extracted stats from description fallback: "
-                                    f"price={price}, beds={beds}, baths={baths}, sqft={sqft}")
-
-            # Update listing with scraped data
-            fields = {k: v for k, v in {
-                "price": price, "bedrooms": beds, "bathrooms": baths,
-                "sqft": sqft, "year_built": year_built, "list_date": list_date,
-                "lot_acres": lot_acres,
-            }.items() if v is not None}
-            if desc or fields:
-                with db.get_connection() as conn:
-                    cur = conn.cursor()
-                    ph = db._placeholder()
-                    if desc:
-                        cur.execute(f"UPDATE listings SET description = {ph} WHERE id = {ph}", (desc, lid))
-                    for col, val in fields.items():
-                        cur.execute(f"UPDATE listings SET {col} = {ph} WHERE id = {ph}", (val, lid))
-                    conn.commit()
-            if imgs:
-                db.add_listing_images(lid, imgs)
-
-            # Enrichment
-            enrichment = {}
-            if _zip:
-                school_json = fetch_school_data(_zip, _state)
-                if school_json:
-                    enrichment["school_data_json"] = school_json
-            if _address and _town:
-                commute = fetch_commute_time(_address, _town, _state, _zip)
-                if commute:
-                    enrichment["commute_minutes"] = commute.get("commute_minutes")
-                    enrichment["commute_data_json"] = commute.get("commute_data_json")
-            if enrichment:
-                db.update_listing_fields_by_id(lid, force=True, **{
-                    k: v for k, v in enrichment.items()
-                    if k in {"commute_minutes"}
-                })
-                with db.get_connection() as conn:
-                    cur = conn.cursor()
-                    ph = db._placeholder()
-                    if "school_data_json" in enrichment:
-                        cur.execute(f"UPDATE listings SET school_data_json = {ph} WHERE id = {ph}",
-                                    (json.dumps(enrichment["school_data_json"]) if isinstance(enrichment["school_data_json"], dict) else enrichment["school_data_json"], lid))
-                    if "commute_data_json" in enrichment:
-                        cur.execute(f"UPDATE listings SET commute_data_json = {ph} WHERE id = {ph}",
-                                    (enrichment["commute_data_json"], lid))
-                    conn.commit()
-
-            # AI score
-            criteria = db.get_active_criteria()
-            if criteria:
-                saved = db.get_listing_by_id(lid)
-                if saved:
-                    score = _rescore_one_listing(saved, criteria)
-                    from app.notifier import notify_new_listing
-                    notify_new_listing(saved, score.score, score.verdict, score.evaluation_method)
-        except Exception as exc:
-            logger.error(f"Background enrich/score failed for listing #{lid}: {exc}")
-
-    threading.Thread(
-        target=_enrich_and_score,
-        args=(listing_id, resolved_url, address, town, state, zip_code, address_key),
-        daemon=True,
-    ).start()
+    # Queue enrichment + scoring — survives restarts, drained by scheduler too
+    jobs.enqueue_listing(listing_id)
+    jobs.kick()
 
     return {
         "listing_id": listing_id,
@@ -1214,6 +1123,23 @@ def _rescore_all(criteria_version: int, instructions: str):
                     if not listing:
                         continue
                     listing_data = _build_listing_data(listing)
+
+                    # Hard gates need no AI — score immediately, skip the batch
+                    from app.scorer import deterministic_gate
+                    gated = deterministic_gate(listing_data)
+                    if gated is not None:
+                        gated.criteria_version = criteria_version
+                        db.update_score(
+                            listing_id=lid,
+                            score=gated,
+                            method=gated.evaluation_method,
+                            criteria_version=criteria_version,
+                            reasoning=gated.reasoning,
+                        )
+                        scored_so_far += 1
+                        db.rescore_state["completed"] = skip_count + scored_so_far
+                        continue
+
                     image_urls = _get_image_urls(listing)
                     req = build_batch_request(
                         custom_id=f"listing_{lid}",
@@ -1515,6 +1441,33 @@ def manage_poll(request: Request):
         "listings_processed": len(results),
         "results": results,
     }
+
+
+@app.get("/manage/jobs")
+def manage_jobs_status(request: Request):
+    """Job queue summary: counts by status and task type. Protected by MANAGE_KEY."""
+    key = request.headers.get("x-manage-key", "")
+    if not settings.manage_key or key != settings.manage_key:
+        raise HTTPException(status_code=403, detail="Invalid or missing management key")
+    return db.job_counts()
+
+
+@app.post("/manage/backfill-jobs")
+def manage_backfill_jobs(request: Request):
+    """Scan listings for data gaps, enqueue repair jobs, and start a drain.
+
+    The hourly scheduler does this automatically; this endpoint is for
+    kicking it off on demand. ?force=true also re-queues jobs that
+    exhausted their retry attempts. Protected by MANAGE_KEY.
+    """
+    key = request.headers.get("x-manage-key", "")
+    if not settings.manage_key or key != settings.manage_key:
+        raise HTTPException(status_code=403, detail="Invalid or missing management key")
+
+    force = request.query_params.get("force", "").lower() == "true"
+    enqueued = jobs.enqueue_missing(force=force)
+    jobs.kick()
+    return {"enqueued": enqueued, "force": force, "drain": "started"}
 
 
 _GMAIL_OAUTH_SCOPES = [
@@ -3572,18 +3525,16 @@ async def manage_import_csv(request: Request):
 
     Accepts multipart form upload of a Redfin CSV. Creates listings with the
     structured data from the CSV (price, beds, baths, sqft, year_built, etc.),
-    deduplicates by address, then background-enriches each new listing
-    (scrape description/images, commute, schools, AI score).
+    deduplicates by address, then queues enrichment + scoring jobs for each
+    new listing (scrape description/images, commute, schools, AI score).
 
     Protected by MANAGE_KEY env var.
     """
     import csv
     import io
-    import math
 
-    from app.enrichment import normalize_address, fetch_commute_time, fetch_school_data
+    from app.enrichment import normalize_address
     from app.models import ParsedListing, ScoringResult
-    from app.parsers.onehome import scrape_listing_description, _extract_property_stats
 
     key = request.headers.get("x-manage-key", "")
     if not settings.manage_key or key != settings.manage_key:
@@ -3687,99 +3638,17 @@ async def manage_import_csv(request: Request):
         except Exception as e:
             errors.append({"address": row.get("ADDRESS", "?"), "error": str(e)})
 
-    def _background_enrich(listing_ids: list[int]):
-        import httpx
-        for lid in listing_ids:
-            try:
-                saved = db.get_listing_by_id(lid)
-                if not saved:
-                    continue
-                _url = saved.get("listing_url") or ""
-                _address = saved.get("address")
-                _town = saved.get("town")
-                _state = saved.get("state")
-                _zip = saved.get("zip_code")
-
-                desc, imgs = None, []
-                if _url:
-                    desc, imgs = scrape_listing_description(
-                        _url, address=_address, town=_town, state=_state, zip_code=_zip,
-                    )
-
-                price = beds = baths = sqft_s = year_b = list_d = lot_a = None
-                if _url:
-                    try:
-                        with httpx.Client(timeout=10, follow_redirects=True, headers={
-                            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-                        }) as client:
-                            page_resp = client.get(_url)
-                            if page_resp.status_code == 200:
-                                stats = _extract_property_stats(page_resp.text)
-                                if stats:
-                                    list_d = stats.get("list_date")
-                    except Exception:
-                        pass
-
-                with db.get_connection() as conn:
-                    cur = conn.cursor()
-                    ph = db._placeholder()
-                    if desc:
-                        cur.execute(f"UPDATE listings SET description = {ph} WHERE id = {ph}", (desc, lid))
-                    if list_d:
-                        cur.execute(f"UPDATE listings SET list_date = {ph} WHERE id = {ph}", (list_d, lid))
-                    conn.commit()
-
-                if imgs:
-                    db.add_listing_images(lid, imgs)
-
-                enrichment_data = {}
-                if _zip:
-                    school_json = fetch_school_data(_zip, _state)
-                    if school_json:
-                        enrichment_data["school_data_json"] = school_json
-                if _address and _town:
-                    commute = fetch_commute_time(_address, _town, _state, _zip)
-                    if commute:
-                        enrichment_data["commute_minutes"] = commute.get("commute_minutes")
-                        enrichment_data["commute_data_json"] = commute.get("commute_data_json")
-                if enrichment_data:
-                    db.update_listing_fields_by_id(lid, force=True, **{
-                        k: v for k, v in enrichment_data.items() if k == "commute_minutes"
-                    })
-                    with db.get_connection() as conn:
-                        cur = conn.cursor()
-                        ph = db._placeholder()
-                        if "school_data_json" in enrichment_data:
-                            cur.execute(
-                                f"UPDATE listings SET school_data_json = {ph} WHERE id = {ph}",
-                                (json.dumps(enrichment_data["school_data_json"])
-                                 if isinstance(enrichment_data["school_data_json"], dict)
-                                 else enrichment_data["school_data_json"], lid),
-                            )
-                        if "commute_data_json" in enrichment_data:
-                            cur.execute(
-                                f"UPDATE listings SET commute_data_json = {ph} WHERE id = {ph}",
-                                (enrichment_data["commute_data_json"], lid),
-                            )
-                        conn.commit()
-
-                criteria = db.get_active_criteria()
-                if criteria:
-                    saved = db.get_listing_by_id(lid)
-                    if saved:
-                        _rescore_one_listing(saved, criteria)
-
-            except Exception as exc:
-                logger.error(f"Background enrich failed for CSV listing #{lid}: {exc}")
-
+    # Queue enrichment + scoring — survives restarts, drained by scheduler too
+    for lid in new_listing_ids:
+        jobs.enqueue_listing(lid)
     if new_listing_ids:
-        threading.Thread(target=_background_enrich, args=(new_listing_ids,), daemon=True).start()
+        jobs.kick()
 
     return {
         "imported": imported,
         "skipped_duplicates": skipped,
         "skipped_addresses": skipped_addresses[:20],
         "errors": errors[:10],
-        "enrichment": "started in background" if new_listing_ids else "none needed",
+        "enrichment": "queued" if new_listing_ids else "none needed",
     }
 

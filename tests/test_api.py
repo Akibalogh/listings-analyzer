@@ -356,6 +356,12 @@ class TestFilteredRoutes:
 class TestAddListingFromUrl:
     """Tests for POST /listings/add."""
 
+    @pytest.fixture(autouse=True)
+    def _mock_job_queue(self):
+        """The endpoint enqueues background jobs — keep tests off the real DB."""
+        with patch("app.main.jobs.enqueue_listing"), patch("app.main.jobs.kick"):
+            yield
+
     def test_requires_auth(self, client):
         res = client.post("/listings/add", json={"url": "https://redf.in/abc"})
         assert res.status_code == 401
