@@ -123,6 +123,24 @@ Primary alert source is OneKey MLS NY email alerts.
 - Backfills listing URLs and descriptions for older listings
 - Auto-triggers re-score if criteria exist
 
+### Weekly Redfin Search Sync (added 2026-07-10)
+Email alerts miss listings (Redfin doesn't send one for every match), so the
+scheduler also scrapes the buyer's saved Redfin filter directly:
+
+- `sync_search()` in `app/poller.py` fetches the filter's result pages via
+  Jina Reader (Redfin bot-blocks cloud IPs), extracts listing URLs, parses
+  address/town/state/zip from each URL slug, dedups by `address_key`, saves
+  new listings as `source_format='redfin-sync'`, and enqueues the standard
+  job pipeline for each.
+- Cadence: once per `SEARCH_SYNC_INTERVAL_DAYS` (default 7, 0 disables),
+  checked on every hourly tick against the `last_search_sync` app_state key.
+- Filter URL: `REDFIN_SEARCH_URL` env var, with the current Yorktown-area
+  filter as the hardcoded default.
+- New finds notify on Slack when they first score Worth Touring or better.
+- On-demand trigger: `POST /manage/sync-search`.
+- Sold cleanup is separate and unchanged: `_prune_sold_listings(fix=True)`
+  runs hourly and deletes listings confirmed sold.
+
 ### Background Job Queue (added 2026-07-09)
 All per-listing background work runs through a persistent job queue (`jobs`
 table + `app/jobs.py`) instead of ad-hoc daemon threads, so work survives

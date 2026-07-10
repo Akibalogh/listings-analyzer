@@ -5,6 +5,7 @@ Can be run as a CLI command or triggered via the API.
 
 import json
 import logging
+import re
 import sys
 
 from app import db
@@ -167,6 +168,122 @@ def poll_once() -> list[dict]:
             logger.error(f"Failed to mark email as processed: {e}")
 
     return results
+
+
+def sync_search(max_pages: int = 5) -> dict:
+    """Weekly search sync: scrape the configured Redfin filter for listings.
+
+    Fetches each result page through Jina Reader (Redfin bot-blocks cloud
+    IPs), extracts listing URLs, saves ones not already in the DB (address
+    parsed from the URL slug), and queues the standard enrichment + scoring
+    pipeline for each. Sold cleanup is unchanged — the hourly prune already
+    handles it per-listing.
+
+    Returns {"pages_fetched", "urls_found", "added", "skipped_existing", "errors"}.
+    """
+    import time as _time
+
+    import httpx
+
+    from app import jobs
+    from app.parsers.plaintext import REDFIN_URL_ADDR_RE
+
+    search_url = (settings.redfin_search_url or "").rstrip("/")
+    if not search_url:
+        return {"error": "REDFIN_SEARCH_URL not configured"}
+
+    _browser_ua = (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    )
+    seen_urls: set[str] = set()
+    pages_fetched = 0
+    errors: list[str] = []
+
+    for page in range(1, max_pages + 1):
+        page_url = search_url if page == 1 else f"{search_url}/page-{page}"
+        try:
+            with httpx.Client(timeout=60, follow_redirects=True,
+                              headers={"User-Agent": _browser_ua}) as client:
+                resp = client.get(f"https://r.jina.ai/{page_url}")
+                resp.raise_for_status()
+                body = resp.text
+        except Exception as e:
+            logger.error(f"Search sync: page {page} fetch failed: {e}")
+            errors.append(f"page {page}: {e}")
+            break
+        pages_fetched += 1
+
+        page_urls = set()
+        for m in re.finditer(
+            r"https://www\.redfin\.com/[A-Z]{2}/[^/\s)\"']+/[^/\s)\"']+/home/\d+", body
+        ):
+            page_urls.add(m.group(0))
+        new_on_page = page_urls - seen_urls
+        seen_urls |= page_urls
+        logger.info(f"Search sync: page {page} → {len(page_urls)} URLs ({len(new_on_page)} new)")
+        if not new_on_page:
+            break  # past the last page — Redfin repeats or empties results
+        _time.sleep(2)
+
+    added = 0
+    skipped = 0
+    added_ids: list[int] = []
+    for url in sorted(seen_urls):
+        try:
+            m = REDFIN_URL_ADDR_RE.search(url)
+            if not m:
+                continue
+            state = m.group(1).upper()
+            town = m.group(2).replace("-", " ").title()
+            address = m.group(3).replace("-", " ").title()
+            zip_code = m.group(4)
+
+            address_key = normalize_address(address, town, state)
+            if address_key and db.is_listing_duplicate_by_address(address_key):
+                skipped += 1
+                continue
+
+            email_id = db.save_processed_email(
+                gmail_id=f"search-sync-{url}",
+                message_id="",
+                sender="redfin-search-sync",
+                subject=f"Search sync: {address}, {town}",
+                parser_used="redfin-sync",
+                listings_found=1,
+            )
+            listing = ParsedListing(
+                source_format="redfin-sync",
+                address=address,
+                town=town,
+                state=state,
+                zip_code=zip_code,
+                listing_url=url,
+            )
+            placeholder = ScoringResult(
+                score=0, verdict="Reject", hard_results=[], soft_points={},
+                concerns=["Pending enrichment"], confidence="low",
+            )
+            enrichment = {"address_key": address_key} if address_key else {}
+            listing_id = db.save_listing(listing, placeholder, email_id, enrichment)
+            jobs.enqueue_listing(listing_id)
+            added_ids.append(listing_id)
+            added += 1
+            logger.info(f"Search sync: added listing #{listing_id}: {address}, {town}")
+        except Exception as e:
+            logger.error(f"Search sync: failed to add {url}: {e}")
+            errors.append(f"{url}: {e}")
+
+    if added_ids:
+        jobs.kick()
+
+    return {
+        "pages_fetched": pages_fetched,
+        "urls_found": len(seen_urls),
+        "added": added,
+        "skipped_existing": skipped,
+        "errors": errors,
+    }
 
 
 def _update_duplicate(existing: tuple[int, str | None], listing: ParsedListing):

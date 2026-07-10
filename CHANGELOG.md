@@ -4,6 +4,23 @@ All notable changes to Listings Analyzer are documented here.
 
 ---
 
+## [2026-07-10] — Weekly Redfin search sync
+
+### Added
+- **Weekly search sync** — the hourly scheduler now scrapes the saved Redfin
+  filter (via Jina Reader, paginated) once per `SEARCH_SYNC_INTERVAL_DAYS`
+  (default 7), adds listings not already in the DB, and queues the standard
+  enrichment + scoring pipeline for each. Filter lives in `REDFIN_SEARCH_URL`
+  (hardcoded default: the Yorktown-area $1M–$2.25M filter).
+- **`POST /manage/sync-search`** — run the sync on demand.
+- **Slack notifications for sync finds** — new weekly discoveries notify on
+  their first scoring when they land Worth Touring or Strong Match (same
+  first-score-only rule as manual adds; imports still never notify).
+- Sold cleanup unchanged: the hourly per-listing prune already deletes sold
+  listings.
+
+---
+
 ## [2026-07-10] — Retire legacy scrape endpoint, green test suite
 
 ### Removed

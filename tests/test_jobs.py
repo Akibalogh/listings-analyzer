@@ -277,6 +277,13 @@ class TestScoreNotification:
         notify = self._score_listing(lid, monkeypatch)
         notify.assert_not_called()
 
+    def test_search_sync_find_notifies(self, temp_db, monkeypatch):
+        """Weekly-search discoveries notify on first scoring — hearing about
+        new matches is the point of the sync."""
+        lid = _make_listing(source_format="redfin-sync")
+        notify = self._score_listing(lid, monkeypatch)
+        notify.assert_called_once()
+
 
 class TestDeterministicGate:
     def test_commute_over_limit_rejects(self):
