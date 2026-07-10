@@ -123,6 +123,45 @@ Primary alert source is OneKey MLS NY email alerts.
 - Backfills listing URLs and descriptions for older listings
 - Auto-triggers re-score if criteria exist
 
+### Background Job Queue (added 2026-07-09)
+All per-listing background work runs through a persistent job queue (`jobs`
+table + `app/jobs.py`) instead of ad-hoc daemon threads, so work survives
+deploys and crashes.
+
+- **Task types**, executed per listing in order: `scrape_desc` (URL search +
+  description + images), `stats` (price/beds/baths/sqft/year_built via page,
+  description, or OneKeyMLS), `commute`, `schools`, `score`. A listing's
+  `score` job is claim-deferred until its enrichment jobs settle.
+- **Entry points**: `/listings/add` and `/manage/import-csv` enqueue the
+  pipeline and return immediately; the poller still enriches inline.
+- **Self-healing**: each hourly scheduler tick scans all listings for data
+  gaps, enqueues repairs (resurrecting terminal job rows whose gap still
+  exists — done rows get a full retry budget, failed rows one attempt per
+  tick), and drains the queue in a background thread. Startup requeues jobs
+  orphaned as `running` by a restart.
+- **Retry semantics**: 3 attempts per job, counted at claim time; a failure
+  is not retried within the same drain (spreads retries across ticks so
+  transient rate limits / quota exhaustion can clear).
+- **Handlers are idempotent** — they no-op when the data they'd fetch is
+  already present, so re-enqueueing is always safe.
+- **Endpoints**: `GET /manage/jobs` (counts by status/task),
+  `POST /manage/backfill-jobs` (on-demand scan + drain; `?force=true`
+  restores full retry budget on failed jobs).
+- **Notifications**: Slack notify fires only for manual `/listings/add`
+  listings on their first real scoring — imports and repairs never burst.
+- `/manage/enrich` remains outside the queue for now: property tax, flood
+  zone, power line, and station lookups are not yet queue tasks.
+
+### Deterministic Scoring Gates (added 2026-07-09)
+Hard requirements that need no AI judgment are enforced in code before any
+API call (`deterministic_gate()` in `app/scorer.py`, applied in both the
+sequential and batch scoring paths):
+- Commute over `COMMUTE_HARD_LIMIT_MINUTES` (default 110) → Reject with
+  `evaluation_method='deterministic-gate'`; unknown commute never gates.
+- **Invariant**: this threshold mirrors the hard requirement written in the
+  evaluation criteria prose. If the criteria's commute limit changes, the
+  config value must change with it.
+
 ## 5. Evaluation Engine
 
 ### AI-Only Scoring
