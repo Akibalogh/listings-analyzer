@@ -718,3 +718,40 @@ class TestJunkImageFilter:
             mock_fetch.return_value = ("image/jpeg", "fakebase64")
             _build_user_message("Criteria", listing_data, image_urls=junk_urls)
             assert mock_fetch.call_count == 0  # all filtered out
+
+
+class TestCommuteGateDrift:
+    """The code gate and the criteria prose must agree on the commute limit."""
+
+    V65_STYLE = (
+        "Commute over 110 minutes door-to-door to Brookfield Place = Reject "
+        "(hard fail). If commute is unknown, mark unknown.\n"
+        "...\nREJECT over 110 min (hard fail — too far)"
+    )
+
+    def test_parses_limit_from_criteria(self):
+        from app.scorer import criteria_commute_limit
+        assert criteria_commute_limit(self.V65_STYLE) == 110
+
+    def test_no_limit_stated_returns_none(self):
+        from app.scorer import criteria_commute_limit
+        assert criteria_commute_limit("Schools matter most. Basement required.") is None
+        assert criteria_commute_limit("") is None
+
+    def test_in_sync_when_matching(self):
+        from app.scorer import commute_gate_drift
+        drift = commute_gate_drift(self.V65_STYLE)
+        assert drift["config_minutes"] == 110
+        assert drift["criteria_minutes"] == 110
+        assert drift["in_sync"] is True
+
+    def test_drift_detected_on_mismatch(self):
+        from app.scorer import commute_gate_drift
+        relaxed = self.V65_STYLE.replace("110", "130")
+        drift = commute_gate_drift(relaxed)
+        assert drift["criteria_minutes"] == 130
+        assert drift["in_sync"] is False
+
+    def test_no_stated_limit_is_in_sync(self):
+        from app.scorer import commute_gate_drift
+        assert commute_gate_drift("no commute rules here")["in_sync"] is True

@@ -88,16 +88,18 @@ def _scheduled_poll_loop(interval_hours: int):
             _record_poll("scheduled", 0, error=str(e))
 
         # Prune sold/off-market listings
+        sold_removed = 0
         try:
-            report = _prune_sold_listings(fix=True)
-            if report["sold_count"] > 0 or report.get("pending_count", 0) > 0:
+            prune_report = _prune_sold_listings(fix=True)
+            sold_removed = prune_report["sold_count"]
+            if prune_report["sold_count"] > 0 or prune_report.get("pending_count", 0) > 0:
                 logger.info(
-                    f"Scheduled prune: removed {report['sold_count']} sold, "
-                    f"updated {report.get('pending_count', 0)} pending "
-                    f"(checked {report['checked']}, errors {report['errors']})"
+                    f"Scheduled prune: removed {prune_report['sold_count']} sold, "
+                    f"updated {prune_report.get('pending_count', 0)} pending "
+                    f"(checked {prune_report['checked']}, errors {prune_report['errors']})"
                 )
             else:
-                logger.info(f"Scheduled prune: no sold/pending found (checked {report['checked']})")
+                logger.info(f"Scheduled prune: no sold/pending found (checked {prune_report['checked']})")
         except Exception:
             logger.exception("Scheduled prune-sold failed")
 
@@ -105,14 +107,16 @@ def _scheduled_poll_loop(interval_hours: int):
         try:
             if _search_sync_due():
                 from app.poller import sync_search
-                report = sync_search()
+                sync_report = sync_search()
                 # Stamp only on success — a total failure (e.g. Jina rate
                 # limit) retries on the next hourly tick, not in a week
-                if report.get("pages_fetched", 0) > 0:
+                if sync_report.get("pages_fetched", 0) > 0:
                     db.set_app_state(
                         "last_search_sync", datetime.now(timezone.utc).isoformat()
                     )
-                logger.info(f"Weekly search sync: {report}")
+                    from app.notifier import notify_sync_digest
+                    notify_sync_digest(sync_report, sold_removed, _data_quality_pct())
+                logger.info(f"Weekly search sync: {sync_report}")
         except Exception:
             logger.exception("Weekly search sync failed")
 
@@ -125,6 +129,42 @@ def _scheduled_poll_loop(interval_hours: int):
             jobs.kick()
         except Exception:
             logger.exception("Scheduled job drain failed")
+
+
+_QUALITY_FIELDS = (
+    "description", "listing_url", "price", "sqft", "bedrooms", "bathrooms",
+    "year_built", "lot_acres", "commute_minutes", "school_data_json",
+    "image_urls_json",
+)
+
+
+def _data_quality_pct() -> float:
+    """Share of quality fields populated across all listings (0-100)."""
+    listings = db.get_all_listings()
+    if not listings:
+        return 100.0
+    have = sum(
+        1 for l in listings for f in _QUALITY_FIELDS
+        if l.get(f) not in (None, "", "[]", "null")
+    )
+    return have / (len(listings) * len(_QUALITY_FIELDS)) * 100
+
+
+def _log_commute_gate_drift() -> dict | None:
+    """Warn when the criteria prose and the code gate disagree on the commute limit."""
+    from app.scorer import commute_gate_drift
+
+    criteria = db.get_active_criteria()
+    if not criteria:
+        return None
+    drift = commute_gate_drift(criteria["instructions"])
+    if not drift["in_sync"]:
+        logger.warning(
+            f"COMMUTE GATE DRIFT: criteria text says {drift['criteria_minutes']} min "
+            f"but COMMUTE_HARD_LIMIT_MINUTES={drift['config_minutes']} — the code gate "
+            f"enforces the config value; update it to match the criteria"
+        )
+    return drift
 
 
 def _search_sync_due() -> bool:
@@ -159,6 +199,12 @@ async def lifespan(app: FastAPI):
     # Resume any jobs a previous deploy/crash orphaned (init_db already
     # reset them to pending) without waiting for the first scheduler tick
     jobs.kick()
+
+    # Surface criteria-vs-config drift on the commute gate at every boot
+    try:
+        _log_commute_gate_drift()
+    except Exception:
+        logger.exception("Commute gate drift check failed")
 
     yield
 
@@ -272,6 +318,10 @@ def health():
             ).isoformat()
         except ValueError:
             pass
+    try:
+        commute_gate = _log_commute_gate_drift()
+    except Exception:
+        commute_gate = None
     return {
         "status": "ok",
         "poll": poll,
@@ -280,6 +330,7 @@ def health():
             "next_due": next_sync,
             "interval_days": settings.search_sync_interval_days,
         },
+        "commute_gate": commute_gate,
     }
 
 
