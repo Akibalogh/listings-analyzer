@@ -245,6 +245,21 @@ def _handle_stats(listing: dict) -> None:
                 f"Listing #{listing['id']}: stats page fetch failed ({e}) — trying fallbacks"
             )
 
+    # Jina Reader fallback: renders the Redfin page from Jina's IPs (works
+    # where direct fetch is bot-blocked); _parse_jina_redfin knows its format
+    if url and any(f not in merged for f in needed):
+        from app.main import _parse_jina_redfin
+        try:
+            jina_headers = {"User-Agent": "Mozilla/5.0"}
+            if settings.jina_api_key:
+                jina_headers["Authorization"] = f"Bearer {settings.jina_api_key}"
+            with httpx.Client(timeout=60, follow_redirects=True) as client:
+                resp = client.get(f"https://r.jina.ai/{url}", headers=jina_headers)
+                if resp.status_code == 200:
+                    _absorb(_parse_jina_redfin(resp.text))
+        except Exception as e:
+            logger.warning(f"Listing #{listing['id']}: Jina stats fallback failed: {e}")
+
     # Per-field fallbacks: description text, then OneKeyMLS (server-rendered,
     # reachable from cloud IPs where Redfin bot-blocks)
     if listing.get("description") and any(f not in merged for f in needed):
