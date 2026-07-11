@@ -204,3 +204,48 @@ class TestNotifyNewListing:
         assert "Low Priority" not in NOTIFY_VERDICTS
         assert "Weak Match" not in NOTIFY_VERDICTS
         assert "Reject" not in NOTIFY_VERDICTS
+
+
+class TestNotifySyncDigest:
+    """Tests for notify_sync_digest()."""
+
+    SYNC_REPORT = {"pages_fetched": 2, "urls_found": 59, "added": 3,
+                   "skipped_existing": 56, "errors": []}
+
+    def test_does_nothing_when_webhook_url_empty(self):
+        from app.notifier import notify_sync_digest
+
+        with patch("app.notifier.settings") as mock_settings:
+            mock_settings.slack_webhook_url = ""
+            with patch("app.notifier.httpx.post") as mock_post:
+                notify_sync_digest(self.SYNC_REPORT, 2, 97.2)
+                mock_post.assert_not_called()
+
+    def test_digest_contents(self):
+        from app.notifier import notify_sync_digest
+
+        with patch("app.notifier.settings") as mock_settings:
+            mock_settings.slack_webhook_url = "https://hooks.slack.com/test"
+            with patch("app.notifier.httpx.post") as mock_post:
+                mock_post.return_value = MagicMock(raise_for_status=MagicMock())
+                notify_sync_digest(self.SYNC_REPORT, 2, 97.2)
+                text = mock_post.call_args[1]["json"]["text"]
+                assert "Weekly listing sync" in text
+                assert "3 new listings" in text
+                assert "56 already tracked" in text
+                assert "2 sold listings removed" in text
+                assert "97%" in text
+                assert "error" not in text.lower()
+
+    def test_digest_reports_fetch_errors(self):
+        from app.notifier import notify_sync_digest
+
+        report = dict(self.SYNC_REPORT, errors=["page 1: 403"], added=0)
+        with patch("app.notifier.settings") as mock_settings:
+            mock_settings.slack_webhook_url = "https://hooks.slack.com/test"
+            with patch("app.notifier.httpx.post") as mock_post:
+                mock_post.return_value = MagicMock(raise_for_status=MagicMock())
+                notify_sync_digest(report, 0, 95.0)
+                text = mock_post.call_args[1]["json"]["text"]
+                assert "1 fetch error" in text
+                assert "0 new listings" in text

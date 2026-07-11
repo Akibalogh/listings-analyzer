@@ -10,6 +10,7 @@ against prompt injection from listing data.
 import base64
 import json
 import logging
+import re
 
 import anthropic
 import httpx
@@ -25,6 +26,38 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 ALLOWED_VERDICTS = {"Strong Match", "Worth Touring", "Low Priority", "Weak Match", "Reject"}
+
+
+_CRITERIA_COMMUTE_LIMIT_RE = re.compile(
+    r"commute[^.\n]{0,60}?over\s+(\d{2,3})\s*min|reject\s+over\s+(\d{2,3})\s*min",
+    re.IGNORECASE,
+)
+
+
+def criteria_commute_limit(instructions: str) -> int | None:
+    """Parse the commute hard-limit (minutes) out of the criteria prose.
+
+    The deterministic gate enforces COMMUTE_HARD_LIMIT_MINUTES in code; this
+    lets startup and /health detect when the user edited the criteria text
+    without updating the config — the one place the two can silently drift.
+    Returns None when the criteria state no commute limit.
+    """
+    for m in _CRITERIA_COMMUTE_LIMIT_RE.finditer(instructions or ""):
+        value = m.group(1) or m.group(2)
+        if value:
+            return int(value)
+    return None
+
+
+def commute_gate_drift(instructions: str) -> dict:
+    """Compare the criteria's commute limit with the code gate's config."""
+    criteria_limit = criteria_commute_limit(instructions)
+    config_limit = settings.commute_hard_limit_minutes
+    return {
+        "config_minutes": config_limit,
+        "criteria_minutes": criteria_limit,
+        "in_sync": criteria_limit is None or criteria_limit == config_limit,
+    }
 
 
 def deterministic_gate(listing_data: dict) -> ScoringResult | None:

@@ -43,6 +43,34 @@ def notify_new_listing(listing: dict, score: int, verdict: str, evaluation_metho
         + url_part
     )
 
+    _post_slack(text, context=f"{address} ({verdict})")
+
+
+def notify_sync_digest(sync_report: dict, sold_removed: int, quality_pct: float) -> None:
+    """Post the weekly sync summary to Slack. Fails silently.
+
+    Verdicts for new finds aren't known yet (scoring runs in the job queue) —
+    good matches notify individually via notify_new_listing when scored.
+    """
+    if not settings.slack_webhook_url:
+        return
+    added = sync_report.get("added", 0)
+    skipped = sync_report.get("skipped_existing", 0)
+    errors = sync_report.get("errors") or []
+    lines = [
+        "📋 *Weekly listing sync*",
+        f"• {added} new listing{'s' if added != 1 else ''} added"
+        + (" (scoring queued — good matches will ping here)" if added else ""),
+        f"• {skipped} already tracked",
+        f"• {sold_removed} sold listing{'s' if sold_removed != 1 else ''} removed today",
+        f"• Data quality: {quality_pct:.0f}%",
+    ]
+    if errors:
+        lines.append(f"• ⚠️ {len(errors)} fetch error{'s' if len(errors) != 1 else ''}")
+    _post_slack("\n".join(lines), context="weekly sync digest")
+
+
+def _post_slack(text: str, context: str) -> None:
     try:
         resp = httpx.post(
             settings.slack_webhook_url,
@@ -50,6 +78,6 @@ def notify_new_listing(listing: dict, score: int, verdict: str, evaluation_metho
             timeout=10.0,
         )
         resp.raise_for_status()
-        logger.info(f"Slack notification sent for {address} ({verdict})")
+        logger.info(f"Slack notification sent for {context}")
     except Exception as e:
-        logger.warning(f"Slack notification failed: {e}")
+        logger.warning(f"Slack notification failed for {context}: {e}")
