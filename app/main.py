@@ -262,7 +262,25 @@ def dashboard():
 def health():
     with _poll_lock:
         poll = dict(_poll_status)
-    return {"status": "ok", "poll": poll}
+    last_sync = db.get_app_state("last_search_sync")
+    next_sync = None
+    if last_sync and settings.search_sync_interval_days > 0:
+        try:
+            next_sync = (
+                datetime.fromisoformat(last_sync)
+                + timedelta(days=settings.search_sync_interval_days)
+            ).isoformat()
+        except ValueError:
+            pass
+    return {
+        "status": "ok",
+        "poll": poll,
+        "search_sync": {
+            "last_run": last_sync,
+            "next_due": next_sync,
+            "interval_days": settings.search_sync_interval_days,
+        },
+    }
 
 
 @app.post("/poll")
