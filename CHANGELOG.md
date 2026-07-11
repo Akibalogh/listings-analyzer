@@ -4,6 +4,23 @@ All notable changes to Listings Analyzer are documented here.
 
 ---
 
+## [2026-07-11] — Flag attribution + sync dedup by Redfin home ID
+
+### Added
+- **Flag attribution** — Toured / Want to Go / Passed / Liked now record who
+  set them (`<flag>_by` columns, keyed off the Google sign-in email);
+  dashboard badges show "· Aki" / "· Bronwyn". Attribution clears on un-flag.
+- **`GET /manage/allowlist`** — inspect dashboard sign-in emails without SSH.
+
+### Fixed
+- **Search sync dedup by Redfin home ID** — URL slugs sometimes carry a
+  different town than the MLS (Mahopac vs Somers, West Harrison vs White
+  Plains), which slipped past address-based dedup; the stable `/home/<id>`
+  segment is now checked first. Removed the 5 duplicates the first live sync
+  created.
+
+---
+
 ## [2026-07-10] — Weekly Redfin search sync
 
 ### Added

@@ -1870,6 +1870,18 @@ function el(tag, attrs, children) {
 
 function txt(s) { return document.createTextNode(s == null ? '' : String(s)); }
 
+/* Short display name for whoever set a flag ("· Aki" appended to badges) */
+var FLAGGER_NAMES = {
+  'akibalogh@gmail.com': 'Aki',
+  'aki@bitsafe.finance': 'Aki',
+  'bronwyneharris@gmail.com': 'Bronwyn'
+};
+function flaggerSuffix(email) {
+  if (!email || email === 'manage-api') return '';
+  var name = FLAGGER_NAMES[email] || email.split('@')[0];
+  return ' · ' + name;
+}
+
 /* ==== Fetch data ==== */
 var listingsLoaded = false;
 
@@ -2097,16 +2109,16 @@ function buildCard(l) {
   /* Badges row (below address/town, wraps if needed) */
   var badgeRow = el('div', {className: 'card-badge-row'});
   if (l.toured) {
-    badgeRow.appendChild(el('span', {className: 'toured-badge'}, '\u2713 Toured'));
+    badgeRow.appendChild(el('span', {className: 'toured-badge'}, '\u2713 Toured' + flaggerSuffix(l.toured_by)));
   }
   if (l.tour_requested) {
-    badgeRow.appendChild(el('span', {className: 'want-to-go-badge'}, 'Want to Go'));
+    badgeRow.appendChild(el('span', {className: 'want-to-go-badge'}, 'Want to Go' + flaggerSuffix(l.tour_requested_by)));
   }
   if (l.passed) {
-    badgeRow.appendChild(el('span', {className: 'passed-badge'}, 'Passed'));
+    badgeRow.appendChild(el('span', {className: 'passed-badge'}, 'Passed' + flaggerSuffix(l.passed_by)));
   }
   if (l.liked) {
-    badgeRow.appendChild(el('span', {className: 'liked-badge'}, '♥ Liked'));
+    badgeRow.appendChild(el('span', {className: 'liked-badge'}, '♥ Liked' + flaggerSuffix(l.liked_by)));
   }
   var pendingStatuses = ['Pending', 'Under Contract', 'Closed'];
   if (pendingStatuses.indexOf(l.listing_status || '') >= 0) {
