@@ -276,7 +276,7 @@ class TestTouredEndpoint:
         data = res.json()
         assert data["listing_id"] == 1
         assert data["toured"] is True
-        mock_mark.assert_called_once_with(1, True)
+        mock_mark.assert_called_once_with(1, True, by="test@example.com")
 
     @patch("app.main.db.mark_listing_toured")
     @patch("app.main.db.get_listing_by_id", return_value={"id": 2, "address": "10 Sherman Ave"})
@@ -285,7 +285,7 @@ class TestTouredEndpoint:
         assert res.status_code == 200
         data = res.json()
         assert data["toured"] is False
-        mock_mark.assert_called_once_with(2, False)
+        mock_mark.assert_called_once_with(2, False, by="test@example.com")
 
     @patch("app.main.db.mark_listing_toured")
     @patch("app.main.db.get_listing_by_id", return_value={"id": 1, "address": "Test"})
@@ -295,7 +295,7 @@ class TestTouredEndpoint:
         assert res.status_code == 200
         data = res.json()
         assert data["toured"] is True
-        mock_mark.assert_called_once_with(1, True)
+        mock_mark.assert_called_once_with(1, True, by="test@example.com")
 
 
 class TestSoldEndpoint:
@@ -521,13 +521,13 @@ class TestTourRequest:
         data = res.json()
         assert data["listing_id"] == 1
         assert data["tour_requested"] is True
-        mock_mark.assert_called_once_with(1, True)
+        mock_mark.assert_called_once_with(1, True, by="test@example.com")
 
         mock_mark.reset_mock()
         res = authed_client.post("/listings/1/tour-request", json={"tour_requested": False})
         assert res.status_code == 200
         assert res.json()["tour_requested"] is False
-        mock_mark.assert_called_once_with(1, False)
+        mock_mark.assert_called_once_with(1, False, by="test@example.com")
 
     @patch("app.main.db.get_listing_by_id", return_value=None)
     def test_404_for_missing(self, mock_get, authed_client):
@@ -541,7 +541,7 @@ class TestTourRequest:
         res = authed_client.post("/listings/5/tour-request", json={})
         assert res.status_code == 200
         assert res.json()["tour_requested"] is True
-        mock_mark.assert_called_once_with(5, True)
+        mock_mark.assert_called_once_with(5, True, by="test@example.com")
 
     @patch("app.main.db.mark_listing_tour_requested")
     @patch("app.main.db.get_listing_by_id", return_value={"id": 3, "address": "10 Main St"})
@@ -633,7 +633,7 @@ class TestPassedEndpoint:
         data = res.json()
         assert data["listing_id"] == 1
         assert data["passed"] is True
-        mock_mark.assert_called_once_with(1, True)
+        mock_mark.assert_called_once_with(1, True, by="test@example.com")
 
     @patch("app.main.db.mark_listing_passed")
     @patch("app.main.db.get_listing_by_id", return_value={"id": 1, "address": "10 Main St"})
@@ -641,7 +641,7 @@ class TestPassedEndpoint:
         res = authed_client.post("/listings/1/passed", json={"passed": False})
         assert res.status_code == 200
         assert res.json()["passed"] is False
-        mock_mark.assert_called_once_with(1, False)
+        mock_mark.assert_called_once_with(1, False, by="test@example.com")
 
     @patch("app.main.db.mark_listing_passed")
     @patch("app.main.db.get_listing_by_id", return_value={"id": 5, "address": "Test"})
@@ -650,7 +650,7 @@ class TestPassedEndpoint:
         res = authed_client.post("/listings/5/passed", json={})
         assert res.status_code == 200
         assert res.json()["passed"] is True
-        mock_mark.assert_called_once_with(5, True)
+        mock_mark.assert_called_once_with(5, True, by="test@example.com")
 
 
 class TestManageEndpoint:

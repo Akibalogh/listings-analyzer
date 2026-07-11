@@ -9,32 +9,33 @@ class TestLikedFeature:
     """Tests for marking listings as liked ."""
 
     def test_mark_listing_liked(self):
-        """Should update listing liked status to True."""
+        """Should update liked status to True and record who flagged."""
         with patch('app.db.get_connection') as mock_conn:
             mock_cursor = MagicMock()
             mock_conn.return_value.__enter__.return_value.cursor.return_value = mock_cursor
 
-            db.mark_listing_liked(1, True)
+            db.mark_listing_liked(1, True, by="aki@example.com")
 
             # Verify UPDATE was called with correct parameters
             mock_cursor.execute.assert_called_once()
             call_args = mock_cursor.execute.call_args
             assert "UPDATE listings SET liked" in call_args[0][0]
-            assert call_args[0][1] == (True, 1)
+            assert "liked_by" in call_args[0][0]
+            assert call_args[0][1] == (True, "aki@example.com", 1)
 
     def test_unmark_listing_liked(self):
-        """Should update listing liked status to False."""
+        """Should update liked status to False and clear attribution."""
         with patch('app.db.get_connection') as mock_conn:
             mock_cursor = MagicMock()
             mock_conn.return_value.__enter__.return_value.cursor.return_value = mock_cursor
 
-            db.mark_listing_liked(1, False)
+            db.mark_listing_liked(1, False, by="aki@example.com")
 
             # Verify UPDATE was called with correct parameters
             mock_cursor.execute.assert_called_once()
             call_args = mock_cursor.execute.call_args
             assert "UPDATE listings SET liked" in call_args[0][0]
-            assert call_args[0][1] == (False, 1)
+            assert call_args[0][1] == (False, None, 1)
 
     def test_liked_distinct_from_passed(self):
         """Liked and Passed should be independent statuses."""

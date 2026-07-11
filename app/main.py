@@ -482,14 +482,14 @@ async def add_images(request: Request, listing_id: int):
 @app.post("/listings/{listing_id}/toured")
 async def mark_toured(request: Request, listing_id: int):
     """Mark or un-mark a listing as toured. Requires auth."""
-    _require_auth(request)
+    email = _require_auth(request)
     listing = db.get_listing_by_id(listing_id)
     if not listing:
         raise HTTPException(status_code=404, detail=f"Listing #{listing_id} not found")
 
     body = await request.json()
     toured = bool(body.get("toured", True))
-    db.mark_listing_toured(listing_id, toured)
+    db.mark_listing_toured(listing_id, toured, by=email)
     return {"listing_id": listing_id, "toured": toured}
 
 
@@ -500,15 +500,17 @@ async def mark_toured(request: Request, listing_id: int):
 async def toggle_tour_request(request: Request, listing_id: int):
     """Flag or un-flag a listing for tour request. Requires auth or manage key."""
     key = request.headers.get("x-manage-key", "")
-    if not (settings.manage_key and key == settings.manage_key):
-        _require_auth(request)
+    if settings.manage_key and key == settings.manage_key:
+        email = "manage-api"
+    else:
+        email = _require_auth(request)
     listing = db.get_listing_by_id(listing_id)
     if not listing:
         raise HTTPException(status_code=404, detail=f"Listing #{listing_id} not found")
 
     body = await request.json()
     tour_requested = bool(body.get("tour_requested", True))
-    db.mark_listing_tour_requested(listing_id, tour_requested)
+    db.mark_listing_tour_requested(listing_id, tour_requested, by=email)
     return {"listing_id": listing_id, "tour_requested": tour_requested}
 
 
@@ -518,28 +520,28 @@ async def toggle_tour_request(request: Request, listing_id: int):
 @app.post("/listings/{listing_id}/passed")
 async def toggle_passed(request: Request, listing_id: int):
     """Flag or un-flag a listing as passed (chose not to pursue). Requires auth."""
-    _require_auth(request)
+    email = _require_auth(request)
     listing = db.get_listing_by_id(listing_id)
     if not listing:
         raise HTTPException(status_code=404, detail=f"Listing #{listing_id} not found")
 
     body = await request.json()
     passed = bool(body.get("passed", True))
-    db.mark_listing_passed(listing_id, passed)
+    db.mark_listing_passed(listing_id, passed, by=email)
     return {"listing_id": listing_id, "passed": passed}
 
 
 @app.post("/listings/{listing_id}/liked")
 async def toggle_liked(request: Request, listing_id: int):
     """Flag or un-flag a listing as liked (worth showing to parents). Requires auth."""
-    _require_auth(request)
+    email = _require_auth(request)
     listing = db.get_listing_by_id(listing_id)
     if not listing:
         raise HTTPException(status_code=404, detail=f"Listing #{listing_id} not found")
 
     body = await request.json()
     liked = bool(body.get("liked", True))
-    db.mark_listing_liked(listing_id, liked)
+    db.mark_listing_liked(listing_id, liked, by=email)
     return {"listing_id": listing_id, "liked": liked}
 
 
@@ -1472,6 +1474,15 @@ def manage_poll(request: Request):
         "listings_processed": len(results),
         "results": results,
     }
+
+
+@app.get("/manage/allowlist")
+def manage_allowlist(request: Request):
+    """List emails allowed to sign in to the dashboard. Protected by MANAGE_KEY."""
+    key = request.headers.get("x-manage-key", "")
+    if not settings.manage_key or key != settings.manage_key:
+        raise HTTPException(status_code=403, detail="Invalid or missing management key")
+    return {"allowed_emails": settings.allowed_email_list}
 
 
 @app.post("/manage/sync-search")

@@ -593,6 +593,10 @@ def _migrate_add_columns():
         ("listings", "tour_requested", "BOOLEAN DEFAULT FALSE"),
         ("listings", "passed", "BOOLEAN DEFAULT FALSE"),
         ("listings", "liked", "BOOLEAN DEFAULT FALSE"),
+        ("listings", "toured_by", "TEXT"),
+        ("listings", "tour_requested_by", "TEXT"),
+        ("listings", "passed_by", "TEXT"),
+        ("listings", "liked_by", "TEXT"),
         ("listings", "year_built", "INTEGER"),
         ("listings", "list_date", "TEXT"),
         ("listings", "property_tax_json", "TEXT"),
@@ -925,48 +929,38 @@ def update_listing_enrichment(listing_id: int, enrichment: dict):
         )
 
 
-def mark_listing_toured(listing_id: int, toured: bool):
+def _mark_listing_flag(listing_id: int, column: str, value: bool, by: str | None):
+    """Set a boolean flag column and record who flagged it in <column>_by.
+
+    Attribution is cleared when the flag is un-set.
+    """
+    ph = _placeholder()
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            f"UPDATE listings SET {column} = {ph}, {column}_by = {ph} WHERE id = {ph}",
+            (value, by if value else None, listing_id),
+        )
+
+
+def mark_listing_toured(listing_id: int, toured: bool, by: str | None = None):
     """Mark (or un-mark) a listing as toured."""
-    ph = _placeholder()
-    with get_connection() as conn:
-        cur = conn.cursor()
-        cur.execute(
-            f"UPDATE listings SET toured = {ph} WHERE id = {ph}",
-            (toured, listing_id),
-        )
+    _mark_listing_flag(listing_id, "toured", toured, by)
 
 
-def mark_listing_tour_requested(listing_id: int, tour_requested: bool):
+def mark_listing_tour_requested(listing_id: int, tour_requested: bool, by: str | None = None):
     """Mark (or un-mark) a listing as tour requested."""
-    ph = _placeholder()
-    with get_connection() as conn:
-        cur = conn.cursor()
-        cur.execute(
-            f"UPDATE listings SET tour_requested = {ph} WHERE id = {ph}",
-            (tour_requested, listing_id),
-        )
+    _mark_listing_flag(listing_id, "tour_requested", tour_requested, by)
 
 
-def mark_listing_passed(listing_id: int, passed: bool):
+def mark_listing_passed(listing_id: int, passed: bool, by: str | None = None):
     """Mark (or un-mark) a listing as passed (chose not to pursue)."""
-    ph = _placeholder()
-    with get_connection() as conn:
-        cur = conn.cursor()
-        cur.execute(
-            f"UPDATE listings SET passed = {ph} WHERE id = {ph}",
-            (passed, listing_id),
-        )
+    _mark_listing_flag(listing_id, "passed", passed, by)
 
 
-def mark_listing_liked(listing_id: int, liked: bool):
+def mark_listing_liked(listing_id: int, liked: bool, by: str | None = None):
     """Mark (or un-mark) a listing as liked (worth showing to parents)."""
-    ph = _placeholder()
-    with get_connection() as conn:
-        cur = conn.cursor()
-        cur.execute(
-            f"UPDATE listings SET liked = {ph} WHERE id = {ph}",
-            (liked, listing_id),
-        )
+    _mark_listing_flag(listing_id, "liked", liked, by)
 
 
 # --- Listing queries for re-scoring ---
@@ -978,6 +972,26 @@ def get_all_listing_ids() -> list[int]:
         cur = conn.cursor()
         cur.execute("SELECT id FROM listings ORDER BY id")
         return [row[0] for row in cur.fetchall()]
+
+
+def get_all_redfin_home_ids() -> set[str]:
+    """Redfin home IDs (the stable /home/<id> URL segment) of all listings.
+
+    Address-based dedup misses town-label variants (Redfin URL slugs say
+    'Mahopac' where the MLS says 'Somers'); the home ID is exact.
+    """
+    import re as _re
+
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT listing_url FROM listings WHERE listing_url IS NOT NULL")
+        rows = cur.fetchall()
+    ids: set[str] = set()
+    for row in rows:
+        m = _re.search(r"/home/(\d+)", row[0] or "")
+        if m:
+            ids.add(m.group(1))
+    return ids
 
 
 def get_all_score_metadata() -> dict[int, dict]:

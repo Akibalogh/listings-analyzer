@@ -102,6 +102,33 @@ class TestSyncSearch:
     @patch("app.jobs.kick")
     @patch("app.jobs.enqueue_listing")
     @patch("httpx.Client")
+    def test_skips_same_home_id_with_different_town_label(
+        self, mock_client_cls, mock_enqueue, mock_kick, temp_db
+    ):
+        """Redfin URL slugs sometimes carry a different town than the MLS
+        (Mahopac vs Somers) — the stable /home/<id> must catch the dupe."""
+        email_id = db.save_processed_email(
+            gmail_id="pre2", message_id="", sender="test", subject="t",
+            parser_used="test", listings_found=1,
+        )
+        existing = ParsedListing(
+            source_format="redfin-csv", address="52 Lake Rd", town="Somers",
+            state="NY", zip_code="10536",
+            listing_url="https://www.redfin.com/NY/Somers/52-Lake-Rd-10536/home/20050814",
+        )
+        db.save_listing(existing, ScoringResult(score=50, verdict="Worth Touring"), email_id)
+
+        # Search returns the same property under the Katonah slug
+        mock_client_cls.return_value = _mock_jina([PAGE_1, PAGE_1])
+        with patch("time.sleep"):
+            report = sync_search()
+
+        assert report["skipped_existing"] == 1  # 52 Lake Rd caught by home ID
+        assert report["added"] == 1  # 29 Appleby Dr is genuinely new
+
+    @patch("app.jobs.kick")
+    @patch("app.jobs.enqueue_listing")
+    @patch("httpx.Client")
     def test_paginates_until_no_new_urls(self, mock_client_cls, mock_enqueue, mock_kick, temp_db):
         mock_client_cls.return_value = _mock_jina([PAGE_1, PAGE_2, PAGE_2])
         with patch("time.sleep"):
@@ -148,6 +175,37 @@ class TestSearchSyncSchedule:
     def test_disabled_when_interval_zero(self, temp_db, monkeypatch):
         monkeypatch.setattr(settings, "search_sync_interval_days", 0)
         assert _search_sync_due() is False
+
+
+class TestFlagAttribution:
+    """Flags record who set them (toured_by / tour_requested_by / passed_by / liked_by)."""
+
+    def _make(self):
+        email_id = db.save_processed_email(
+            gmail_id="flag-test", message_id="", sender="test", subject="t",
+            parser_used="test", listings_found=1,
+        )
+        listing = ParsedListing(source_format="test", address="1 Flag St",
+                                town="Testville", state="NY")
+        return db.save_listing(listing, ScoringResult(score=50, verdict="Worth Touring"), email_id)
+
+    @pytest.mark.parametrize("mark,flag", [
+        (db.mark_listing_toured, "toured"),
+        (db.mark_listing_tour_requested, "tour_requested"),
+        (db.mark_listing_passed, "passed"),
+        (db.mark_listing_liked, "liked"),
+    ])
+    def test_flag_records_and_clears_attribution(self, temp_db, mark, flag):
+        lid = self._make()
+        mark(lid, True, by="bronwyneharris@gmail.com")
+        row = db.get_listing_by_id(lid)
+        assert row[flag]
+        assert row[f"{flag}_by"] == "bronwyneharris@gmail.com"
+
+        mark(lid, False, by="akibalogh@gmail.com")
+        row = db.get_listing_by_id(lid)
+        assert not row[flag]
+        assert row[f"{flag}_by"] is None
 
 
 class TestManageSyncSearchEndpoint:

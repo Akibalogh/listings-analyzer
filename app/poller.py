@@ -243,6 +243,7 @@ def sync_search(max_pages: int = 5) -> dict:
     added = 0
     skipped = 0
     added_ids: list[int] = []
+    existing_home_ids = db.get_all_redfin_home_ids()
     for url in sorted(seen_urls):
         try:
             m = REDFIN_URL_ADDR_RE.search(url)
@@ -253,6 +254,12 @@ def sync_search(max_pages: int = 5) -> dict:
             address = m.group(3).replace("-", " ").title()
             zip_code = m.group(4)
 
+            # Dedup by Redfin home ID first (exact — catches town-label
+            # variants like Mahopac vs Somers), then by normalized address
+            home_m = re.search(r"/home/(\d+)", url)
+            if home_m and home_m.group(1) in existing_home_ids:
+                skipped += 1
+                continue
             address_key = normalize_address(address, town, state)
             if address_key and db.is_listing_duplicate_by_address(address_key):
                 skipped += 1
