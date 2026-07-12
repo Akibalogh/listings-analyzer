@@ -334,3 +334,85 @@ class TestUrlHygiene:
         assert url == "https://www.redfin.com/NY/T/9-Track-St-10000/home/999"
         # Idempotent
         assert db._strip_redfin_url_params() == 0
+
+
+class TestListingPageClassifier:
+    """Redfin pages embed their own sale history — it must never mark a live
+    listing as sold (the bug that deleted 14 Briarwood Ln while it was pending)."""
+
+    def test_pending_banner_outranks_history_sold_lines(self):
+        from app.main import _classify_listing_page
+        page = "44 photos\npending\n$1,395,000\nabout this home...\nsale & tax history\nsold on june 30, 2004 for $610,000"
+        assert _classify_listing_page(page) == "pending"
+
+    def test_active_page_with_sale_history_is_not_sold(self):
+        from app.main import _classify_listing_page
+        page = "31 photos\nfor sale\n$1,199,000\n...\nsold on may 1, 2019 for $900,000"
+        assert _classify_listing_page(page) is None
+
+    def test_genuinely_sold_page_detected(self):
+        from app.main import _classify_listing_page
+        page = "this home sold on february 15, 2026 for $1,500,000. last sold price..."
+        assert _classify_listing_page(page) == "sold"
+
+    def test_history_beyond_banner_window_ignored(self):
+        from app.main import _classify_listing_page
+        page = "x" * 2600 + " sold on june 30, 2004"
+        assert _classify_listing_page(page) is None
+
+
+class TestTwoStrikeSoldDeletion:
+    SOLD_PAGE = ("this home sold on february 15, 2026 for $1,500,000. "
+                 + "beautiful colonial with hardwood floors and a large yard. " * 10)
+
+    def _make(self, home_id="777"):
+        email_id = db.save_processed_email(
+            gmail_id=f"strike-{home_id}", message_id="", sender="test",
+            subject="t", parser_used="test", listings_found=1,
+        )
+        listing = ParsedListing(
+            source_format="test", address=f"{home_id} Strike St", town="Testville",
+            state="NY",
+            listing_url=f"https://www.redfin.com/NY/Testville/{home_id}-Strike-St-10000/home/{home_id}",
+        )
+        return db.save_listing(listing, ScoringResult(score=50, verdict="Worth Touring"), email_id)
+
+    def _run(self, page_text, present_ids=frozenset()):
+        from app.main import _prune_sold_listings
+        page = MagicMock()
+        page.text = page_text
+        client = MagicMock()
+        client.__enter__ = MagicMock(return_value=client)
+        client.__exit__ = MagicMock(return_value=False)
+        client.get.return_value = page
+        with patch("httpx.Client", return_value=client), \
+             patch("app.parsers.onehome.check_listing_status", return_value=None), \
+             patch("app.poller.search_presence_home_ids", return_value=(set(present_ids), 2)):
+            return _prune_sold_listings(fix=True)
+
+    def test_first_detection_flags_not_deletes(self, temp_db):
+        lid = self._make()
+        report = self._run(self.SOLD_PAGE)
+        assert report["deleted"] == 0
+        assert report["sold_flagged"] == 1
+        assert db.get_listing_by_id(lid)["listing_status"] == "Sold?"
+
+    def test_second_detection_deletes(self, temp_db):
+        lid = self._make()
+        self._run(self.SOLD_PAGE)
+        report = self._run(self.SOLD_PAGE)
+        assert report["deleted"] == 1
+        assert db.get_listing_by_id(lid) is None
+
+    def test_false_positive_self_corrects(self, temp_db):
+        """A Sold?-flagged listing whose page reads active again and which is
+        still in search results gets restored to Active, not deleted."""
+        lid = self._make()
+        self._run(self.SOLD_PAGE)
+        assert db.get_listing_by_id(lid)["listing_status"] == "Sold?"
+        db.delete_app_state("last_presence_check")  # un-throttle the daily check
+        active_page = "31 photos\nfor sale\n$1,199,000\n" + "lovely home. " * 30
+        report = self._run(active_page, present_ids={"777"})
+        assert report["deleted"] == 0
+        assert report["restored_count"] == 1
+        assert db.get_listing_by_id(lid)["listing_status"] == "Active"

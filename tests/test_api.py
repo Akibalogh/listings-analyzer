@@ -933,7 +933,7 @@ class TestPruneSold:
                     assert data["sold_count"] == 0
                     assert data["pending_count"] == 1
                     assert data["pending_updated"] == 1
-                    assert "deleted" not in data
+                    assert data["deleted"] == 0
                     mock_update.assert_called_once_with(1, "Pending")
 
     @patch("app.main.settings")

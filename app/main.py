@@ -2789,6 +2789,29 @@ _PENDING_INDICATORS = [
     "pending sale", "sale pending", "under contract",
 ]
 
+# Redfin's status banner renders as a standalone token near the price
+# (e.g. "PENDING\n$1,395,000") in Jina text
+_PENDING_BANNER_RE = _re.compile(r"(?:^|\n)\s*(?:pending|contingent)\s*(?:$|\n)")
+
+
+def _classify_listing_page(text: str) -> str | None:
+    """Classify lowercased Jina page text as 'sold', 'pending', or None (active).
+
+    Only the top of the page counts: Redfin pages embed their own sale
+    HISTORY ("Sold on June 30, 2004") further down, which must never mark a
+    live listing as sold. Pending outranks sold — a pending page can
+    legitimately contain historic sold lines — and "for sale" up top means
+    the listing is live regardless of history mentions.
+    """
+    banner = text[:2500]
+    if _PENDING_BANNER_RE.search(banner) or any(i in banner for i in _PENDING_INDICATORS):
+        return "pending"
+    if "for sale" in banner:
+        return None
+    if any(i in banner for i in _SOLD_INDICATORS):
+        return "sold"
+    return None
+
 
 def _prune_sold_listings(fix: bool = False) -> dict:
     """Check listings for sold/off-market/pending status.
@@ -2852,10 +2875,11 @@ def _prune_sold_listings(fix: bool = False) -> dict:
                 "url": url,
             }
 
-            if any(indicator in text for indicator in _SOLD_INDICATORS):
+            classification = _classify_listing_page(text)
+            if classification == "sold":
                 sold.append(entry)
                 detected_ids.add(listing["id"])
-            elif any(indicator in text for indicator in _PENDING_INDICATORS):
+            elif classification == "pending":
                 pending.append(entry)
                 detected_ids.add(listing["id"])
 
@@ -2919,7 +2943,7 @@ def _prune_sold_listings(fix: bool = False) -> dict:
                     "last_presence_check", datetime.now(timezone.utc).isoformat()
                 )
                 import re as _presence_re
-                terminal = {"pending", "under contract", "closed", "sold", "off market?"}
+                terminal = {"pending", "under contract", "closed", "sold", "sold?", "off market?"}
                 for r in rows:
                     m = _presence_re.search(r"/home/(\d+)", r.get("listing_url") or "")
                     if not m:
@@ -2929,7 +2953,9 @@ def _prune_sold_listings(fix: bool = False) -> dict:
                     if m.group(1) not in present_ids:
                         if status not in terminal and r["id"] not in detected_ids:
                             absent.append(entry)
-                    elif status == "off market?":
+                    elif status in ("off market?", "sold?"):
+                        # Still in the live search results — a sold/off-market
+                        # suspicion was a false positive
                         restored.append(entry)
     except Exception:
         logger.exception("Search presence check failed")
@@ -2949,17 +2975,29 @@ def _prune_sold_listings(fix: bool = False) -> dict:
 
     if fix:
         ph = db._placeholder()
+        report["deleted"] = 0
+        report["sold_flagged"] = 0
 
-        # Delete sold listings
+        # Two-strike sold deletion: first detection flags 'Sold?', a second
+        # consecutive detection deletes. A single misread (e.g. a page's own
+        # sale-history lines) becomes a self-correcting badge, not data loss.
         if sold:
-            sold_ids = [s["id"] for s in sold]
-            with db.get_connection() as conn:
-                cur = conn.cursor()
-                for lid in sold_ids:
-                    cur.execute(f"DELETE FROM scores WHERE listing_id = {ph}", (lid,))
-                    cur.execute(f"DELETE FROM listings WHERE id = {ph}", (lid,))
-            report["deleted"] = len(sold_ids)
-            logger.info(f"Pruned {len(sold_ids)} sold/off-market listings")
+            status_by_id = {r["id"]: (r.get("listing_status") or "") for r in rows}
+            confirmed = [s["id"] for s in sold if status_by_id.get(s["id"]) == "Sold?"]
+            first_strike = [s["id"] for s in sold if s["id"] not in confirmed]
+            if confirmed:
+                with db.get_connection() as conn:
+                    cur = conn.cursor()
+                    for lid in confirmed:
+                        cur.execute(f"DELETE FROM scores WHERE listing_id = {ph}", (lid,))
+                        cur.execute(f"DELETE FROM listings WHERE id = {ph}", (lid,))
+                logger.info(f"Pruned {len(confirmed)} sold listing(s) (second detection)")
+            for lid in first_strike:
+                db.update_listing_status(lid, "Sold?")
+            if first_strike:
+                logger.info(f"Flagged {len(first_strike)} listing(s) as Sold? (first detection)")
+            report["deleted"] = len(confirmed)
+            report["sold_flagged"] = len(first_strike)
 
         # Update pending listings status (don't delete)
         if pending:
