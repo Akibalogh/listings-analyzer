@@ -1964,8 +1964,8 @@ function updateFilterCounts() {
   var counts = { all: 0, 'not-reject': 0, 'Toured': 0, 'Want to Go': 0, 'Liked': 0, 'Passed': 0 };
   allListings.forEach(function(l) {
     if (l.toured) counts['Toured']++;
-    if (l.tour_requested) counts['Want to Go']++;
-    if (l.liked) counts['Liked']++;
+    if (l.tour_requested && !isOffMarket(l)) counts['Want to Go']++;
+    if (l.liked && !isOffMarket(l)) counts['Liked']++;
     if (l.passed) { counts['Passed']++; if (_displayPrefs.hidePassed) return; }
     var isPending = ['Pending','Sold','Under Contract','Closed'].indexOf(l.listing_status || '') >= 0;
     if (_displayPrefs.hidePending && isPending) return;
@@ -1982,6 +1982,13 @@ function updateFilterCounts() {
   });
 }
 
+/* Off-market statuses: under contract, closed, or suspected gone —
+   hidden from forward-looking lists (shortlists + Active view) */
+function isOffMarket(l) {
+  var s = l.listing_status || '';
+  return ['Pending', 'Sold', 'Under Contract', 'Closed', 'Off Market?', 'Sold?'].indexOf(s) >= 0;
+}
+
 /* ==== Rendering ==== */
 function render() {
   var container = document.getElementById('listings');
@@ -1993,9 +2000,9 @@ function render() {
   } else if (activeFilter === 'Toured') {
     items = items.filter(function(l) { return l.toured; });
   } else if (activeFilter === 'Liked') {
-    items = items.filter(function(l) { return l.liked; });
+    items = items.filter(function(l) { return l.liked && !isOffMarket(l); });
   } else if (activeFilter === 'Want to Go') {
-    items = items.filter(function(l) { return l.tour_requested; });
+    items = items.filter(function(l) { return l.tour_requested && !isOffMarket(l); });
   } else if (activeFilter === 'all-unfiltered') {
     // "All" button shows truly all listings with no filters applied
   } else {
@@ -2003,11 +2010,7 @@ function render() {
     // always excludes passed, toured, and pending/sold/closed listings
     items = items.filter(function(l) { return !l.passed; });
     items = items.filter(function(l) { return !l.toured; });
-    items = items.filter(function(l) {
-      var s = l.listing_status || '';
-      return s !== 'Pending' && s !== 'Sold' && s !== 'Under Contract' && s !== 'Closed'
-        && s !== 'Off Market?' && s !== 'Sold?';
-    });
+    items = items.filter(function(l) { return !isOffMarket(l); });
     if (_displayPrefs.hideLowScore) {
       items = items.filter(function(l) { return l.verdict !== 'Reject' && l.verdict !== 'Weak Match'; });
     }
