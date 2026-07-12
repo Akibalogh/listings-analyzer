@@ -2006,7 +2006,7 @@ function render() {
     items = items.filter(function(l) {
       var s = l.listing_status || '';
       return s !== 'Pending' && s !== 'Sold' && s !== 'Under Contract' && s !== 'Closed'
-        && s !== 'Off Market?';
+        && s !== 'Off Market?' && s !== 'Sold?';
     });
     if (_displayPrefs.hideLowScore) {
       items = items.filter(function(l) { return l.verdict !== 'Reject' && l.verdict !== 'Weak Match'; });
@@ -2121,7 +2121,7 @@ function buildCard(l) {
   if (l.liked) {
     badgeRow.appendChild(el('span', {className: 'liked-badge'}, '♥ Liked' + flaggerSuffix(l.liked_by)));
   }
-  var pendingStatuses = ['Pending', 'Under Contract', 'Closed', 'Off Market?'];
+  var pendingStatuses = ['Pending', 'Under Contract', 'Closed', 'Off Market?', 'Sold?'];
   if (pendingStatuses.indexOf(l.listing_status || '') >= 0) {
     badgeRow.appendChild(el('span', {className: 'pending-badge'}, l.listing_status));
   }
