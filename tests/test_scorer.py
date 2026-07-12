@@ -755,3 +755,11 @@ class TestCommuteGateDrift:
     def test_no_stated_limit_is_in_sync(self):
         from app.scorer import commute_gate_drift
         assert commute_gate_drift("no commute rules here")["in_sync"] is True
+
+
+class TestCommuteGateInclusivePhrasing:
+    def test_parses_at_or_more_phrasing(self):
+        """v68 phrasing: 'Commute of 110 minutes or more' / 'REJECT at 110 min or more'."""
+        from app.scorer import criteria_commute_limit
+        text = "Commute of 110 minutes or more door-to-door = Reject.\nREJECT at 110 min or more"
+        assert criteria_commute_limit(text) == 110
