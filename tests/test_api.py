@@ -873,7 +873,7 @@ class TestPruneSold:
             # Mock Jina Reader returning "sold" page
             with patch("httpx.Client") as mock_httpx:
                 mock_response = MagicMock()
-                mock_response.text = "This home sold on February 15, 2026 for $1,500,000"
+                mock_response.text = "This home sold on February 15, 2026 for $1,500,000. Beautiful colonial home with four bedrooms, hardwood floors throughout, an updated kitchen, and a two-car garage on a quiet cul-de-sac near schools, parks, shopping, and the Metro-North station. Listing courtesy of the listing broker."
                 mock_client = MagicMock()
                 mock_client.__enter__ = MagicMock(return_value=mock_client)
                 mock_client.__exit__ = MagicMock(return_value=False)
@@ -915,7 +915,7 @@ class TestPruneSold:
             # Jina returns a pending page
             with patch("httpx.Client") as mock_httpx:
                 mock_response = MagicMock()
-                mock_response.text = '{"listingStatus":"pending"} This home is pending sale.'
+                mock_response.text = '{"listingStatus":"pending"} This home is pending sale. Beautiful colonial home with four bedrooms, hardwood floors throughout, an updated kitchen, and a two-car garage on a quiet cul-de-sac near schools, parks, shopping, and the Metro-North station. Listing courtesy of the listing broker.'
                 mock_client_inst = MagicMock()
                 mock_client_inst.__enter__ = MagicMock(return_value=mock_client_inst)
                 mock_client_inst.__exit__ = MagicMock(return_value=False)
