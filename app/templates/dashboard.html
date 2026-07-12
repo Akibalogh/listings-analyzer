@@ -2120,7 +2120,7 @@ function buildCard(l) {
   if (l.liked) {
     badgeRow.appendChild(el('span', {className: 'liked-badge'}, '♥ Liked' + flaggerSuffix(l.liked_by)));
   }
-  var pendingStatuses = ['Pending', 'Under Contract', 'Closed'];
+  var pendingStatuses = ['Pending', 'Under Contract', 'Closed', 'Off Market?'];
   if (pendingStatuses.indexOf(l.listing_status || '') >= 0) {
     badgeRow.appendChild(el('span', {className: 'pending-badge'}, l.listing_status));
   }

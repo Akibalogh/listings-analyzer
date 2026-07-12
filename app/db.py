@@ -230,12 +230,45 @@ def init_db():
     if reset:
         logger.info(f"Requeued {reset} jobs orphaned by restart")
 
+    # Strip tracking params from stored Redfin URLs (email links carry
+    # ?riftinfo=... which triggers 405s/bot pages on later fetches)
+    _strip_redfin_url_params()
+
     logger.info("Database initialized")
 
 
 def _placeholder():
     """Return the parameter placeholder for the current DB."""
     return "%s" if settings.is_postgres else "?"
+
+
+def _strip_redfin_url_params() -> int:
+    """Remove query strings from stored Redfin listing URLs (idempotent).
+
+    Also upgrades http:// to https://. Returns count cleaned.
+    """
+    ph = _placeholder()
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, listing_url FROM listings "
+            "WHERE listing_url LIKE '%redfin.com%' "
+            "AND (listing_url LIKE '%?%' OR listing_url LIKE 'http://%')"
+        )
+        rows = cur.fetchall()
+        cleaned = 0
+        for row in rows:
+            lid, url = row[0], row[1]
+            new_url = url.split("?")[0].replace("http://", "https://", 1)
+            if new_url != url:
+                cur.execute(
+                    f"UPDATE listings SET listing_url = {ph} WHERE id = {ph}",
+                    (new_url, lid),
+                )
+                cleaned += 1
+        if cleaned:
+            logger.info(f"Stripped tracking params from {cleaned} Redfin URL(s)")
+        return cleaned
 
 
 def save_processed_email(

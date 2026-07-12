@@ -2810,7 +2810,7 @@ def _prune_sold_listings(fix: bool = False) -> dict:
     with db.get_connection() as conn:
         cur = conn.cursor()
         cur.execute(
-            "SELECT id, address, town, state, zip_code, listing_url "
+            "SELECT id, address, town, state, zip_code, listing_url, listing_status "
             "FROM listings WHERE listing_url IS NOT NULL OR address IS NOT NULL"
         )
         if settings.is_postgres:
@@ -2837,6 +2837,13 @@ def _prune_sold_listings(fix: bool = False) -> dict:
                     headers={"Accept": "text/plain", "X-Return-Format": "text"},
                 )
                 text = resp.text.lower()[:5000]
+
+            # Redfin serves bots a tracker pixel / WAF challenge instead of the
+            # page; a "no indicators found" verdict on one is meaningless —
+            # count it as an error rather than silently treating it as active
+            if len(text) < 200 or "tacker probe" in text or "1x1 image" in text or "awswaf" in text:
+                errors += 1
+                continue
 
             entry = {
                 "id": listing["id"],
@@ -2896,12 +2903,46 @@ def _prune_sold_listings(fix: bool = False) -> dict:
             logger.warning(f"OneKeyMLS status check failed for listing #{listing['id']}: {e}")
             errors += 1
 
+    # --- Pass 3: search-presence check (daily) ---
+    # Individual Redfin listing pages are bot-blocked, but the filter's search
+    # results still fetch. A tracked listing absent from the results is likely
+    # pending/sold/delisted — flag it 'Off Market?' so it stops parading as a
+    # fresh candidate; restore to Active if it reappears.
+    absent: list[dict] = []
+    restored: list[dict] = []
+    try:
+        if _presence_check_due():
+            from app.poller import search_presence_home_ids
+            present_ids, pages_fetched = search_presence_home_ids()
+            if pages_fetched > 0:
+                db.set_app_state(
+                    "last_presence_check", datetime.now(timezone.utc).isoformat()
+                )
+                import re as _presence_re
+                terminal = {"pending", "under contract", "closed", "sold", "off market?"}
+                for r in rows:
+                    m = _presence_re.search(r"/home/(\d+)", r.get("listing_url") or "")
+                    if not m:
+                        continue
+                    status = (r.get("listing_status") or "").lower()
+                    entry = {"id": r["id"], "address": r.get("address"), "town": r.get("town")}
+                    if m.group(1) not in present_ids:
+                        if status not in terminal and r["id"] not in detected_ids:
+                            absent.append(entry)
+                    elif status == "off market?":
+                        restored.append(entry)
+    except Exception:
+        logger.exception("Search presence check failed")
+
     report: dict = {
         "checked": checked,
         "sold_count": len(sold),
         "sold": sold,
         "pending_count": len(pending),
         "pending": pending,
+        "absent_from_search_count": len(absent),
+        "absent_from_search": absent,
+        "restored_count": len(restored),
         "errors": errors,
         "fix": fix,
     }
@@ -2927,7 +2968,30 @@ def _prune_sold_listings(fix: bool = False) -> dict:
             report["pending_updated"] = len(pending)
             logger.info(f"Updated {len(pending)} listing(s) to Pending status")
 
+        # Flag listings that vanished from the search results (don't delete)
+        for a in absent:
+            db.update_listing_status(a["id"], "Off Market?")
+        if absent:
+            logger.info(f"Flagged {len(absent)} listing(s) as Off Market? (absent from search)")
+        for r_entry in restored:
+            db.update_listing_status(r_entry["id"], "Active")
+        if restored:
+            logger.info(f"Restored {len(restored)} listing(s) to Active (back in search)")
+
     return report
+
+
+def _presence_check_due() -> bool:
+    """True when the last search-presence check is older than a day."""
+    if not settings.redfin_search_url:
+        return False
+    last = db.get_app_state("last_presence_check")
+    if not last:
+        return True
+    try:
+        return datetime.now(timezone.utc) - datetime.fromisoformat(last) >= timedelta(days=1)
+    except ValueError:
+        return True
 
 
 @app.post("/manage/prune-sold")

@@ -170,27 +170,22 @@ def poll_once() -> list[dict]:
     return results
 
 
-def sync_search(max_pages: int = 5) -> dict:
-    """Weekly search sync: scrape the configured Redfin filter for listings.
+def fetch_search_listing_urls(max_pages: int = 5) -> tuple[set[str], int, list[str]]:
+    """Fetch the configured Redfin filter's result pages and extract listing URLs.
 
-    Fetches each result page through Jina Reader (Redfin bot-blocks cloud
-    IPs), extracts listing URLs, saves ones not already in the DB (address
-    parsed from the URL slug), and queues the standard enrichment + scoring
-    pipeline for each. Sold cleanup is unchanged — the hourly prune already
-    handles it per-listing.
+    Direct fetch first (Redfin SSRs the result list; occasionally works from
+    cloud IPs), then Jina Reader (authenticated if a key is set). Search pages
+    stay fetchable where individual listing pages are bot-blocked.
 
-    Returns {"pages_fetched", "urls_found", "added", "skipped_existing", "errors"}.
+    Returns (listing_urls, pages_fetched, errors).
     """
     import time as _time
 
     import httpx
 
-    from app import jobs
-    from app.parsers.plaintext import REDFIN_URL_ADDR_RE
-
     search_url = (settings.redfin_search_url or "").rstrip("/")
     if not search_url:
-        return {"error": "REDFIN_SEARCH_URL not configured"}
+        return set(), 0, ["REDFIN_SEARCH_URL not configured"]
 
     _browser_ua = (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -201,8 +196,6 @@ def sync_search(max_pages: int = 5) -> dict:
     errors: list[str] = []
 
     def _fetch_page(page_url: str) -> str | None:
-        """Direct fetch first (Redfin SSRs the result list; occasionally works
-        from cloud IPs), then Jina Reader (authenticated if a key is set)."""
         with httpx.Client(timeout=60, follow_redirects=True,
                           headers={"User-Agent": _browser_ua}) as client:
             try:
@@ -210,7 +203,7 @@ def sync_search(max_pages: int = 5) -> dict:
                 if resp.status_code == 200 and "/home/" in resp.text:
                     return resp.text
             except Exception as e:
-                logger.info(f"Search sync: direct fetch failed ({e}), trying Jina")
+                logger.info(f"Search fetch: direct failed ({e}), trying Jina")
             jina_headers = {"User-Agent": _browser_ua}
             if settings.jina_api_key:
                 jina_headers["Authorization"] = f"Bearer {settings.jina_api_key}"
@@ -223,7 +216,7 @@ def sync_search(max_pages: int = 5) -> dict:
         try:
             body = _fetch_page(page_url)
         except Exception as e:
-            logger.error(f"Search sync: page {page} fetch failed: {e}")
+            logger.error(f"Search fetch: page {page} failed: {e}")
             errors.append(f"page {page}: {e}")
             break
         pages_fetched += 1
@@ -235,10 +228,44 @@ def sync_search(max_pages: int = 5) -> dict:
             page_urls.add(m.group(0))
         new_on_page = page_urls - seen_urls
         seen_urls |= page_urls
-        logger.info(f"Search sync: page {page} → {len(page_urls)} URLs ({len(new_on_page)} new)")
+        logger.info(f"Search fetch: page {page} → {len(page_urls)} URLs ({len(new_on_page)} new)")
         if not new_on_page:
             break  # past the last page — Redfin repeats or empties results
         _time.sleep(2)
+
+    return seen_urls, pages_fetched, errors
+
+
+def search_presence_home_ids(max_pages: int = 5) -> tuple[set[str], int]:
+    """Redfin home IDs currently present in the filter's search results.
+
+    Used by the prune's presence pass: a tracked listing absent from the
+    results is likely pending/sold/delisted (individual listing pages are
+    bot-blocked, so absence from search is the reliable status signal).
+    Returns (home_ids, pages_fetched) — pages_fetched of 0 means the check
+    failed and no conclusions should be drawn.
+    """
+    urls, pages_fetched, _errors = fetch_search_listing_urls(max_pages)
+    ids = {m.group(1) for u in urls if (m := re.search(r"/home/(\d+)", u))}
+    return ids, pages_fetched
+
+
+def sync_search(max_pages: int = 5) -> dict:
+    """Weekly search sync: scrape the configured Redfin filter for listings.
+
+    Saves listings not already in the DB (address parsed from the URL slug)
+    and queues the standard enrichment + scoring pipeline for each. Sold
+    cleanup is separate — the hourly prune handles it.
+
+    Returns {"pages_fetched", "urls_found", "added", "skipped_existing", "errors"}.
+    """
+    from app import jobs
+    from app.parsers.plaintext import REDFIN_URL_ADDR_RE
+
+    if not (settings.redfin_search_url or "").strip():
+        return {"error": "REDFIN_SEARCH_URL not configured"}
+
+    seen_urls, pages_fetched, errors = fetch_search_listing_urls(max_pages)
 
     added = 0
     skipped = 0

@@ -239,3 +239,98 @@ class TestManageSyncSearchEndpoint:
         res = client.post("/manage/sync-search", headers={"x-manage-key": "test-key"})
         assert res.status_code == 200
         mock_state.assert_not_called()
+
+
+class TestPresencePass:
+    """Prune pass 3: listings absent from the filter's search results get
+    flagged 'Off Market?'; restored to Active when they reappear."""
+
+    def _make(self, home_id, status=None):
+        email_id = db.save_processed_email(
+            gmail_id=f"presence-{home_id}", message_id="", sender="test",
+            subject="t", parser_used="test", listings_found=1,
+        )
+        listing = ParsedListing(
+            source_format="test", address=f"{home_id} Test St", town="Testville",
+            state="NY", listing_status=status,
+            listing_url=f"https://www.redfin.com/NY/Testville/{home_id}-Test-St-10000/home/{home_id}",
+        )
+        return db.save_listing(listing, ScoringResult(score=50, verdict="Worth Touring"), email_id)
+
+    def _run_prune(self, present_ids):
+        from app.main import _prune_sold_listings
+        pixel = MagicMock()
+        pixel.text = "a 1x1 image, likely be a tacker probe"
+        client = MagicMock()
+        client.__enter__ = MagicMock(return_value=client)
+        client.__exit__ = MagicMock(return_value=False)
+        client.get.return_value = pixel
+        with patch("httpx.Client", return_value=client), \
+             patch("app.parsers.onehome.check_listing_status", return_value=None), \
+             patch("app.poller.search_presence_home_ids", return_value=(present_ids, 2)):
+            return _prune_sold_listings(fix=True)
+
+    def test_absent_listing_flagged_off_market(self, temp_db):
+        lid_gone = self._make("111")
+        lid_here = self._make("222")
+        report = self._run_prune(present_ids={"222"})
+        assert report["absent_from_search_count"] == 1
+        assert db.get_listing_by_id(lid_gone)["listing_status"] == "Off Market?"
+        assert db.get_listing_by_id(lid_here)["listing_status"] is None
+
+    def test_reappearing_listing_restored_to_active(self, temp_db):
+        lid = self._make("333", status="Off Market?")
+        report = self._run_prune(present_ids={"333"})
+        assert report["restored_count"] == 1
+        assert db.get_listing_by_id(lid)["listing_status"] == "Active"
+
+    def test_pending_status_never_overwritten(self, temp_db):
+        lid = self._make("444", status="Pending")
+        report = self._run_prune(present_ids=set())
+        assert db.get_listing_by_id(lid)["listing_status"] == "Pending"
+        assert report["absent_from_search_count"] == 0
+
+    def test_failed_fetch_draws_no_conclusions(self, temp_db):
+        from app.main import _prune_sold_listings
+        lid = self._make("555")
+        client = MagicMock()
+        client.__enter__ = MagicMock(return_value=client)
+        client.__exit__ = MagicMock(return_value=False)
+        client.get.side_effect = RuntimeError("blocked")
+        with patch("httpx.Client", return_value=client), \
+             patch("app.parsers.onehome.check_listing_status", return_value=None), \
+             patch("app.poller.search_presence_home_ids", return_value=(set(), 0)):
+            report = _prune_sold_listings(fix=True)
+        assert report["absent_from_search_count"] == 0
+        assert db.get_listing_by_id(lid)["listing_status"] is None
+
+    def test_pixel_page_counts_as_error_not_active(self, temp_db):
+        self._make("666")
+        report = self._run_prune(present_ids={"666"})
+        assert report["errors"] >= 1  # pixel page detected, not silently "checked"
+
+    def test_presence_check_throttled_daily(self, temp_db):
+        from datetime import datetime, timezone
+        from app.main import _presence_check_due
+        assert _presence_check_due() is True
+        db.set_app_state("last_presence_check", datetime.now(timezone.utc).isoformat())
+        assert _presence_check_due() is False
+
+
+class TestUrlHygiene:
+    def test_tracking_params_stripped_on_init(self, temp_db):
+        email_id = db.save_processed_email(
+            gmail_id="hygiene", message_id="", sender="test", subject="t",
+            parser_used="test", listings_found=1,
+        )
+        listing = ParsedListing(
+            source_format="test", address="9 Track St", town="Testville", state="NY",
+            listing_url="http://www.redfin.com/NY/T/9-Track-St-10000/home/999?riftinfo=abc123",
+        )
+        lid = db.save_listing(listing, ScoringResult(score=50, verdict="Worth Touring"), email_id)
+        cleaned = db._strip_redfin_url_params()
+        assert cleaned == 1
+        url = db.get_listing_by_id(lid)["listing_url"]
+        assert url == "https://www.redfin.com/NY/T/9-Track-St-10000/home/999"
+        # Idempotent
+        assert db._strip_redfin_url_params() == 0
