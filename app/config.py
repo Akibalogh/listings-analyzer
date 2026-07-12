@@ -44,7 +44,7 @@ class Settings(BaseSettings):
     # AI evaluation model
     ai_eval_model: str = "claude-haiku-4-5-20251001"
 
-    # Hard commute limit in minutes — listings over this are rejected
+    # Hard commute limit in minutes — listings at or over this are rejected
     # deterministically before any AI call (mirrors criteria hard requirements)
     commute_hard_limit_minutes: int = 110
 

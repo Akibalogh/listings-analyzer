@@ -29,7 +29,8 @@ ALLOWED_VERDICTS = {"Strong Match", "Worth Touring", "Low Priority", "Weak Match
 
 
 _CRITERIA_COMMUTE_LIMIT_RE = re.compile(
-    r"commute[^.\n]{0,60}?over\s+(\d{2,3})\s*min|reject\s+over\s+(\d{2,3})\s*min",
+    r"commute[^.\n]{0,60}?(?:over|of)\s+(\d{2,3})\s*min"
+    r"|reject\s+(?:over|at)\s+(\d{2,3})\s*min",
     re.IGNORECASE,
 )
 
@@ -69,9 +70,9 @@ def deterministic_gate(listing_data: dict) -> ScoringResult | None:
     only explicit failures do.
     """
     commute = listing_data.get("commute_minutes")
-    if commute is not None and commute > settings.commute_hard_limit_minutes:
+    if commute is not None and commute >= settings.commute_hard_limit_minutes:
         reason = (
-            f"Commute {commute} min exceeds hard limit "
+            f"Commute {commute} min meets or exceeds hard limit "
             f"of {settings.commute_hard_limit_minutes} min"
         )
         return ScoringResult(

@@ -293,8 +293,14 @@ class TestDeterministicGate:
         assert result.score == 0
         assert result.evaluation_method == "deterministic-gate"
 
-    def test_commute_at_limit_passes(self):
-        assert deterministic_gate({"commute_minutes": 110}) is None
+    def test_commute_at_limit_rejects(self):
+        """The cutoff is inclusive: 110 min itself is out (user decision 2026-07-12)."""
+        result = deterministic_gate({"commute_minutes": 110})
+        assert result is not None
+        assert result.verdict == "Reject"
+
+    def test_commute_below_limit_passes(self):
+        assert deterministic_gate({"commute_minutes": 109}) is None
 
     def test_unknown_commute_never_gates(self):
         assert deterministic_gate({}) is None
