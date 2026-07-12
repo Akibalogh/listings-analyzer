@@ -2005,7 +2005,8 @@ function render() {
     items = items.filter(function(l) { return !l.toured; });
     items = items.filter(function(l) {
       var s = l.listing_status || '';
-      return s !== 'Pending' && s !== 'Sold' && s !== 'Under Contract' && s !== 'Closed';
+      return s !== 'Pending' && s !== 'Sold' && s !== 'Under Contract' && s !== 'Closed'
+        && s !== 'Off Market?';
     });
     if (_displayPrefs.hideLowScore) {
       items = items.filter(function(l) { return l.verdict !== 'Reject' && l.verdict !== 'Weak Match'; });
