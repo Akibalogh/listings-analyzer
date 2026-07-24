@@ -2011,7 +2011,8 @@ def manage_reprocess(request: Request):
 _enrich_state: dict = {"in_progress": False, "result": None}
 
 
-def _enrich_all(clear_bogus: bool = False, clear_bogus_commute: bool = False):
+def _enrich_all(clear_bogus: bool = False, clear_bogus_commute: bool = False,
+                recompute_towns: list[str] | None = None):
     """Background thread: backfill enrichment data for all listings.
 
     Phase 1 (serial): address keys + school data (SchoolDigger rate-limited).
@@ -2019,7 +2020,25 @@ def _enrich_all(clear_bogus: bool = False, clear_bogus_commute: bool = False):
     clear_bogus_commute: clear commute data for listings with stale transit-only routing
     (commute_mode = 'transit', not 'drive+transit') so they get re-enriched with the
     correct drive+transit hybrid approach.
+    recompute_towns: lowercased town names whose commute should be cleared and
+    recomputed — use after changing a station override so affected listings
+    pick up the corrected routing.
     """
+    recompute_set = {t.strip().lower() for t in (recompute_towns or []) if t.strip()}
+    if recompute_set:
+        cleared_towns = 0
+        for lid in db.get_all_listing_ids():
+            listing = db.get_listing_by_id(lid)
+            if listing and (listing.get("town") or "").lower() in recompute_set:
+                with db.get_connection() as conn:
+                    cur = conn.cursor()
+                    ph = db._placeholder()
+                    cur.execute(
+                        f"UPDATE listings SET commute_minutes = NULL, commute_data_json = NULL WHERE id = {ph}",
+                        (lid,),
+                    )
+                cleared_towns += 1
+        logger.info(f"Cleared commute for {cleared_towns} listings in towns {sorted(recompute_set)}")
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     from app.enrichment import fetch_commute_time, fetch_school_data, normalize_address, fetch_property_tax, fetch_property_tax_orpts, fetch_power_line_proximity, fetch_flood_zone, fetch_station_proximity, parse_garage_count, parse_hoa_amount, parse_pool_flag, parse_basement, parse_year_built, parse_list_date, _geocode_address, enrich_missing_urls, fetch_lot_acres_parcel
@@ -2367,12 +2386,22 @@ def manage_enrich(request: Request):
 
     clear_bogus_commute = request.query_params.get("clear_bogus_commute", "").lower() == "true"
 
+    # recompute_towns=west harrison,mahopac — clear+recompute commute for those
+    # towns after a station-override change
+    recompute_raw = request.query_params.get("recompute_towns", "")
+    recompute_towns = [t for t in recompute_raw.split(",") if t.strip()]
+
     _enrich_state["in_progress"] = True
     _enrich_state["result"] = None
-    t = threading.Thread(target=_enrich_all, args=(clear_bogus, clear_bogus_commute), daemon=True)
+    t = threading.Thread(
+        target=_enrich_all,
+        args=(clear_bogus, clear_bogus_commute, recompute_towns),
+        daemon=True,
+    )
     t.start()
 
-    return {"status": "started", "clear_bogus": clear_bogus, "clear_bogus_commute": clear_bogus_commute}
+    return {"status": "started", "clear_bogus": clear_bogus,
+            "clear_bogus_commute": clear_bogus_commute, "recompute_towns": recompute_towns}
 
 
 @app.get("/manage/senders")
