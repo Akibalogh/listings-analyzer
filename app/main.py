@@ -2917,7 +2917,8 @@ def _prune_sold_listings(fix: bool = False) -> dict:
     with db.get_connection() as conn:
         cur = conn.cursor()
         cur.execute(
-            "SELECT id, address, town, state, zip_code, listing_url, listing_status "
+            "SELECT id, address, town, state, zip_code, listing_url, listing_status, "
+            "toured, tour_requested, liked, passed "
             "FROM listings WHERE listing_url IS NOT NULL OR address IS NOT NULL"
         )
         if settings.is_postgres:
@@ -3065,10 +3066,21 @@ def _prune_sold_listings(fix: bool = False) -> dict:
         # Two-strike sold deletion: first detection flags 'Sold?', a second
         # consecutive detection deletes. A single misread (e.g. a page's own
         # sale-history lines) becomes a self-correcting badge, not data loss.
+        # User-flagged listings (toured/want-to-go/liked/passed) are NEVER
+        # auto-deleted — a flag means the buyer curated it, so at most badge it
+        # 'Sold?' and let them decide. (A Want-to-Go home once vanished this way.)
         if sold:
-            status_by_id = {r["id"]: (r.get("listing_status") or "") for r in rows}
-            confirmed = [s["id"] for s in sold if status_by_id.get(s["id"]) == "Sold?"]
-            first_strike = [s["id"] for s in sold if s["id"] not in confirmed]
+            by_id = {r["id"]: r for r in rows}
+            def _flagged(lid):
+                r = by_id.get(lid, {})
+                return bool(r.get("toured") or r.get("tour_requested") or r.get("liked") or r.get("passed"))
+
+            status_by_id = {lid: (r.get("listing_status") or "") for lid, r in by_id.items()}
+            confirmed = [s["id"] for s in sold
+                         if status_by_id.get(s["id"]) == "Sold?" and not _flagged(s["id"])]
+            protected = [s["id"] for s in sold if _flagged(s["id"])]
+            first_strike = [s["id"] for s in sold
+                            if s["id"] not in confirmed and s["id"] not in protected]
             if confirmed:
                 with db.get_connection() as conn:
                     cur = conn.cursor()
@@ -3076,12 +3088,17 @@ def _prune_sold_listings(fix: bool = False) -> dict:
                         cur.execute(f"DELETE FROM scores WHERE listing_id = {ph}", (lid,))
                         cur.execute(f"DELETE FROM listings WHERE id = {ph}", (lid,))
                 logger.info(f"Pruned {len(confirmed)} sold listing(s) (second detection)")
-            for lid in first_strike:
+            # Flag both first-strikes and protected (flagged) listings as Sold?,
+            # never deleting the latter
+            for lid in first_strike + protected:
                 db.update_listing_status(lid, "Sold?")
             if first_strike:
                 logger.info(f"Flagged {len(first_strike)} listing(s) as Sold? (first detection)")
+            if protected:
+                logger.info(f"{len(protected)} user-flagged listing(s) marked Sold? but NOT deleted")
             report["deleted"] = len(confirmed)
             report["sold_flagged"] = len(first_strike)
+            report["protected_from_deletion"] = len(protected)
 
         # Update pending listings status (don't delete)
         if pending:

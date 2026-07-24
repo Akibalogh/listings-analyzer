@@ -526,3 +526,54 @@ class TestGmailAccountGuard:
         assert res.status_code == 200
         assert db.get_app_state("gmail_refresh_token") == "rt-good"
         assert db.get_app_state("gmail_connected_account") == "akibalogh@gmail.com"
+
+
+class TestPruneNeverDeletesFlagged:
+    """A user-flagged listing must never be auto-deleted by the prune, even if
+    it reads as sold twice (the bug that lost a Want-to-Go home)."""
+
+    SOLD_PAGE = ("this home sold on february 15, 2026 for $1,500,000. "
+                 + "beautiful colonial with hardwood floors and a large yard. " * 10)
+
+    def _make(self, home_id, **flags):
+        email_id = db.save_processed_email(
+            gmail_id=f"prot-{home_id}", message_id="", sender="test", subject="t",
+            parser_used="test", listings_found=1,
+        )
+        listing = ParsedListing(
+            source_format="test", address=f"{home_id} Prot St", town="Testville", state="NY",
+            listing_url=f"https://www.redfin.com/NY/Testville/{home_id}-Prot-St-10000/home/{home_id}",
+        )
+        lid = db.save_listing(listing, ScoringResult(score=72, verdict="Worth Touring"), email_id)
+        for f, v in flags.items():
+            {"toured": db.mark_listing_toured, "tour_requested": db.mark_listing_tour_requested,
+             "liked": db.mark_listing_liked, "passed": db.mark_listing_passed}[f](lid, v, by="aki@x")
+        return lid
+
+    def _run(self):
+        from app.main import _prune_sold_listings
+        page = MagicMock(); page.text = self.SOLD_PAGE
+        client = MagicMock()
+        client.__enter__ = MagicMock(return_value=client); client.__exit__ = MagicMock(return_value=False)
+        client.get.return_value = page
+        with patch("httpx.Client", return_value=client), \
+             patch("app.parsers.onehome.check_listing_status", return_value=None), \
+             patch("app.poller.search_presence_home_ids", return_value=(set(), 0)):
+            return _prune_sold_listings(fix=True)
+
+    def test_want_to_go_listing_never_deleted_even_on_repeat(self, temp_db):
+        lid = self._make("701", tour_requested=True)
+        # Two consecutive sold detections — an unflagged listing would be deleted
+        self._run()
+        r = self._run()
+        assert db.get_listing_by_id(lid) is not None  # survived
+        assert db.get_listing_by_id(lid)["listing_status"] == "Sold?"
+        assert r["protected_from_deletion"] >= 1
+        assert r["deleted"] == 0
+
+    def test_unflagged_listing_still_deleted_on_second_strike(self, temp_db):
+        lid = self._make("702")  # no flags
+        self._run()
+        r = self._run()
+        assert db.get_listing_by_id(lid) is None  # deleted as before
+        assert r["deleted"] == 1
