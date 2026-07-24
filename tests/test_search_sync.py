@@ -471,3 +471,58 @@ class TestReauthSessionAuth:
         res = client.get("/manage/gmail-reauth", follow_redirects=False)
         # Passed the auth gate (would 500 on missing creds, not 403)
         assert res.status_code != 403
+
+
+class TestGmailAccountGuard:
+    """Reauth must not silently accept a token for the wrong Google account."""
+
+    def _flow_returning(self, email):
+        """A fake OAuth Flow whose getProfile returns the given account email."""
+        flow = MagicMock()
+        flow.credentials.refresh_token = "rt-123"
+        prof = flow.credentials  # any object; build() is patched separately
+        return flow, email
+
+    def test_wrong_account_rejected(self, temp_db, monkeypatch):
+        import app.main as m
+        monkeypatch.setattr(m.settings, "gmail_account_email", "akibalogh@gmail.com")
+        # OAuth state so the callback passes the CSRF check
+        import json as _json
+        db.set_app_state(m._GMAIL_OAUTH_STATE_KEY, _json.dumps({"state": "s1", "code_verifier": "v"}))
+
+        flow = MagicMock()
+        flow.credentials.refresh_token = "rt-123"
+        monkeypatch.setattr(m, "settings", m.settings)
+        monkeypatch.setattr("google_auth_oauthlib.flow.Flow.from_client_config", lambda *a, **k: flow)
+        # getProfile returns the WRONG inbox
+        svc = MagicMock()
+        svc.users.return_value.getProfile.return_value.execute.return_value = {"emailAddress": "aki@bitsafe.finance"}
+        monkeypatch.setattr("googleapiclient.discovery.build", lambda *a, **k: svc)
+
+        from fastapi.testclient import TestClient
+        client = TestClient(m.app)
+        res = client.get("/manage/gmail-callback?state=s1&code=abc", follow_redirects=False)
+        assert res.status_code == 400
+        assert "wrong google account" in res.text.lower()
+        # Token must NOT have been saved
+        assert db.get_app_state("gmail_refresh_token") != "rt-123"
+
+    def test_correct_account_accepted(self, temp_db, monkeypatch):
+        import app.main as m
+        monkeypatch.setattr(m.settings, "gmail_account_email", "akibalogh@gmail.com")
+        import json as _json
+        db.set_app_state(m._GMAIL_OAUTH_STATE_KEY, _json.dumps({"state": "s2", "code_verifier": "v"}))
+
+        flow = MagicMock()
+        flow.credentials.refresh_token = "rt-good"
+        monkeypatch.setattr("google_auth_oauthlib.flow.Flow.from_client_config", lambda *a, **k: flow)
+        svc = MagicMock()
+        svc.users.return_value.getProfile.return_value.execute.return_value = {"emailAddress": "akibalogh@gmail.com"}
+        monkeypatch.setattr("googleapiclient.discovery.build", lambda *a, **k: svc)
+
+        from fastapi.testclient import TestClient
+        client = TestClient(m.app)
+        res = client.get("/manage/gmail-callback?state=s2&code=abc", follow_redirects=False)
+        assert res.status_code == 200
+        assert db.get_app_state("gmail_refresh_token") == "rt-good"
+        assert db.get_app_state("gmail_connected_account") == "akibalogh@gmail.com"

@@ -23,6 +23,12 @@ the same date.
   now tracks the last *error-free* poll, not just the last attempt.
 - **Session-authed `/manage/gmail-reauth`** — a signed-in dashboard user can
   reconnect without the manage key in the URL (the takeover button uses this).
+- **Wrong-account guard on Gmail reauth** — the OAuth flow now sets
+  `login_hint` to the alerts inbox (`GMAIL_ACCOUNT_EMAIL`, default
+  akibalogh@gmail.com) and the callback verifies (via `getProfile`) that the
+  authorized account matches, rejecting a token granted for the wrong Google
+  account (e.g. the dashboard-login address) instead of silently polling an
+  empty inbox. `/health` now reports `connected_account` vs `expected_account`.
 - **Weekly Slack digest**, decoupled from the retired scrape — new listings
   from the last 7 days (email-sourced), data quality, and a loud line if the
   pipeline is unhealthy. Fires on its own 7-day timer.

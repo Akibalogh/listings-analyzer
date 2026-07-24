@@ -8,6 +8,10 @@ class Settings(BaseSettings):
     # Gmail OAuth
     gmail_credentials_json: str = "{}"
     gmail_refresh_token: str = ""
+    # The inbox that receives the Redfin alerts. Used as the OAuth login_hint
+    # and verified in the reauth callback so the token can't be accidentally
+    # granted for the wrong Google account (e.g. the dashboard-login address).
+    gmail_account_email: str = "akibalogh@gmail.com"
 
     # Alert senders (supports domains like "redfin.com" for all senders from that domain)
     alert_senders: str = ""

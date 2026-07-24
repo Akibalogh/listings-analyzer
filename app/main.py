@@ -365,6 +365,8 @@ def _ingest_health(poll: dict) -> dict:
         "auth_expired": auth_expired,
         "last_successful_poll": last_ok,
         "hours_since_success": hours_since,
+        "connected_account": db.get_app_state("gmail_connected_account"),
+        "expected_account": settings.gmail_account_email or None,
     }
 
 
@@ -1693,11 +1695,12 @@ def gmail_reauth_start(request: Request):
         scopes=_GMAIL_OAUTH_SCOPES,
         redirect_uri=redirect_uri,
     )
-    auth_url, _ = flow.authorization_url(
-        access_type="offline",
-        prompt="consent",
-        state=state,
-    )
+    auth_url_kwargs = dict(access_type="offline", prompt="consent", state=state)
+    # Pre-select the alerts inbox so the account chooser defaults to the right
+    # Google account (both the owner's accounts are Google)
+    if settings.gmail_account_email:
+        auth_url_kwargs["login_hint"] = settings.gmail_account_email
+    auth_url, _ = flow.authorization_url(**auth_url_kwargs)
 
     # Persist state + code_verifier (PKCE) together so the callback can reconstruct the flow.
     # code_verifier is generated internally by Flow; we need to store it because the callback
@@ -1776,6 +1779,35 @@ def gmail_reauth_callback(request: Request):
         """, status_code=400)
 
     refresh_token = flow.credentials.refresh_token
+
+    # Verify the token is for the alerts inbox, not another Google account
+    # (e.g. the dashboard-login address). getProfile needs no extra scope.
+    expected = (settings.gmail_account_email or "").lower()
+    if expected:
+        try:
+            from googleapiclient.discovery import build as _build
+            profile = _build("gmail", "v1", credentials=flow.credentials).users().getProfile(userId="me").execute()
+            authorized = (profile.get("emailAddress") or "").lower()
+        except Exception as e:
+            logger.error(f"Could not verify authorized Gmail account: {e}")
+            authorized = ""
+        if authorized and authorized != expected:
+            logger.warning(f"Gmail reauth rejected: authorized {authorized}, expected {expected}")
+            manage_key = settings.manage_key or ""
+            retry_url = f"/manage/gmail-reauth?key={manage_key}"
+            return HTMLResponse(f"""
+            <html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+            <style>body{{font-family:-apple-system,sans-serif;max-width:420px;margin:60px auto;padding:20px;text-align:center}}
+            h2{{color:#dc2626}}p{{color:#475569;line-height:1.6}}code{{background:#f1f5f9;padding:2px 6px;border-radius:4px}}
+            .retry{{display:inline-block;margin-top:20px;padding:12px 24px;background:#2563eb;color:#fff;border-radius:8px;text-decoration:none;font-weight:600}}</style></head>
+            <body><h2>&#9888; Wrong Google account</h2>
+            <p>You authorized <code>{authorized}</code>, but the Redfin alerts arrive at
+            <code>{expected}</code>. The connection was <b>not</b> saved.</p>
+            <p>Try again and pick <code>{expected}</code> in the account chooser.</p>
+            <a href="{retry_url}" class="retry">Try again</a></body></html>
+            """, status_code=400)
+        if authorized:
+            db.set_app_state("gmail_connected_account", authorized)
 
     if not refresh_token:
         manage_key = settings.manage_key or ""
