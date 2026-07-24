@@ -384,6 +384,9 @@ class TestFetchCommuteTime:
         assert _STATION_OVERRIDES["pound ridge"] == "Katonah"
         assert _STATION_OVERRIDES["yorktown heights"] == "Croton-Harmon"
         assert _STATION_OVERRIDES["cortlandt manor"] == "Croton-Harmon"
+        # Stationless towns near Katonah (were producing garbage routes)
+        assert _STATION_OVERRIDES["baldwin place"] == "Katonah"
+        assert _STATION_OVERRIDES["mahopac"] == "Katonah"
         assert _STATION_OVERRIDES["chappaqua"] == "Chappaqua"
         assert _STATION_OVERRIDES["armonk"] == "North White Plains"
 

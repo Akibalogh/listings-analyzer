@@ -2064,7 +2064,11 @@ def _enrich_all(clear_bogus: bool = False, clear_bogus_commute: bool = False):
                 try:
                     cdata = json.loads(cd)
                     mode = cdata.get("commute_mode", "")
-                    if mode == "transit":  # stale pure-transit routing
+                    mins = listing.get("commute_minutes") or 0
+                    # Clear stale pure-transit routing, OR any implausibly long
+                    # commute (>150 min from Westchester to FiDi is a routing
+                    # error — usually a town with no Metro-North station override)
+                    if mode == "transit" or mins > 150:
                         with db.get_connection() as conn:
                             cur = conn.cursor()
                             ph = db._placeholder()
@@ -2073,7 +2077,7 @@ def _enrich_all(clear_bogus: bool = False, clear_bogus_commute: bool = False):
                                 (lid,),
                             )
                         bogus_cleared += 1
-                        logger.info(f"Cleared stale transit-only commute for listing #{lid}")
+                        logger.info(f"Cleared bogus commute ({mode or 'long'}, {mins} min) for listing #{lid}")
                 except (json.JSONDecodeError, TypeError):
                     pass
             logger.info(f"Cleared stale commute data from {bogus_cleared} listings")
