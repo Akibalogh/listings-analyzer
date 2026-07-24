@@ -4,6 +4,36 @@ All notable changes to Listings Analyzer are documented here.
 
 ---
 
+## [2026-07-24] — Staleness takeover + retire the dead Redfin scrape
+
+### Context
+The Gmail token expired ~July 10 and every hourly poll silently failed for
+two weeks — data froze with no visible warning. Separately, Redfin began
+CAPTCHA-gating the search filter, so the weekly scrape had been failing since
+the same date.
+
+### Added
+- **Full-screen staleness takeover** — the dashboard blocks with a takeover
+  when the ingest pipeline is actually broken: Gmail auth expired (red, with a
+  one-click **Reconnect Gmail** button) or no successful poll in >25h. A quiet
+  market (successful polls, no new alerts) never triggers it. Dismissible to
+  browse existing listings.
+- **Ingest health in `/health`** — `ingest` block with `healthy`, `reason`,
+  `auth_expired`, `last_successful_poll`, `hours_since_success`. Poll status
+  now tracks the last *error-free* poll, not just the last attempt.
+- **Session-authed `/manage/gmail-reauth`** — a signed-in dashboard user can
+  reconnect without the manage key in the URL (the takeover button uses this).
+- **Weekly Slack digest**, decoupled from the retired scrape — new listings
+  from the last 7 days (email-sourced), data quality, and a loud line if the
+  pipeline is unhealthy. Fires on its own 7-day timer.
+
+### Changed / Removed
+- Retired the scheduled Redfin search scrape (CAPTCHA-blocked). The search-URL
+  fetch machinery remains only for best-effort pending-detection and the manual
+  `/manage/sync-search`. Email alerts (polled hourly) are the live channel.
+
+---
+
 ## [2026-07-11] — Flag attribution + sync dedup by Redfin home ID
 
 ### Added

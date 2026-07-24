@@ -48,16 +48,15 @@ class Settings(BaseSettings):
     # deterministically before any AI call (mirrors criteria hard requirements)
     commute_hard_limit_minutes: int = 110
 
-    # Redfin saved-search filter scraped by the weekly search sync.
+    # Redfin saved-search filter. Redfin CAPTCHA-gates the scrape, so this no
+    # longer feeds a scheduled sync — it's used only by the pending-detection
+    # presence check (best-effort) and the manual /manage/sync-search endpoint.
     # Override via REDFIN_SEARCH_URL when the filter changes.
     redfin_search_url: str = (
         "https://www.redfin.com/city/30738/NY/Yorktown/filter/"
         "dyos-shape-id=98684490,property-type=house,min-price=1M,max-price=2.25M,"
         "min-beds=4,min-sqft=2.25k-sqft,min-parking=1,basement-type=finished+unfinished"
     )
-
-    # Days between search syncs (0 = disabled)
-    search_sync_interval_days: int = 7
 
     # Jina Reader API key (optional) — unauthenticated r.jina.ai is rate-limited
     # per IP, which heavy scrape days can exhaust

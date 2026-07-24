@@ -1507,6 +1507,29 @@
     border-radius: 4px;
     letter-spacing: 0.3px;
   }
+  /* Stale-pipeline full-screen takeover */
+  .stale-takeover {
+    position: fixed; inset: 0; z-index: 9999;
+    background: rgba(15, 23, 42, 0.75); backdrop-filter: blur(3px);
+    display: flex; align-items: center; justify-content: center; padding: 24px;
+  }
+  .stale-card {
+    background: var(--card-bg, #fff); border-radius: 16px; max-width: 440px; width: 100%;
+    padding: 32px 28px; text-align: center; box-shadow: 0 20px 60px rgba(0,0,0,0.35);
+    border-top: 6px solid var(--red, #dc2626);
+  }
+  .stale-icon { font-size: 44px; line-height: 1; margin-bottom: 12px; }
+  .stale-title { font-size: 22px; font-weight: 700; margin-bottom: 10px; color: var(--text, #0f172a); }
+  .stale-body { font-size: 15px; line-height: 1.5; color: var(--text-faint, #475569); margin-bottom: 22px; }
+  .stale-btn {
+    display: inline-block; background: var(--red, #dc2626); color: #fff; text-decoration: none;
+    font-weight: 600; padding: 12px 24px; border-radius: 10px; font-size: 15px;
+  }
+  .stale-btn:hover { filter: brightness(0.93); }
+  .stale-dismiss {
+    display: block; width: 100%; margin-top: 14px; background: none; border: none;
+    color: var(--text-faint, #64748b); font-size: 13px; cursor: pointer; text-decoration: underline;
+  }
 </style>
 </head>
 <body>
@@ -3300,10 +3323,46 @@ function updateLastPolled() {
   fetchPollStatus();
 }
 
+function renderStaleTakeover(ingest) {
+  var existing = document.getElementById('staleTakeover');
+  if (!ingest || ingest.healthy) { if (existing) existing.remove(); return; }
+  if (existing) return;  // already shown
+
+  var authExpired = ingest.auth_expired;
+  var hrs = ingest.hours_since_success;
+  var last = ingest.last_successful_poll
+    ? new Date(ingest.last_successful_poll).toLocaleString() : 'unknown';
+
+  var title = authExpired
+    ? 'Listings aren’t updating'
+    : 'Listings may be out of date';
+  var body = authExpired
+    ? 'The Gmail connection expired, so new Redfin alerts aren’t being imported. '
+      + 'Reconnect to resume automatic updates.'
+    : 'No successful sync in ' + (hrs != null ? hrs + ' hours' : 'over a day')
+      + '. New listings won’t appear until this recovers. Last good sync: ' + last + '.';
+
+  var overlay = el('div', {id: 'staleTakeover', className: 'stale-takeover'});
+  var card = el('div', {className: 'stale-card'});
+  card.appendChild(el('div', {className: 'stale-icon'}, authExpired ? '🔒' : '⚠️'));
+  card.appendChild(el('div', {className: 'stale-title'}, title));
+  card.appendChild(el('div', {className: 'stale-body'}, body));
+  if (authExpired) {
+    var btn = el('a', {className: 'stale-btn', href: '/manage/gmail-reauth'}, 'Reconnect Gmail');
+    card.appendChild(btn);
+  }
+  var dismiss = el('button', {className: 'stale-dismiss',
+    onclick: function() { overlay.remove(); }}, 'Browse existing listings anyway');
+  card.appendChild(dismiss);
+  overlay.appendChild(card);
+  document.body.appendChild(overlay);
+}
+
 async function fetchPollStatus() {
   try {
     var res = await fetch('/health');
     var data = await res.json();
+    renderStaleTakeover(data.ingest);
     var poll = data.poll || {};
     var el = document.getElementById('lastPolled');
     if (!poll.last_poll_at) {
