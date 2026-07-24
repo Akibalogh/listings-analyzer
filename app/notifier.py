@@ -46,28 +46,32 @@ def notify_new_listing(listing: dict, score: int, verdict: str, evaluation_metho
     _post_slack(text, context=f"{address} ({verdict})")
 
 
-def notify_sync_digest(sync_report: dict, sold_removed: int, quality_pct: float) -> None:
-    """Post the weekly sync summary to Slack. Fails silently.
+def notify_weekly_digest(new_listings: list[dict], quality_pct: float, ingest: dict) -> None:
+    """Post the weekly heartbeat to Slack. Fails silently.
 
-    Verdicts for new finds aren't known yet (scoring runs in the job queue) —
-    good matches notify individually via notify_new_listing when scored.
+    Email alerts are the live channel (polled hourly); this is a once-a-week
+    summary of what came in, plus a loud line if the pipeline is unhealthy.
     """
     if not settings.slack_webhook_url:
         return
-    added = sync_report.get("added", 0)
-    skipped = sync_report.get("skipped_existing", 0)
-    errors = sync_report.get("errors") or []
+    n = len(new_listings)
+    good = [l for l in new_listings if (l.get("verdict") or "") in ("Worth Touring", "Strong Match")]
     lines = [
-        "📋 *Weekly listing sync*",
-        f"• {added} new listing{'s' if added != 1 else ''} added"
-        + (" (scoring queued — good matches will ping here)" if added else ""),
-        f"• {skipped} already tracked",
-        f"• {sold_removed} sold listing{'s' if sold_removed != 1 else ''} removed today",
+        "📋 *Weekly digest*",
+        f"• {n} new listing{'s' if n != 1 else ''} in the last 7 days"
+        + (f" ({len(good)} Worth Touring+)" if good else ""),
         f"• Data quality: {quality_pct:.0f}%",
     ]
-    if errors:
-        lines.append(f"• ⚠️ {len(errors)} fetch error{'s' if len(errors) != 1 else ''}")
-    _post_slack("\n".join(lines), context="weekly sync digest")
+    for l in good[:5]:
+        addr = f"{l.get('address', '?')}, {l.get('town', '')}".strip(", ")
+        lines.append(f"   • {l.get('score')} {l.get('verdict')} — {addr}")
+    if not ingest.get("healthy"):
+        if ingest.get("auth_expired"):
+            lines.append("• ⚠️ *Gmail connection expired — listings are NOT updating. Reconnect in the app.*")
+        else:
+            hrs = ingest.get("hours_since_success")
+            lines.append(f"• ⚠️ *No successful sync in {hrs}h — the pipeline may be stuck.*")
+    _post_slack("\n".join(lines), context="weekly digest")
 
 
 def _post_slack(text: str, context: str) -> None:

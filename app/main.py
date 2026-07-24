@@ -33,12 +33,20 @@ _BATCH_CHUNK_SIZE = 5
 
 # --- Poll status tracking ---
 _poll_status = {
-    "last_poll_at": None,       # ISO timestamp of last completed poll
-    "listings_found": 0,        # listings found in last poll
-    "last_poll_source": None,   # "scheduled", "manual", "manage"
-    "consecutive_empty": 0,     # consecutive polls with 0 new listings
-    "last_error": None,         # last error message, if any
+    "last_poll_at": None,          # ISO timestamp of last completed poll attempt
+    "last_successful_poll": None,  # ISO timestamp of last error-free poll
+    "listings_found": 0,           # listings found in last poll
+    "last_poll_source": None,      # "scheduled", "manual", "manage"
+    "consecutive_empty": 0,        # consecutive polls with 0 new listings
+    "last_error": None,            # last error message, if any
 }
+
+# Auth-failure signatures in a poll error → the Gmail token needs re-auth
+_AUTH_ERROR_MARKERS = ("invalid_grant", "expired", "revoked", "unauthorized")
+
+# Hours without a successful poll before the pipeline is considered stale.
+# The scheduler polls hourly, so >25h means it's genuinely stuck/failing.
+_STALE_AFTER_HOURS = 25
 _poll_lock = threading.Lock()
 
 
@@ -60,11 +68,16 @@ def _record_poll(source: str, count: int, error: str | None = None):
     """Record the result of a poll cycle and persist to DB."""
     import json
     from datetime import datetime, timezone
+    now_iso = datetime.now(timezone.utc).isoformat()
     with _poll_lock:
-        _poll_status["last_poll_at"] = datetime.now(timezone.utc).isoformat()
+        _poll_status["last_poll_at"] = now_iso
         _poll_status["listings_found"] = count
         _poll_status["last_poll_source"] = source
         _poll_status["last_error"] = error
+        # Track the last poll that actually reached Gmail (no error), so
+        # staleness reflects a broken pipeline, not a quiet market
+        if error is None:
+            _poll_status["last_successful_poll"] = now_iso
         if count == 0 and error is None:
             _poll_status["consecutive_empty"] += 1
         else:
@@ -88,10 +101,8 @@ def _scheduled_poll_loop(interval_hours: int):
             _record_poll("scheduled", 0, error=str(e))
 
         # Prune sold/off-market listings
-        sold_removed = 0
         try:
             prune_report = _prune_sold_listings(fix=True)
-            sold_removed = prune_report["sold_count"]
             if prune_report["sold_count"] > 0 or prune_report.get("pending_count", 0) > 0:
                 logger.info(
                     f"Scheduled prune: removed {prune_report['sold_count']} sold, "
@@ -103,22 +114,12 @@ def _scheduled_poll_loop(interval_hours: int):
         except Exception:
             logger.exception("Scheduled prune-sold failed")
 
-        # Weekly Redfin search sync: discover listings the email alerts missed
+        # Weekly heartbeat digest to Slack (email is the live channel — polled
+        # hourly above; the old Redfin scrape was retired, Redfin CAPTCHA-gates it)
         try:
-            if _search_sync_due():
-                from app.poller import sync_search
-                sync_report = sync_search()
-                # Stamp only on success — a total failure (e.g. Jina rate
-                # limit) retries on the next hourly tick, not in a week
-                if sync_report.get("pages_fetched", 0) > 0:
-                    db.set_app_state(
-                        "last_search_sync", datetime.now(timezone.utc).isoformat()
-                    )
-                    from app.notifier import notify_sync_digest
-                    notify_sync_digest(sync_report, sold_removed, _data_quality_pct())
-                logger.info(f"Weekly search sync: {sync_report}")
+            _maybe_send_weekly_digest()
         except Exception:
-            logger.exception("Weekly search sync failed")
+            logger.exception("Weekly digest failed")
 
         # Repair data gaps and drain the persistent job queue. kick() (not a
         # blocking drain) so a large backlog can't starve the next Gmail poll.
@@ -167,19 +168,44 @@ def _log_commute_gate_drift() -> dict | None:
     return drift
 
 
-def _search_sync_due() -> bool:
-    """True when the last search sync is older than the configured interval."""
-    interval_days = settings.search_sync_interval_days
-    if interval_days <= 0 or not settings.redfin_search_url:
-        return False
-    last = db.get_app_state("last_search_sync")
-    if not last:
-        return True
-    try:
-        last_dt = datetime.fromisoformat(last)
-    except ValueError:
-        return True
-    return datetime.now(timezone.utc) - last_dt >= timedelta(days=interval_days)
+def _new_listings_since(days: int) -> list[dict]:
+    """Listings created within the last `days`, newest first."""
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    out = []
+    for l in db.get_all_listings():
+        created = l.get("created_at")
+        if not created:
+            continue
+        try:
+            dt = datetime.fromisoformat(str(created).replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+        if dt >= cutoff:
+            out.append(l)
+    out.sort(key=lambda x: x.get("score") or 0, reverse=True)
+    return out
+
+
+def _maybe_send_weekly_digest() -> None:
+    """Post a weekly heartbeat to Slack: new listings, quality, pipeline health."""
+    last = db.get_app_state("last_weekly_digest")
+    if last:
+        try:
+            if datetime.now(timezone.utc) - datetime.fromisoformat(last) < timedelta(days=7):
+                return
+        except ValueError:
+            pass
+    with _poll_lock:
+        ingest = _ingest_health(dict(_poll_status))
+    from app.notifier import notify_weekly_digest
+    notify_weekly_digest(
+        new_listings=_new_listings_since(7),
+        quality_pct=_data_quality_pct(),
+        ingest=ingest,
+    )
+    db.set_app_state("last_weekly_digest", datetime.now(timezone.utc).isoformat())
 
 
 @asynccontextmanager
@@ -304,20 +330,50 @@ def dashboard():
 # --- API endpoints (protected) ---
 
 
+def _ingest_health(poll: dict) -> dict:
+    """Assess whether the listing pipeline is actually updating.
+
+    Distinguishes a broken pipeline (auth failure, or no successful poll in
+    over a day) from a merely quiet market (successful polls, no new alerts).
+    Only the former warrants a user-facing warning.
+    """
+    err = (poll.get("last_error") or "").lower()
+    auth_expired = any(marker in err for marker in _AUTH_ERROR_MARKERS)
+
+    last_ok = poll.get("last_successful_poll")
+    hours_since = None
+    if last_ok:
+        try:
+            delta = datetime.now(timezone.utc) - datetime.fromisoformat(last_ok)
+            hours_since = round(delta.total_seconds() / 3600, 1)
+        except ValueError:
+            pass
+
+    stale = hours_since is not None and hours_since > _STALE_AFTER_HOURS
+    # Unknown (never polled successfully, no auth error) is not a failure —
+    # don't alarm on a fresh boot before the first poll completes
+    healthy = not auth_expired and not stale
+    reason = None
+    if auth_expired:
+        reason = "gmail_auth_expired"
+    elif stale:
+        reason = "no_successful_poll"
+
+    return {
+        "healthy": healthy,
+        "reason": reason,
+        "auth_expired": auth_expired,
+        "last_successful_poll": last_ok,
+        "hours_since_success": hours_since,
+        "connected_account": db.get_app_state("gmail_connected_account"),
+        "expected_account": settings.gmail_account_email or None,
+    }
+
+
 @app.get("/health")
 def health():
     with _poll_lock:
         poll = dict(_poll_status)
-    last_sync = db.get_app_state("last_search_sync")
-    next_sync = None
-    if last_sync and settings.search_sync_interval_days > 0:
-        try:
-            next_sync = (
-                datetime.fromisoformat(last_sync)
-                + timedelta(days=settings.search_sync_interval_days)
-            ).isoformat()
-        except ValueError:
-            pass
     try:
         commute_gate = _log_commute_gate_drift()
     except Exception:
@@ -325,11 +381,7 @@ def health():
     return {
         "status": "ok",
         "poll": poll,
-        "search_sync": {
-            "last_run": last_sync,
-            "next_due": next_sync,
-            "interval_days": settings.search_sync_interval_days,
-        },
+        "ingest": _ingest_health(poll),
         "commute_gate": commute_gate,
     }
 
@@ -1610,13 +1662,15 @@ _GMAIL_OAUTH_STATE_KEY = "gmail_oauth_state"
 def gmail_reauth_start(request: Request):
     """Start the Gmail OAuth re-authorization flow.
 
-    Generates a Google OAuth URL and redirects the browser there.
-    Protected by manage key passed as a query param for phone-friendly use:
-      GET /manage/gmail-reauth?key=<manage_key>
+    Generates a Google OAuth URL and redirects the browser there. Authorized
+    by EITHER the manage key (phone-friendly ?key=<manage_key>) OR a valid
+    signed-in dashboard session — so the in-app "Reconnect Gmail" button can
+    link here without embedding the manage key in client-side code.
     """
     key = request.query_params.get("key", "")
-    if not settings.manage_key or key != settings.manage_key:
-        raise HTTPException(status_code=403, detail="Invalid or missing key")
+    key_ok = settings.manage_key and key == settings.manage_key
+    if not key_ok and not _get_current_user(request):
+        raise HTTPException(status_code=403, detail="Invalid key or not signed in")
 
     creds_data = settings.gmail_credentials
     client_config = creds_data.get("web", creds_data.get("installed", {}))
@@ -1641,11 +1695,12 @@ def gmail_reauth_start(request: Request):
         scopes=_GMAIL_OAUTH_SCOPES,
         redirect_uri=redirect_uri,
     )
-    auth_url, _ = flow.authorization_url(
-        access_type="offline",
-        prompt="consent",
-        state=state,
-    )
+    auth_url_kwargs = dict(access_type="offline", prompt="consent", state=state)
+    # Pre-select the alerts inbox so the account chooser defaults to the right
+    # Google account (both the owner's accounts are Google)
+    if settings.gmail_account_email:
+        auth_url_kwargs["login_hint"] = settings.gmail_account_email
+    auth_url, _ = flow.authorization_url(**auth_url_kwargs)
 
     # Persist state + code_verifier (PKCE) together so the callback can reconstruct the flow.
     # code_verifier is generated internally by Flow; we need to store it because the callback
@@ -1724,6 +1779,35 @@ def gmail_reauth_callback(request: Request):
         """, status_code=400)
 
     refresh_token = flow.credentials.refresh_token
+
+    # Verify the token is for the alerts inbox, not another Google account
+    # (e.g. the dashboard-login address). getProfile needs no extra scope.
+    expected = (settings.gmail_account_email or "").lower()
+    if expected:
+        try:
+            from googleapiclient.discovery import build as _build
+            profile = _build("gmail", "v1", credentials=flow.credentials).users().getProfile(userId="me").execute()
+            authorized = (profile.get("emailAddress") or "").lower()
+        except Exception as e:
+            logger.error(f"Could not verify authorized Gmail account: {e}")
+            authorized = ""
+        if authorized and authorized != expected:
+            logger.warning(f"Gmail reauth rejected: authorized {authorized}, expected {expected}")
+            manage_key = settings.manage_key or ""
+            retry_url = f"/manage/gmail-reauth?key={manage_key}"
+            return HTMLResponse(f"""
+            <html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+            <style>body{{font-family:-apple-system,sans-serif;max-width:420px;margin:60px auto;padding:20px;text-align:center}}
+            h2{{color:#dc2626}}p{{color:#475569;line-height:1.6}}code{{background:#f1f5f9;padding:2px 6px;border-radius:4px}}
+            .retry{{display:inline-block;margin-top:20px;padding:12px 24px;background:#2563eb;color:#fff;border-radius:8px;text-decoration:none;font-weight:600}}</style></head>
+            <body><h2>&#9888; Wrong Google account</h2>
+            <p>You authorized <code>{authorized}</code>, but the Redfin alerts arrive at
+            <code>{expected}</code>. The connection was <b>not</b> saved.</p>
+            <p>Try again and pick <code>{expected}</code> in the account chooser.</p>
+            <a href="{retry_url}" class="retry">Try again</a></body></html>
+            """, status_code=400)
+        if authorized:
+            db.set_app_state("gmail_connected_account", authorized)
 
     if not refresh_token:
         manage_key = settings.manage_key or ""

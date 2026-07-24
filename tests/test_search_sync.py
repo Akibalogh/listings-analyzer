@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 
 from app import db
 from app.config import settings
-from app.main import app, _search_sync_due
+from app.main import app
 from app.models import ParsedListing, ScoringResult
 from app.poller import sync_search
 
@@ -157,24 +157,6 @@ class TestSyncSearch:
         assert report == {"error": "REDFIN_SEARCH_URL not configured"}
 
 
-class TestSearchSyncSchedule:
-    def test_due_when_never_run(self, temp_db):
-        assert _search_sync_due() is True
-
-    def test_not_due_right_after_run(self, temp_db):
-        from datetime import datetime, timezone
-        db.set_app_state("last_search_sync", datetime.now(timezone.utc).isoformat())
-        assert _search_sync_due() is False
-
-    def test_due_after_interval_elapsed(self, temp_db):
-        from datetime import datetime, timedelta, timezone
-        old = datetime.now(timezone.utc) - timedelta(days=8)
-        db.set_app_state("last_search_sync", old.isoformat())
-        assert _search_sync_due() is True
-
-    def test_disabled_when_interval_zero(self, temp_db, monkeypatch):
-        monkeypatch.setattr(settings, "search_sync_interval_days", 0)
-        assert _search_sync_due() is False
 
 
 class TestFlagAttribution:
@@ -416,3 +398,131 @@ class TestTwoStrikeSoldDeletion:
         assert report["deleted"] == 0
         assert report["restored_count"] == 1
         assert db.get_listing_by_id(lid)["listing_status"] == "Active"
+
+
+class TestIngestHealth:
+    """_ingest_health distinguishes a broken pipeline from a quiet market."""
+
+    def _health(self, **poll):
+        from app.main import _ingest_health
+        return _ingest_health(poll)
+
+    def test_healthy_recent_success(self):
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        h = self._health(last_successful_poll=now, last_error=None)
+        assert h["healthy"] is True
+        assert h["reason"] is None
+
+    def test_auth_error_is_unhealthy(self):
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        h = self._health(last_successful_poll=now,
+                         last_error="('invalid_grant: Token has been expired or revoked.', {})")
+        assert h["healthy"] is False
+        assert h["auth_expired"] is True
+        assert h["reason"] == "gmail_auth_expired"
+
+    def test_stale_success_is_unhealthy(self):
+        from datetime import datetime, timedelta, timezone
+        old = (datetime.now(timezone.utc) - timedelta(hours=30)).isoformat()
+        h = self._health(last_successful_poll=old, last_error=None)
+        assert h["healthy"] is False
+        assert h["reason"] == "no_successful_poll"
+        assert h["hours_since_success"] > 25
+
+    def test_quiet_market_recent_poll_is_healthy(self):
+        """Successful poll with 0 listings is healthy — not every day has new alerts."""
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        h = self._health(last_successful_poll=now, last_error=None, listings_found=0,
+                         consecutive_empty=40)
+        assert h["healthy"] is True
+
+    def test_fresh_boot_never_polled_is_not_alarmed(self):
+        """No successful poll yet and no auth error → don't alarm on boot."""
+        h = self._health(last_successful_poll=None, last_error=None)
+        assert h["healthy"] is True
+
+    def test_health_endpoint_exposes_ingest(self, temp_db):
+        from fastapi.testclient import TestClient
+        client = TestClient(app)
+        data = client.get("/health").json()
+        assert "ingest" in data
+        assert "healthy" in data["ingest"]
+
+
+class TestReauthSessionAuth:
+    """The reauth endpoint accepts a signed-in session so the dashboard button
+    needn't embed the manage key."""
+
+    def test_rejected_without_key_or_session(self):
+        from fastapi.testclient import TestClient
+        client = TestClient(app)
+        res = client.get("/manage/gmail-reauth", follow_redirects=False)
+        assert res.status_code == 403
+
+    def test_allowed_with_session(self, monkeypatch):
+        from fastapi.testclient import TestClient
+        # Signed-in user present; stop before the real OAuth flow by failing creds
+        monkeypatch.setattr("app.main._get_current_user", lambda req: "aki@bitsafe.finance")
+        monkeypatch.setattr("app.main.settings.gmail_credentials_json", "{}")
+        client = TestClient(app)
+        res = client.get("/manage/gmail-reauth", follow_redirects=False)
+        # Passed the auth gate (would 500 on missing creds, not 403)
+        assert res.status_code != 403
+
+
+class TestGmailAccountGuard:
+    """Reauth must not silently accept a token for the wrong Google account."""
+
+    def _flow_returning(self, email):
+        """A fake OAuth Flow whose getProfile returns the given account email."""
+        flow = MagicMock()
+        flow.credentials.refresh_token = "rt-123"
+        prof = flow.credentials  # any object; build() is patched separately
+        return flow, email
+
+    def test_wrong_account_rejected(self, temp_db, monkeypatch):
+        import app.main as m
+        monkeypatch.setattr(m.settings, "gmail_account_email", "akibalogh@gmail.com")
+        # OAuth state so the callback passes the CSRF check
+        import json as _json
+        db.set_app_state(m._GMAIL_OAUTH_STATE_KEY, _json.dumps({"state": "s1", "code_verifier": "v"}))
+
+        flow = MagicMock()
+        flow.credentials.refresh_token = "rt-123"
+        monkeypatch.setattr(m, "settings", m.settings)
+        monkeypatch.setattr("google_auth_oauthlib.flow.Flow.from_client_config", lambda *a, **k: flow)
+        # getProfile returns the WRONG inbox
+        svc = MagicMock()
+        svc.users.return_value.getProfile.return_value.execute.return_value = {"emailAddress": "aki@bitsafe.finance"}
+        monkeypatch.setattr("googleapiclient.discovery.build", lambda *a, **k: svc)
+
+        from fastapi.testclient import TestClient
+        client = TestClient(m.app)
+        res = client.get("/manage/gmail-callback?state=s1&code=abc", follow_redirects=False)
+        assert res.status_code == 400
+        assert "wrong google account" in res.text.lower()
+        # Token must NOT have been saved
+        assert db.get_app_state("gmail_refresh_token") != "rt-123"
+
+    def test_correct_account_accepted(self, temp_db, monkeypatch):
+        import app.main as m
+        monkeypatch.setattr(m.settings, "gmail_account_email", "akibalogh@gmail.com")
+        import json as _json
+        db.set_app_state(m._GMAIL_OAUTH_STATE_KEY, _json.dumps({"state": "s2", "code_verifier": "v"}))
+
+        flow = MagicMock()
+        flow.credentials.refresh_token = "rt-good"
+        monkeypatch.setattr("google_auth_oauthlib.flow.Flow.from_client_config", lambda *a, **k: flow)
+        svc = MagicMock()
+        svc.users.return_value.getProfile.return_value.execute.return_value = {"emailAddress": "akibalogh@gmail.com"}
+        monkeypatch.setattr("googleapiclient.discovery.build", lambda *a, **k: svc)
+
+        from fastapi.testclient import TestClient
+        client = TestClient(m.app)
+        res = client.get("/manage/gmail-callback?state=s2&code=abc", follow_redirects=False)
+        assert res.status_code == 200
+        assert db.get_app_state("gmail_refresh_token") == "rt-good"
+        assert db.get_app_state("gmail_connected_account") == "akibalogh@gmail.com"
