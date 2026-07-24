@@ -303,6 +303,7 @@ _STATION_OVERRIDES: dict[str, str] = {
     "granite springs": "Katonah",
     "baldwin place": "Katonah",
     "mahopac": "Katonah",
+    "west harrison": "White Plains",
     "bedford corners": "Mount Kisco",
     "purchase": "White Plains",
     "briarcliff manor": "Scarborough",
