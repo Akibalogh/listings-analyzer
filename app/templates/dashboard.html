@@ -909,6 +909,26 @@
     text-align: right;
   }
 
+  /* Buyer notes (feedback → re-score) */
+  .buyer-notes-section { margin-top: 12px; }
+  .buyer-notes-header {
+    font-size: 11px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.6px; color: var(--text-faint); margin-bottom: 6px;
+  }
+  .buyer-notes-input {
+    width: 100%; box-sizing: border-box; resize: vertical;
+    font-family: inherit; font-size: 12px; line-height: 1.4;
+    padding: 8px; border: 1px solid #e2e8f0; border-radius: 8px;
+    color: var(--text-secondary); background: #fff;
+  }
+  .buyer-notes-input:focus { outline: none; border-color: var(--blue, #2563eb); }
+  .buyer-notes-btn {
+    margin-top: 6px; padding: 7px 14px; font-size: 12px; font-weight: 600;
+    color: #fff; background: var(--blue, #2563eb);
+    border: none; border-radius: 8px; cursor: pointer;
+  }
+  .buyer-notes-btn:disabled { opacity: 0.6; cursor: default; }
+
   /* Monthly cost section */
   .cost-total-row {
     /* Span both columns — a total is a summary line, not a line item, and
@@ -2293,6 +2313,16 @@ function buildCard(l) {
       ]));
     }
   }
+  /* Buyer notes → re-score (signed-in users only; it triggers AI scoring) */
+  if (currentUser) {
+    detailInner.appendChild(buildBuyerNotesSection(l));
+  } else if (l.buyer_notes) {
+    detailInner.appendChild(el('div', {className: 'buyer-notes-section'}, [
+      el('div', {className: 'buyer-notes-header'}, 'Your notes'),
+      el('div', {style: 'font-size:12px;color:var(--text-secondary)'}, l.buyer_notes)
+    ]));
+  }
+
   /* Listing URL */
   if (l.listing_url) {
     var urlDiv = el('div', {className: 'listing-url'});
@@ -2700,6 +2730,52 @@ function buildImageSection(l) {
   section.appendChild(inputRow);
 
   return section;
+}
+
+function buildBuyerNotesSection(l) {
+  var section = el('div', {className: 'buyer-notes-section'});
+  section.appendChild(el('div', {className: 'buyer-notes-header'}, 'Your notes (override the AI)'));
+  var ta = el('textarea', {
+    className: 'buyer-notes-input',
+    rows: '2',
+    placeholder: 'e.g. "Saw it — finished basement, ground-floor bedroom off kitchen"'
+  });
+  ta.value = l.buyer_notes || '';
+  ta.addEventListener('click', function(e) { e.stopPropagation(); });
+  var btn = el('button', {className: 'buyer-notes-btn'}, 'Save & Re-score');
+  btn.addEventListener('click', function(e) {
+    e.stopPropagation();
+    saveBuyerNotes(l.id, ta.value, btn);
+  });
+  section.appendChild(ta);
+  section.appendChild(btn);
+  return section;
+}
+
+async function saveBuyerNotes(listingId, notes, btn) {
+  var original = btn.textContent;
+  btn.textContent = 'Re-scoring…';
+  btn.disabled = true;
+  try {
+    var res = await fetch('/listings/' + listingId + '/notes', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({notes: notes})
+    });
+    if (!res.ok) {
+      var err = await res.json().catch(function() { return {}; });
+      throw new Error(err.detail || ('HTTP ' + res.status));
+    }
+    var data = await res.json();
+    showToast(data.rescored
+      ? 'Re-scored: ' + data.score + ' ' + (data.verdict || '')
+      : 'Notes saved');
+    loadListings();
+  } catch (e) {
+    showToast('Failed: ' + e.message);
+    btn.textContent = original;
+    btn.disabled = false;
+  }
 }
 
 function buildAddUrlSection(l) {

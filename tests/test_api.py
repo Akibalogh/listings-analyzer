@@ -1615,3 +1615,46 @@ class TestManageUpdateListing:
         assert "score" not in call_kwargs
         assert "criteria_version" not in call_kwargs
         assert call_kwargs.get("year_built") == 2000
+
+
+class TestBuyerNotes:
+    """POST /listings/{id}/notes — buyer feedback that triggers a re-score."""
+
+    def test_requires_auth(self, client):
+        res = client.post("/listings/1/notes", json={"notes": "finished basement"})
+        assert res.status_code == 401
+
+    @patch("app.main.db.get_listing_by_id", return_value=None)
+    def test_404_for_missing_listing(self, mock_get, authed_client):
+        res = authed_client.post("/listings/999/notes", json={"notes": "x"})
+        assert res.status_code == 404
+
+    @patch("app.main.db.get_listing_by_id", return_value={"id": 1, "address": "1 A St"})
+    def test_rejects_overlong_notes(self, mock_get, authed_client):
+        res = authed_client.post("/listings/1/notes", json={"notes": "x" * 2001})
+        assert res.status_code == 400
+
+    @patch("app.main.db.get_all_score_metadata", return_value={})
+    @patch("app.main._rescore_one_listing")
+    @patch("app.main.db.get_active_criteria", return_value={"version": 1, "instructions": "c"})
+    @patch("app.main.db.update_listing_fields_by_id")
+    @patch("app.main.db.get_listing_by_id", return_value={"id": 1, "address": "1 A St"})
+    def test_saves_notes_and_rescores(self, mock_get, mock_update, mock_crit, mock_rescore,
+                                      mock_meta, authed_client):
+        res = authed_client.post("/listings/1/notes",
+                                 json={"notes": "Finished basement confirmed"})
+        assert res.status_code == 200
+        assert res.json()["rescored"] is True
+        mock_update.assert_called_once_with(1, force=True, buyer_notes="Finished basement confirmed")
+        mock_rescore.assert_called_once()
+
+    @patch("app.main.db.get_all_score_metadata", return_value={})
+    @patch("app.main._rescore_one_listing")
+    @patch("app.main.db.get_active_criteria", return_value={"version": 1, "instructions": "c"})
+    @patch("app.main.db.update_listing_fields_by_id")
+    @patch("app.main.db.get_listing_by_id", return_value={"id": 1, "address": "1 A St"})
+    def test_clearing_notes_sets_null(self, mock_get, mock_update, mock_crit, mock_rescore,
+                                      mock_meta, authed_client):
+        res = authed_client.post("/listings/1/notes", json={"notes": "  "})
+        assert res.status_code == 200
+        mock_update.assert_called_once_with(1, force=True, buyer_notes=None)
