@@ -496,7 +496,9 @@
     transition: max-height 0.35s cubic-bezier(0.4, 0, 0.2, 1);
   }
   .card.expanded .card-detail {
-    max-height: 1500px;
+    /* Generous cap so tall cards (long AI reasoning + schools + stats) are
+       never silently clipped — the old 1500px cut the bottom off on mobile */
+    max-height: 6000px;
   }
   .card-detail-inner {
     padding: 14px;
@@ -782,6 +784,15 @@
     color: var(--text-secondary);
     padding: 2px 0;
     line-height: 1.5;
+  }
+  .summary-toggle {
+    background: none;
+    border: none;
+    padding: 4px 0;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--blue, #2563eb);
+    cursor: pointer;
   }
   .summary-conclusion {
     font-size: 13px;
@@ -2306,6 +2317,7 @@ function buildPropertySummary(text) {
   var lines = text.split('\n');
   var inConclusion = false;
   var conclusionLines = [];
+  var factorLines = [];
   var firstNonEmpty = true;
   var factorCount = 0;
 
@@ -2323,9 +2335,30 @@ function buildPropertySummary(text) {
     } else if (inConclusion) {
       conclusionLines.push(line);
     } else {
-      section.appendChild(el('div', {className: 'summary-factor'}, line));
+      factorLines.push(line);
       factorCount++;
     }
+  }
+
+  /* Keep the card short on mobile: show the first few factors, tuck the rest
+     behind a toggle. Long analyses were overflowing the viewport. */
+  var VISIBLE = 4;
+  factorLines.forEach(function(line, idx) {
+    var f = el('div', {className: 'summary-factor'}, line);
+    if (idx >= VISIBLE) { f.style.display = 'none'; f.dataset.extraFactor = '1'; }
+    section.appendChild(f);
+  });
+  if (factorLines.length > VISIBLE) {
+    var hidden = factorLines.length - VISIBLE;
+    var toggle = el('button', {className: 'summary-toggle'}, 'Show ' + hidden + ' more ▾');
+    toggle.addEventListener('click', function(e) {
+      e.stopPropagation();
+      var extras = section.querySelectorAll('[data-extra-factor]');
+      var opening = extras.length && extras[0].style.display === 'none';
+      for (var j = 0; j < extras.length; j++) extras[j].style.display = opening ? '' : 'none';
+      toggle.textContent = opening ? 'Show less ▴' : 'Show ' + hidden + ' more ▾';
+    });
+    section.appendChild(toggle);
   }
   if (conclusionLines.length > 0) {
     section.appendChild(el('div', {className: 'summary-conclusion'}, conclusionLines.join(' ')));
@@ -2384,7 +2417,11 @@ function buildEnrichmentSection(commuteMinutes, commuteData, schoolData) {
     if (mode === 'drive+transit' && commuteData) {
       var driveMin = commuteData.drive_minutes || '?';
       var transitMin = commuteData.transit_minutes || '?';
-      commuteCard.appendChild(el('div', {className: 'commute-detail-label'}, driveMin + ' min drive + ' + transitMin + ' min train'));
+      // Name the station — "18 min drive" is only meaningful if you know where to
+      var station = (commuteData.station || '').replace(/ train station.*$/i, '');
+      var legs = driveMin + ' min drive' + (station ? ' to ' + station : '')
+        + ' + ' + transitMin + ' min train';
+      commuteCard.appendChild(el('div', {className: 'commute-detail-label'}, legs));
     }
     commuteCard.appendChild(el('div', {className: 'commute-detail-label'}, 'to Brookfield Place (8 AM weekday)'));
     section.appendChild(commuteCard);
