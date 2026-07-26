@@ -90,9 +90,29 @@ def drain(max_jobs: int = 500) -> dict:
         result = {"processed": processed, "failed": len(failed_ids)}
         if processed or failed_ids:
             logger.info(f"Job drain finished: {result}")
+        _notify_high_scores()
         return result
     finally:
         _drain_lock.release()
+
+
+def _notify_high_scores() -> None:
+    """Push an alert for any listing that newly reached the score threshold.
+
+    Source-agnostic and once-per-listing (claim_unnotified_high_scores marks
+    them notified atomically), so it catches email-poller, manual-add, sync,
+    and import listings alike without ever double-alerting.
+    """
+    try:
+        rows = db.claim_unnotified_high_scores(settings.notify_score_threshold)
+        if not rows:
+            return
+        from app.notifier import send_high_score_alert
+        for r in rows:
+            send_high_score_alert(r, r.get("score") or 0, r.get("verdict") or "")
+        logger.info(f"Sent {len(rows)} high-score alert(s)")
+    except Exception:
+        logger.exception("High-score notification sweep failed")
 
 
 def enqueue_missing(force: bool = False) -> dict:
@@ -341,20 +361,9 @@ def _handle_score(listing: dict) -> None:
     if not criteria:
         raise RuntimeError("no active criteria — cannot score")
 
-    # Notify on first real scoring for manual adds and weekly-search finds —
-    # the point of the search sync is hearing about new matches. CSV imports
-    # and gap-scan repairs of old listings must not burst-notify. (The
-    # notifier itself gates on Worth Touring / Strong Match.)
-    prior = db.get_score_metadata(listing["id"])
-    notify = (
-        listing.get("source_format") in ("manual", "redfin-sync")
-        and (not prior or prior.get("evaluation_method") not in ("ai", "deterministic-gate"))
-    )
-
-    score = _rescore_one_listing(listing, criteria)
-    if notify:
-        from app.notifier import notify_new_listing
-        notify_new_listing(listing, score.score, score.verdict, score.evaluation_method)
+    # Notifications are handled by the drain's high-score sweep (source-agnostic,
+    # once-per-listing via the `notified` flag), so scoring just persists.
+    _rescore_one_listing(listing, criteria)
 
 
 _HANDLERS = {

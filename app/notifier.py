@@ -74,6 +74,54 @@ def notify_weekly_digest(new_listings: list[dict], quality_pct: float, ingest: d
     _post_slack("\n".join(lines), context="weekly digest")
 
 
+def _listing_summary(listing: dict) -> tuple[str, str, str]:
+    """Return (headline, stats_line, url) for a listing alert."""
+    address = listing.get("address", "Unknown")
+    town = listing.get("town", "")
+    state = listing.get("state", "NY")
+    price = listing.get("price")
+    sqft = listing.get("sqft")
+    beds = listing.get("bedrooms")
+    commute = listing.get("commute_minutes")
+    price_str = f"${price:,}" if price else "Price unknown"
+    parts = [f"{sqft:,} sqft" if sqft else "", f"{beds} bd" if beds else "",
+             f"{commute} min commute" if commute else ""]
+    stats = " · ".join([p for p in parts if p])
+    return f"{address}, {town} {state}", f"{price_str}  {stats}".strip(), listing.get("listing_url", "")
+
+
+def notify_pushover(listing: dict, score: int, verdict: str) -> bool:
+    """Send a phone push via Pushover. Returns True if sent. Fails silently."""
+    if not (settings.pushover_token and settings.pushover_user):
+        return False
+    headline, stats, url = _listing_summary(listing)
+    emoji = "🏡" if verdict == "Strong Match" else "🏠"
+    payload = {
+        "token": settings.pushover_token,
+        "user": settings.pushover_user,
+        "title": f"{emoji} New {verdict} ({score}) — {listing.get('town', '')}",
+        "message": f"{headline}\n{stats}",
+        "priority": 0,
+    }
+    if url:
+        payload["url"] = url
+        payload["url_title"] = "View on Redfin"
+    try:
+        resp = httpx.post("https://api.pushover.net/1/messages.json", data=payload, timeout=10.0)
+        resp.raise_for_status()
+        logger.info(f"Pushover sent for {headline} ({verdict} {score})")
+        return True
+    except Exception as e:
+        logger.warning(f"Pushover notification failed for {headline}: {e}")
+        return False
+
+
+def send_high_score_alert(listing: dict, score: int, verdict: str) -> None:
+    """Fan out a new-high-score alert to all configured channels (Pushover + Slack)."""
+    notify_pushover(listing, score, verdict)
+    notify_new_listing(listing, score, verdict, listing.get("evaluation_method", "ai"))
+
+
 def _post_slack(text: str, context: str) -> None:
     try:
         resp = httpx.post(

@@ -262,3 +262,30 @@ class TestNotifyWeeklyDigest:
                 notify_weekly_digest([], 90.0, unhealthy)
                 text = mock_post.call_args[1]["json"]["text"]
                 assert "40h" in text and "stuck" in text.lower()
+
+
+class TestPushover:
+    LISTING = {"address": "1 A St", "town": "Katonah", "state": "NY", "price": 1400000,
+               "sqft": 3000, "bedrooms": 4, "commute_minutes": 75,
+               "listing_url": "https://www.redfin.com/NY/Katonah/1-A-St/home/1"}
+
+    def test_noop_without_tokens(self):
+        from app.notifier import notify_pushover
+        with patch("app.notifier.settings") as s:
+            s.pushover_token = ""; s.pushover_user = ""
+            with patch("app.notifier.httpx.post") as p:
+                assert notify_pushover(self.LISTING, 82, "Strong Match") is False
+                p.assert_not_called()
+
+    def test_sends_with_tokens(self):
+        from app.notifier import notify_pushover
+        with patch("app.notifier.settings") as s:
+            s.pushover_token = "tok"; s.pushover_user = "usr"
+            with patch("app.notifier.httpx.post") as p:
+                p.return_value = MagicMock(raise_for_status=MagicMock())
+                assert notify_pushover(self.LISTING, 82, "Strong Match") is True
+                data = p.call_args[1]["data"]
+                assert data["token"] == "tok" and data["user"] == "usr"
+                assert "82" in data["title"]
+                assert "1 A St, Katonah" in data["message"]
+                assert data["url"].endswith("/home/1")

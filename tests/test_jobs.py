@@ -252,39 +252,6 @@ class TestEnqueueMissing:
         assert all(v == 0 for v in counts.values()), counts
 
 
-class TestScoreNotification:
-    def _score_listing(self, lid, monkeypatch):
-        from unittest.mock import MagicMock
-        scored = MagicMock()
-        scored.score, scored.verdict, scored.evaluation_method = 80, "Worth Touring", "ai"
-        rescore = MagicMock(return_value=scored)
-        notify = MagicMock()
-        monkeypatch.setattr("app.main._rescore_one_listing", rescore)
-        monkeypatch.setattr("app.notifier.notify_new_listing", notify)
-        db.save_criteria("test criteria", created_by="test")
-        jobs._handle_score(db.get_listing_by_id(lid))
-        return notify
-
-    def test_manual_add_first_score_notifies(self, temp_db, monkeypatch):
-        lid = _make_listing(source_format="manual")
-        notify = self._score_listing(lid, monkeypatch)
-        notify.assert_called_once()
-
-    def test_csv_import_never_notifies(self, temp_db, monkeypatch):
-        """The old import path scored without notifying — a 59-row CSV must not
-        burst-send Slack messages."""
-        lid = _make_listing(source_format="redfin-csv")
-        notify = self._score_listing(lid, monkeypatch)
-        notify.assert_not_called()
-
-    def test_search_sync_find_notifies(self, temp_db, monkeypatch):
-        """Weekly-search discoveries notify on first scoring — hearing about
-        new matches is the point of the sync."""
-        lid = _make_listing(source_format="redfin-sync")
-        notify = self._score_listing(lid, monkeypatch)
-        notify.assert_called_once()
-
-
 class TestDeterministicGate:
     def test_commute_over_limit_rejects(self):
         result = deterministic_gate({"commute_minutes": 111})
@@ -305,3 +272,45 @@ class TestDeterministicGate:
     def test_unknown_commute_never_gates(self):
         assert deterministic_gate({}) is None
         assert deterministic_gate({"commute_minutes": None}) is None
+
+
+class TestHighScoreSweep:
+    """The drain's sweep alerts each ≥threshold listing exactly once."""
+
+    def _make_scored(self, score, status=None, notified=False):
+        email_id = db.save_processed_email(
+            gmail_id=f"hs-{score}-{status}-{db.get_all_listing_ids().__len__()}",
+            message_id="", sender="test", subject="t", parser_used="test", listings_found=1,
+        )
+        listing = ParsedListing(source_format="onehome_html", address=f"{score} Sweep St",
+                                town="Katonah", state="NY", listing_status=status)
+        lid = db.save_listing(listing, ScoringResult(score=score, verdict="Worth Touring" if score>=60 else "Reject"), email_id)
+        if notified:
+            with db.get_connection() as conn:
+                conn.cursor().execute(f"UPDATE listings SET notified = TRUE WHERE id = {db._placeholder()}", (lid,))
+        return lid
+
+    def test_claim_returns_high_scores_once(self, temp_db):
+        self._make_scored(72)
+        self._make_scored(85)
+        self._make_scored(50)  # below threshold
+        rows = db.claim_unnotified_high_scores(70)
+        assert {r["score"] for r in rows} == {72, 85}
+        # Second claim returns nothing — already marked notified
+        assert db.claim_unnotified_high_scores(70) == []
+
+    def test_offmarket_high_scores_not_alerted(self, temp_db):
+        self._make_scored(80, status="Pending")
+        self._make_scored(80, status="Sold?")
+        assert db.claim_unnotified_high_scores(70) == []
+
+    def test_sweep_sends_via_notifier(self, temp_db, monkeypatch):
+        self._make_scored(75)
+        sent = []
+        monkeypatch.setattr("app.notifier.send_high_score_alert",
+                            lambda l, s, v: sent.append((l["address"], s)))
+        jobs._notify_high_scores()
+        assert len(sent) == 1 and sent[0][1] == 75
+        # Idempotent — no re-alert on the next sweep
+        jobs._notify_high_scores()
+        assert len(sent) == 1
