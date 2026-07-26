@@ -91,14 +91,19 @@ def _listing_summary(listing: dict) -> tuple[str, str, str]:
 
 
 def notify_pushover(listing: dict, score: int, verdict: str) -> bool:
-    """Send a phone push via Pushover. Returns True if sent. Fails silently."""
-    if not (settings.pushover_token and settings.pushover_user):
+    """Send a phone push via Pushover to every configured recipient.
+
+    Returns True if at least one recipient was notified. Fails silently.
+    Pushover's `user` field takes a single user/group key per request, so we
+    send once per key (supports both spouses without a delivery group).
+    """
+    keys = settings.pushover_user_keys
+    if not (settings.pushover_token and keys):
         return False
     headline, stats, url = _listing_summary(listing)
     emoji = "🏡" if verdict == "Strong Match" else "🏠"
-    payload = {
+    base = {
         "token": settings.pushover_token,
-        "user": settings.pushover_user,
         "title": f"{emoji} New {verdict} ({score}) — {listing.get('town', '')}",
         "message": f"{headline}\n{stats}",
         # High priority: prominent alert, plays a sound, bypasses quiet hours —
@@ -107,16 +112,22 @@ def notify_pushover(listing: dict, score: int, verdict: str) -> bool:
         "sound": "magic",
     }
     if url:
-        payload["url"] = url
-        payload["url_title"] = "View on Redfin"
-    try:
-        resp = httpx.post("https://api.pushover.net/1/messages.json", data=payload, timeout=10.0)
-        resp.raise_for_status()
-        logger.info(f"Pushover sent for {headline} ({verdict} {score})")
-        return True
-    except Exception as e:
-        logger.warning(f"Pushover notification failed for {headline}: {e}")
-        return False
+        base["url"] = url
+        base["url_title"] = "View on Redfin"
+    sent_any = False
+    for key in keys:
+        try:
+            resp = httpx.post(
+                "https://api.pushover.net/1/messages.json",
+                data={**base, "user": key}, timeout=10.0,
+            )
+            resp.raise_for_status()
+            sent_any = True
+        except Exception as e:
+            logger.warning(f"Pushover failed for recipient …{key[-4:]}: {e}")
+    if sent_any:
+        logger.info(f"Pushover sent to {len(keys)} recipient(s) for {headline} ({verdict} {score})")
+    return sent_any
 
 
 def send_high_score_alert(listing: dict, score: int, verdict: str) -> None:
