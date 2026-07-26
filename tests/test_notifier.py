@@ -280,7 +280,7 @@ class TestPushover:
     def test_sends_with_tokens(self):
         from app.notifier import notify_pushover
         with patch("app.notifier.settings") as s:
-            s.pushover_token = "tok"; s.pushover_user = "usr"
+            s.pushover_token = "tok"; s.pushover_user_keys = ["usr"]
             with patch("app.notifier.httpx.post") as p:
                 p.return_value = MagicMock(raise_for_status=MagicMock())
                 assert notify_pushover(self.LISTING, 82, "Strong Match") is True
@@ -290,3 +290,15 @@ class TestPushover:
                 assert "1 A St, Katonah" in data["message"]
                 assert data["url"].endswith("/home/1")
                 assert data["priority"] == 1  # high — surfaces on lock screen
+
+    def test_sends_to_multiple_recipients(self):
+        from app.notifier import notify_pushover
+        with patch("app.notifier.settings") as s:
+            s.pushover_token = "tok"
+            s.pushover_user_keys = ["aki_key", "bron_key"]
+            with patch("app.notifier.httpx.post") as p:
+                p.return_value = MagicMock(raise_for_status=MagicMock())
+                assert notify_pushover(self.LISTING, 82, "Strong Match") is True
+                assert p.call_count == 2
+                users = {c[1]["data"]["user"] for c in p.call_args_list}
+                assert users == {"aki_key", "bron_key"}

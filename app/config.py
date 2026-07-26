@@ -43,7 +43,12 @@ class Settings(BaseSettings):
 
     # Pushover phone push (set both to enable): create an app at pushover.net
     pushover_token: str = ""   # application API token
-    pushover_user: str = ""    # user/group key
+    pushover_user: str = ""    # user/group key(s) — comma-separated for >1 recipient
+
+    @property
+    def pushover_user_keys(self) -> list[str]:
+        """Individual Pushover recipient keys (comma-separated in the env var)."""
+        return [u.strip() for u in self.pushover_user.split(",") if u.strip()]
     # Score at or above which a new listing triggers a phone push
     notify_score_threshold: int = 70
 
