@@ -652,6 +652,7 @@ def _migrate_add_columns():
         ("listings", "passed_by", "TEXT"),
         ("listings", "liked_by", "TEXT"),
         ("listings", "notified", "BOOLEAN DEFAULT FALSE"),
+        ("listings", "buyer_notes", "TEXT"),
         ("listings", "year_built", "INTEGER"),
         ("listings", "list_date", "TEXT"),
         ("listings", "property_tax_json", "TEXT"),

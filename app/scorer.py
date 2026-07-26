@@ -278,12 +278,25 @@ def _build_user_message(
 
     Returns a list of content blocks for the Claude API.
     """
-    # Serialize listing data into the XML-tagged block
-    listing_text = json.dumps(listing_data, indent=2, default=str)
+    # Buyer-verified notes are TRUSTED (the buyer physically saw the house) and
+    # must sit outside <listing_data>, which is untrusted scraped content.
+    data = dict(listing_data)
+    buyer_notes = (data.pop("buyer_verified_notes", "") or "").strip()
+
+    listing_text = json.dumps(data, indent=2, default=str)
+
+    verified_block = ""
+    if buyer_notes:
+        verified_block = f"""
+BUYER-VERIFIED FACTS (authoritative — the buyer inspected this home or its
+photos in person). These OVERRIDE anything in <listing_data> or the images that
+contradicts them, and resolve any "unknown" on the points they address:
+{buyer_notes}
+"""
 
     text_content = f"""EVALUATION INSTRUCTIONS:
 {instructions}
-
+{verified_block}
 <listing_data>
 {listing_text}
 </listing_data>

@@ -763,3 +763,37 @@ class TestCommuteGateInclusivePhrasing:
         from app.scorer import criteria_commute_limit
         text = "Commute of 110 minutes or more door-to-door = Reject.\nREJECT at 110 min or more"
         assert criteria_commute_limit(text) == 110
+
+
+class TestBuyerVerifiedNotes:
+    """Buyer notes are authoritative and must sit OUTSIDE the untrusted
+    <listing_data> block so the model treats them as fact, not as scraped text."""
+
+    def test_notes_render_in_trusted_block(self):
+        blocks = _build_user_message(
+            "criteria here",
+            {"address": "1 A St", "buyer_verified_notes": "Finished basement confirmed in person"},
+        )
+        text = blocks[0]["text"]
+        assert "BUYER-VERIFIED FACTS" in text
+        assert "Finished basement confirmed in person" in text
+        # Must appear before (outside) the untrusted listing_data block
+        assert text.index("BUYER-VERIFIED FACTS") < text.index("<listing_data>")
+        # And must NOT be duplicated inside the JSON payload
+        payload = text[text.index("<listing_data>"):]
+        assert "buyer_verified_notes" not in payload
+
+    def test_no_block_when_no_notes(self):
+        blocks = _build_user_message("criteria", {"address": "1 A St"})
+        assert "BUYER-VERIFIED FACTS" not in blocks[0]["text"]
+
+    def test_blank_notes_ignored(self):
+        blocks = _build_user_message("criteria", {"address": "1 A St", "buyer_verified_notes": "   "})
+        assert "BUYER-VERIFIED FACTS" not in blocks[0]["text"]
+
+    def test_listing_data_still_intact(self):
+        blocks = _build_user_message(
+            "criteria", {"address": "1 A St", "price": 1000000, "buyer_verified_notes": "note"},
+        )
+        text = blocks[0]["text"]
+        assert "1 A St" in text and "1000000" in text

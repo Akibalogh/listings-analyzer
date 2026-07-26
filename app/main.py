@@ -652,6 +652,52 @@ async def toggle_passed(request: Request, listing_id: int):
     return {"listing_id": listing_id, "passed": passed}
 
 
+@app.post("/listings/{listing_id}/notes")
+async def save_buyer_notes(request: Request, listing_id: int):
+    """Save the buyer's verified observations and immediately re-score.
+
+    These notes are treated as authoritative during scoring (they override
+    scraped data and resolve unknowns), so this is how you correct the AI
+    when you can see something it can't — e.g. "finished basement confirmed,
+    saw it in person" or "ground-floor bedroom off the kitchen".
+    """
+    email = _require_auth(request)
+    listing = db.get_listing_by_id(listing_id)
+    if not listing:
+        raise HTTPException(status_code=404, detail=f"Listing #{listing_id} not found")
+
+    body = await request.json()
+    notes = (body.get("notes") or "").strip()
+    if len(notes) > 2000:
+        raise HTTPException(status_code=400, detail="Notes must be 2000 characters or fewer")
+
+    db.update_listing_fields_by_id(listing_id, force=True, buyer_notes=notes or None)
+    logger.info(f"Buyer notes updated for listing #{listing_id} by {email} ({len(notes)} chars)")
+
+    # Re-score right away so the correction shows up immediately
+    rescored = False
+    criteria = db.get_active_criteria()
+    if criteria:
+        fresh = db.get_listing_by_id(listing_id)
+        if fresh:
+            try:
+                _rescore_one_listing(fresh, criteria)
+                rescored = True
+            except Exception:
+                logger.exception(f"Rescore after notes failed for listing #{listing_id}")
+
+    updated = db.get_listing_by_id(listing_id) or {}
+    meta = db.get_all_score_metadata().get(listing_id, {})
+    return {
+        "listing_id": listing_id,
+        "notes": notes,
+        "rescored": rescored,
+        "score": updated.get("score"),
+        "verdict": updated.get("verdict"),
+        "evaluation_method": meta.get("evaluation_method"),
+    }
+
+
 @app.post("/listings/{listing_id}/liked")
 async def toggle_liked(request: Request, listing_id: int):
     """Flag or un-flag a listing as liked (worth showing to parents). Requires auth."""
@@ -1068,6 +1114,11 @@ def _build_listing_data(listing_row: dict) -> dict:
         listing_row.get("description"),
     )
     listing_data["age_condition"] = age_cond
+
+    # Buyer's own verified observations — rendered as a trusted block by the
+    # scorer (outside <listing_data>), so they override scraped/inferred data
+    if listing_row.get("buyer_notes"):
+        listing_data["buyer_verified_notes"] = listing_row["buyer_notes"]
 
     # Price/sqft benchmark vs Zillow median
     ppsf = get_price_per_sqft_signal(
