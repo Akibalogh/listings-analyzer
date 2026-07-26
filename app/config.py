@@ -41,6 +41,12 @@ class Settings(BaseSettings):
     # Slack webhook URL for listing notifications
     slack_webhook_url: str = ""
 
+    # Pushover phone push (set both to enable): create an app at pushover.net
+    pushover_token: str = ""   # application API token
+    pushover_user: str = ""    # user/group key
+    # Score at or above which a new listing triggers a phone push
+    notify_score_threshold: int = 70
+
     # Agent name mapping: "email_or_domain:Agent Name,email_or_domain:Agent Name"
     # e.g. "redfin.com:Redfin Agent,broker@example.com:Broker Name"
     agent_map: str = ""

@@ -987,23 +987,24 @@ def rescore_status():
 
 @app.post("/manage/notify-test")
 def notify_test(request: Request):
-    """Send a test Slack notification using the highest-scored listing."""
+    """Send a test alert (Pushover + Slack) using the highest-scored listing."""
     key = request.headers.get("x-manage-key", "")
     if not (settings.manage_key and key == settings.manage_key):
         _require_auth(request)
-    from app.notifier import notify_new_listing, NOTIFY_VERDICTS
-    if not settings.slack_webhook_url:
-        raise HTTPException(status_code=400, detail="slack_webhook_url not configured")
+    from app.notifier import send_high_score_alert
+    channels = {
+        "pushover": bool(settings.pushover_token and settings.pushover_user),
+        "slack": bool(settings.slack_webhook_url),
+    }
+    if not any(channels.values()):
+        raise HTTPException(status_code=400, detail="No notification channel configured (set Pushover or Slack)")
     listings = db.get_all_listings()
-    top = sorted(
-        [l for l in listings if l.get("verdict") in NOTIFY_VERDICTS],
-        key=lambda l: l.get("score", 0), reverse=True
-    )
-    if not top:
-        raise HTTPException(status_code=404, detail="No Worth Touring+ listings found")
+    top = sorted(listings, key=lambda l: l.get("score") or 0, reverse=True)
+    if not top or (top[0].get("score") or 0) == 0:
+        raise HTTPException(status_code=404, detail="No scored listings found")
     listing = top[0]
-    notify_new_listing(listing, listing["score"], listing["verdict"], listing.get("evaluation_method", "ai"))
-    return {"sent": True, "listing": listing.get("address"), "verdict": listing.get("verdict")}
+    send_high_score_alert(listing, listing["score"], listing.get("verdict", ""))
+    return {"sent": True, "channels": channels, "listing": listing.get("address"), "score": listing.get("score")}
 
 
 # --- Background re-scoring ---

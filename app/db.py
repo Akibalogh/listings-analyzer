@@ -234,7 +234,28 @@ def init_db():
     # ?riftinfo=... which triggers 405s/bot pages on later fetches)
     _strip_redfin_url_params()
 
+    # One-time: mark all pre-existing listings as already-notified so enabling
+    # phone push doesn't blast the entire current backlog. New listings default
+    # to notified=FALSE and alert normally when they first cross the threshold.
+    _backfill_notified_flag()
+
     logger.info("Database initialized")
+
+
+def _backfill_notified_flag() -> None:
+    """Mark existing listings notified=TRUE exactly once (guarded by app_state)."""
+    if get_app_state("notified_backfill_done"):
+        return
+    ph = _placeholder()
+    try:
+        with get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("UPDATE listings SET notified = TRUE WHERE notified IS NULL OR notified = FALSE")
+            count = cur.rowcount or 0
+        set_app_state("notified_backfill_done", "1")
+        logger.info(f"Marked {count} existing listings as already-notified (one-time)")
+    except Exception:
+        logger.warning("notified backfill failed", exc_info=True)
 
 
 def _placeholder():
@@ -630,6 +651,7 @@ def _migrate_add_columns():
         ("listings", "tour_requested_by", "TEXT"),
         ("listings", "passed_by", "TEXT"),
         ("listings", "liked_by", "TEXT"),
+        ("listings", "notified", "BOOLEAN DEFAULT FALSE"),
         ("listings", "year_built", "INTEGER"),
         ("listings", "list_date", "TEXT"),
         ("listings", "property_tax_json", "TEXT"),
@@ -997,6 +1019,34 @@ def mark_listing_liked(listing_id: int, liked: bool, by: str | None = None):
 
 
 # --- Listing queries for re-scoring ---
+
+
+def claim_unnotified_high_scores(threshold: int) -> list[dict]:
+    """Return listings scoring >= threshold that haven't been notified, and
+    mark them notified in the same transaction (so each alerts exactly once).
+
+    Excludes off-market statuses — no point pinging about a pending/sold home.
+    """
+    ph = _placeholder()
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(f"""
+            SELECT l.id, l.address, l.town, l.state, l.zip_code, l.price, l.sqft,
+                   l.bedrooms, l.commute_minutes, l.listing_url, s.score, s.verdict,
+                   s.evaluation_method
+            FROM listings l JOIN scores s ON s.listing_id = l.id
+            WHERE (l.notified IS NULL OR l.notified = FALSE)
+              AND s.score >= {ph}
+              AND COALESCE(l.listing_status, '') NOT IN
+                  ('Pending','Sold','Under Contract','Closed','Off Market?','Sold?')
+        """, (threshold,))
+        cols = [d[0] for d in cur.description]
+        rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+        if rows:
+            ids = tuple(r["id"] for r in rows)
+            placeholders = ", ".join([ph] * len(ids))
+            cur.execute(f"UPDATE listings SET notified = TRUE WHERE id IN ({placeholders})", ids)
+    return rows
 
 
 def get_all_listing_ids() -> list[int]:
