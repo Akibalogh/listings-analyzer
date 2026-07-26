@@ -911,6 +911,9 @@
 
   /* Monthly cost section */
   .cost-total-row {
+    /* Span both columns — a total is a summary line, not a line item, and
+       "Total (excl. mortgage)" + value overflows a half-width cell */
+    grid-column: 1 / -1;
     margin-top: 6px;
     padding-top: 6px;
     border-top: 2px solid #e2e8f0 !important;
