@@ -101,7 +101,10 @@ def notify_pushover(listing: dict, score: int, verdict: str) -> bool:
         "user": settings.pushover_user,
         "title": f"{emoji} New {verdict} ({score}) — {listing.get('town', '')}",
         "message": f"{headline}\n{stats}",
-        "priority": 0,
+        # High priority: prominent alert, plays a sound, bypasses quiet hours —
+        # so it surfaces on the lock screen rather than sitting silently.
+        "priority": 1,
+        "sound": "magic",
     }
     if url:
         payload["url"] = url

@@ -289,3 +289,4 @@ class TestPushover:
                 assert "82" in data["title"]
                 assert "1 A St, Katonah" in data["message"]
                 assert data["url"].endswith("/home/1")
+                assert data["priority"] == 1  # high — surfaces on lock screen
