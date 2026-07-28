@@ -372,15 +372,17 @@ class TestUrlRouting:
     @patch("app.parsers.onehome._scrape_with_jina", return_value=("Finished basement", []))
     @patch("app.parsers.onehome._scrape_static", return_value=None)
     def test_redfin_tries_static_then_jina(self, mock_static, mock_jina):
-        """Redfin URLs try static HTTP with retries; fall back to Jina if all fail."""
+        """Redfin URLs try static HTTP once, then fall back to Jina.
+
+        Redfin bot-blocks cloud IPs essentially always, so a second UA retry
+        only added latency ahead of the Jina fallback that actually works.
+        """
         url = "https://www.redfin.com/NY/Scarsdale/10-Test-St/home/123"
 
         desc, images = scrape_listing_description(url)
 
-        # Static is retried (2 attempts) before falling back to Jina
-        assert mock_static.call_count == 2
+        assert mock_static.call_count == 1
         mock_static.assert_any_call(url, attempt=1)
-        mock_static.assert_any_call(url, attempt=2)
         mock_jina.assert_called_once_with(url)
         assert desc is not None
         assert "basement" in desc.lower()
@@ -767,11 +769,10 @@ class TestRedinFallsBackToOneKeyMLSSearch:
     @patch("app.parsers.onehome._scrape_with_jina", return_value=(None, []))
     def test_redfin_falls_back_to_onekeymls_search(self, mock_jina_outer, mock_static, mock_onekeymls_search):
         """Redfin URL with no MLS ID falls back to OneKeyMLS DDG address search."""
-        # 2 Redfin static attempts fail, Jina fails, no MLS ID so _try_onekeymls skipped,
-        # then DDG search finds OneKeyMLS URL, third static call succeeds
+        # Redfin static attempt fails, Jina fails, no MLS ID so _try_onekeymls
+        # skipped, then DDG search finds OneKeyMLS URL and its static succeeds
         mock_static.side_effect = [
-            None,  # Redfin static attempt 1 fails
-            None,  # Redfin static attempt 2 fails
+            None,  # Redfin static attempt fails
             ("Charming colonial with finished basement and pool", []),  # OneKeyMLS static succeeds
         ]
         url = "https://www.redfin.com/NY/Chappaqua/19-Georgia-Ln-10514/home/123456"
