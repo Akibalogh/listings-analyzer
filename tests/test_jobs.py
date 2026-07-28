@@ -81,16 +81,30 @@ class TestClaim:
         claimed = db.claim_pending_jobs(task_order=jobs.TASK_ORDER)
         assert [j["task_type"] for j in claimed] == ["score"]
 
-    def test_score_unblocked_when_sibling_exhausts_attempts(self, temp_db):
+    def test_score_unblocked_after_sibling_first_attempt(self, temp_db):
+        """Score waits only for enrichment to be *tried* once — not for retries
+        to be exhausted. Blocking until exhaustion delayed the first score by
+        hours (one retry per hourly drain) when a scrape kept failing.
+        """
         lid = _make_listing()
         db.enqueue_jobs(lid, ["commute", "score"])
-        for _ in range(db.JOB_MAX_ATTEMPTS):
-            claimed = db.claim_pending_jobs()
-            assert [j["task_type"] for j in claimed] == ["commute"]
-            db.fail_job(claimed[0]["id"], "boom")
-        # Commute is terminally failed — score may now proceed
+        # First claim: only commute (score deferred — commute never attempted)
         claimed = db.claim_pending_jobs()
-        assert [j["task_type"] for j in claimed] == ["score"]
+        assert [j["task_type"] for j in claimed] == ["commute"]
+        db.fail_job(claimed[0]["id"], "boom")
+        # Commute has now been tried once and is pending a retry, but score
+        # no longer has to wait for it
+        claimed = db.claim_pending_jobs()
+        assert "score" in [j["task_type"] for j in claimed]
+
+    def test_score_still_waits_for_untried_enrichment(self, temp_db):
+        """A brand-new listing scores only after each enrichment gets a turn,
+        so the first score isn't computed on empty data."""
+        lid = _make_listing()
+        db.enqueue_jobs(lid, ["commute", "schools", "score"])
+        claimed = db.claim_pending_jobs()
+        assert set(j["task_type"] for j in claimed) == {"commute", "schools"}
+        assert "score" not in [j["task_type"] for j in claimed]
 
     def test_score_not_starved_by_other_listings_jobs(self, temp_db):
         lid_a = _make_listing(address="1 A St")

@@ -1245,10 +1245,16 @@ def claim_pending_jobs(
                 WHERE j2.listing_id = jobs.listing_id
                 AND j2.task_type != 'score'
                 AND (j2.status = 'running'
-                     OR (j2.status = 'pending' AND j2.attempts < {ph}))
+                     -- Only block scoring while an enrichment job has NEVER
+                     -- been tried. Once each has had a shot, score with what we
+                     -- have; retries still run and the gap scan re-enqueues
+                     -- score when better data lands. (Blocking until retries
+                     -- were exhausted delayed the first score by hours when a
+                     -- scrape kept failing.)
+                     OR (j2.status = 'pending' AND j2.attempts = 0))
             ))
             ORDER BY listing_id DESC, id LIMIT {ph}""",
-            (JOB_MAX_ATTEMPTS, *exclude, JOB_MAX_ATTEMPTS, limit),
+            (JOB_MAX_ATTEMPTS, *exclude, limit),
         )
         rows = cur.fetchall()
         if settings.is_postgres:

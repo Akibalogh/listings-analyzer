@@ -46,6 +46,10 @@ TASK_ORDER = ["scrape_desc", "stats", "commute", "schools", "score"]
 
 _drain_lock = threading.Lock()
 
+# Monotonic timestamp of the last listing-page scrape, so consecutive scrapes
+# stay spaced out without penalizing a single one.
+_last_scrape_at: float = 0.0
+
 
 def enqueue_listing(listing_id: int, tasks: list[str] | None = None, force: bool = False) -> int:
     """Queue the standard pipeline (or a subset) for a listing."""
@@ -209,9 +213,14 @@ def _handle_scrape_desc(listing: dict) -> None:
         if not url:
             raise RuntimeError("no listing URL and search found none")
 
-    # Space out scrapes — Redfin rate-limits bursts (same delay the legacy
-    # scrape-descriptions loop used)
-    time.sleep(2.0 + random.random())
+    # Space out CONSECUTIVE scrapes (Redfin rate-limits bursts), but don't make
+    # a lone scrape — e.g. a listing you just added — wait for nothing.
+    global _last_scrape_at
+    gap = 2.0 + random.random()
+    elapsed = time.monotonic() - _last_scrape_at
+    if _last_scrape_at and elapsed < gap:
+        time.sleep(gap - elapsed)
+    _last_scrape_at = time.monotonic()
 
     description, image_urls = scrape_listing_description(
         url,

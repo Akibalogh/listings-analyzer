@@ -356,15 +356,16 @@ def scrape_listing_description(
 
     # --- Redfin URLs: try with retries + aggressive fallbacks ---
     if "redfin.com" in url_lower:
-        logger.info(f"Redfin URL detected, trying static HTTP with retries: {url[:80]}")
-        # Try static with 2 attempts (different User-Agent each time)
+        logger.info(f"Redfin URL detected, trying static HTTP once: {url[:80]}")
+        # Single static attempt: Redfin bot-blocks cloud IPs (405) essentially
+        # always, so a second UA retry just adds latency before the Jina
+        # fallback that actually works.
         static_failed = False
-        for attempt in range(1, 3):
-            result = _scrape_static(url, attempt=attempt)
-            if result and result[0]:
-                return result
-            if result is None:  # None = detected bot block or hard error
-                static_failed = True
+        result = _scrape_static(url, attempt=1)
+        if result and result[0]:
+            return result
+        if result is None:  # None = detected bot block or hard error
+            static_failed = True
 
         if static_failed:
             logger.info(f"Static scrape failed for Redfin (likely bot block), trying Jina Reader immediately: {url[:80]}")
