@@ -2456,6 +2456,34 @@ def manage_enrich(request: Request):
             "clear_bogus_commute": clear_bogus_commute, "recompute_towns": recompute_towns}
 
 
+@app.get("/manage/emails")
+def manage_recent_emails(request: Request):
+    """Recent alert emails the poller has ingested, newest first.
+
+    Answers "is ingestion actually seeing mail?" — distinct from "did it create
+    listings", since most Redfin mail is nudges/price-drops that dedupe to zero.
+    """
+    key = request.headers.get("x-manage-key", "")
+    if not (settings.manage_key and key == settings.manage_key):
+        _require_auth(request)
+    try:
+        limit = min(int(request.query_params.get("limit", 25)), 100)
+    except ValueError:
+        limit = 25
+    ph = db._placeholder()
+    with db.get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            f"""SELECT processed_at, sender, subject, listings_found, parser_used
+                FROM processed_emails
+                ORDER BY id DESC LIMIT {ph}""",
+            (limit,),
+        )
+        cols = [d[0] for d in cur.description]
+        rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+    return {"count": len(rows), "emails": rows}
+
+
 @app.get("/manage/senders")
 def manage_senders(request: Request):
     """List distinct email senders and their listing counts. Requires manage key."""
