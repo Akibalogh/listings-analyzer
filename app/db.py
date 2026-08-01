@@ -222,6 +222,10 @@ def init_db():
     # Remove duplicates that now share the same address_key after recomputation
     _dedup_by_address_key()
 
+    # Remove duplicates sharing a Redfin home ID (catches address spelling
+    # variants that address_key misses)
+    _dedup_by_home_id()
+
     # Backfill agent_name from processed_emails sender using agent_map
     _backfill_agent_names()
 
@@ -772,6 +776,59 @@ def _dedup_by_address_key():
                 cur.execute(f"DELETE FROM listings WHERE id = {ph}", (lid,))
             conn.commit()
         logger.info(f"Deduped {len(delete_ids)} listing(s) by address_key")
+
+
+def _dedup_by_home_id():
+    """Remove duplicate listings sharing one Redfin /home/<id>.
+
+    Address-key dedup misses spelling variants of the same property
+    ("33 Hevelyn" vs "33 Hevelyne", "4 Dorchester Dr" vs "Lot 4 Dorchester Dr").
+    The Redfin home ID is exact. Keeps whichever row the buyer has engaged with
+    (any flag), then richer data, so a curated row is never dropped.
+    """
+    import re as _re
+    from collections import defaultdict
+
+    ph = _placeholder()
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, listing_url, toured, tour_requested, liked, passed, "
+            "buyer_notes, description, mls_id FROM listings "
+            "WHERE listing_url IS NOT NULL"
+        )
+        cols = [d[0] for d in cur.description]
+        rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+
+    groups: dict[str, list[dict]] = defaultdict(list)
+    for row in rows:
+        m = _re.search(r"/home/(\d+)", row.get("listing_url") or "")
+        if m:
+            groups[m.group(1)].append(row)
+
+    delete_ids: list[int] = []
+    for home_id, listings in groups.items():
+        if len(listings) < 2:
+            continue
+        listings.sort(
+            key=lambda r: (
+                not any((r.get("toured"), r.get("tour_requested"),
+                         r.get("liked"), r.get("passed"))),  # flagged first
+                not r.get("buyer_notes"),
+                not r.get("description"),
+                not r.get("mls_id"),
+                r["id"],
+            )
+        )
+        delete_ids.extend(r["id"] for r in listings[1:])
+
+    if delete_ids:
+        with get_connection() as conn:
+            cur = conn.cursor()
+            for lid in delete_ids:
+                cur.execute(f"DELETE FROM scores WHERE listing_id = {ph}", (lid,))
+                cur.execute(f"DELETE FROM listings WHERE id = {ph}", (lid,))
+        logger.info(f"Deduped {len(delete_ids)} listing(s) by Redfin home ID")
 
 
 def _backfill_agent_names():
