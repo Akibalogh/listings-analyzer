@@ -577,3 +577,45 @@ class TestPruneNeverDeletesFlagged:
         r = self._run()
         assert db.get_listing_by_id(lid) is None  # deleted as before
         assert r["deleted"] == 1
+
+
+class TestHomeIdDedup:
+    """Spelling variants of one property must not become two rows."""
+
+    def _make(self, addr, home_id, **flags):
+        email_id = db.save_processed_email(
+            gmail_id=f"hid-{addr}", message_id="", sender="t", subject="t",
+            parser_used="t", listings_found=1)
+        lid = db.save_listing(
+            ParsedListing(source_format="test", address=addr, town="Elmsford", state="NY",
+                          listing_url=f"https://www.redfin.com/NY/Elmsford/{addr.replace(' ','-')}-10523/home/{home_id}"),
+            ScoringResult(score=50, verdict="Low Priority"), email_id)
+        for f, v in flags.items():
+            {"tour_requested": db.mark_listing_tour_requested,
+             "passed": db.mark_listing_passed}[f](lid, v, by="aki@x")
+        return lid
+
+    def test_dedup_keeps_flagged_row(self, temp_db):
+        plain = self._make("33 Hevelyne Rd", "20131384")
+        flagged = self._make("33 Hevelyn Rd", "20131384", tour_requested=True)
+        db._dedup_by_home_id()
+        assert db.get_listing_by_id(flagged) is not None, "flagged row must survive"
+        assert db.get_listing_by_id(plain) is None
+        assert db.get_listing_by_id(flagged)["tour_requested"]
+
+    def test_distinct_properties_untouched(self, temp_db):
+        a = self._make("1 A St", "111")
+        b = self._make("2 B St", "222")
+        db._dedup_by_home_id()
+        assert db.get_listing_by_id(a) and db.get_listing_by_id(b)
+
+    def test_urlless_listing_never_deleted(self, temp_db):
+        """A listing with no URL has no home ID — it must not be swept up."""
+        email_id = db.save_processed_email(gmail_id="nourl", message_id="", sender="t",
+                                           subject="t", parser_used="t", listings_found=1)
+        lid = db.save_listing(
+            ParsedListing(source_format="plaintext", address="163 Mount Airy Rd S",
+                          town="Croton-On-Hudson", state="NY"),
+            ScoringResult(score=78, verdict="Worth Touring"), email_id)
+        db._dedup_by_home_id()
+        assert db.get_listing_by_id(lid) is not None

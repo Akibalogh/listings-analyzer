@@ -90,6 +90,17 @@ def poll_once() -> list[dict]:
                 logger.info(f"Duplicate listing MLS #{listing.mls_id}, skipping")
                 continue
 
+            # Dedup: check the Redfin home ID — exact, and catches address
+            # spelling variants that address_key misses ("33 Hevelyn" vs
+            # "33 Hevelyne", "4 Dorchester Dr" vs "Lot 4 Dorchester Dr")
+            home_id = None
+            if listing.listing_url:
+                hm = re.search(r"/home/(\d+)", listing.listing_url)
+                home_id = hm.group(1) if hm else None
+            if home_id and home_id in db.get_all_redfin_home_ids():
+                logger.info(f"Duplicate listing by Redfin home ID {home_id}: {listing.address}")
+                continue
+
             # Dedup: check normalized address
             address_key = normalize_address(listing.address, listing.town, listing.state)
             if address_key and db.is_listing_duplicate_by_address(address_key):
