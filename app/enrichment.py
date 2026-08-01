@@ -297,6 +297,9 @@ _STATION_OVERRIDES: dict[str, str] = {
     "yorktown heights": "Croton-Harmon",
     "cortlandt": "Croton-Harmon",
     "cortlandt manor": "Croton-Harmon",
+    # Montrose (in Cortlandt) has no station of its own; Croton-Harmon is the
+    # nearby express stop and matches the rest of Cortlandt
+    "montrose": "Croton-Harmon",
     "mohegan lake": "Cortlandt",
     "somers": "Katonah",
     "amawalk": "Katonah",
