@@ -388,6 +388,7 @@ class TestFetchCommuteTime:
         assert _STATION_OVERRIDES["baldwin place"] == "Katonah"
         assert _STATION_OVERRIDES["mahopac"] == "Katonah"
         assert _STATION_OVERRIDES["west harrison"] == "White Plains"
+        assert _STATION_OVERRIDES["montrose"] == "Croton-Harmon"
         assert _STATION_OVERRIDES["chappaqua"] == "Chappaqua"
         assert _STATION_OVERRIDES["armonk"] == "North White Plains"
 
