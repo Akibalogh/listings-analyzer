@@ -439,6 +439,11 @@ def _try_onekeymls(
     slug = "-".join(parts)
     url = f"https://www.onekeymls.com/address/{slug}/{mls_id}"
 
+    # NOTE (2026-08-02): this /address/{slug}/{mls_id} form now 404s for every
+    # listing tested — OneKeyMLS moved to /home-details/{slug}/{opaqueId}, and
+    # the opaque ID isn't derivable from the MLS number. Kept behind a single
+    # cheap attempt in case the route returns; the DDG-discovered
+    # /home-details/ URL in _search_onekeymls_url is the path that still works.
     logger.info(f"Trying OneKey MLS: {url}")
     result = _scrape_static(url)
     if result and result[0]:
