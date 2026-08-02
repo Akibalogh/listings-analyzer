@@ -619,3 +619,67 @@ class TestHomeIdDedup:
             ScoringResult(score=78, verdict="Worth Touring"), email_id)
         db._dedup_by_home_id()
         assert db.get_listing_by_id(lid) is not None
+
+
+class TestListingUpdatesFromEmails:
+    """Redfin price-drop / sold emails about already-tracked homes must update
+    the record instead of being discarded as duplicates."""
+
+    def _make(self, price=1500000, status="Active"):
+        email_id = db.save_processed_email(
+            gmail_id=f"upd-{price}-{status}", message_id="", sender="t", subject="t",
+            parser_used="t", listings_found=1)
+        return db.save_listing(
+            ParsedListing(source_format="plaintext", address="110 Oliver Rd",
+                          town="Bedford", state="NY", price=price, listing_status=status),
+            ScoringResult(score=60, verdict="Worth Touring"), email_id)
+
+    def _apply(self, lid, **fields):
+        from app.poller import _update_duplicate
+        row = db.get_listing_by_id(lid)
+        with patch("app.jobs.kick"), patch("app.jobs.enqueue_listing") as enq:
+            _update_duplicate((lid, row.get("listing_status")),
+                              ParsedListing(source_format="plaintext", **fields))
+        return enq
+
+    def test_price_drop_applied_and_rescored(self, temp_db):
+        lid = self._make(price=2146000)
+        enq = self._apply(lid, address="110 Oliver Rd", town="Bedford", price=1800000)
+        assert db.get_listing_by_id(lid)["price"] == 1800000
+        enq.assert_called_once()  # re-scored, since price is a scored factor
+        assert enq.call_args[1]["tasks"] == ["score"]
+
+    def test_price_increase_also_applied(self, temp_db):
+        lid = self._make(price=1500000)
+        self._apply(lid, address="110 Oliver Rd", town="Bedford", price=1600000)
+        assert db.get_listing_by_id(lid)["price"] == 1600000
+
+    def test_implausible_price_change_ignored(self, temp_db):
+        """A monthly payment parsed as a price must not overwrite the real one."""
+        lid = self._make(price=1500000)
+        enq = self._apply(lid, address="110 Oliver Rd", town="Bedford", price=14493)
+        assert db.get_listing_by_id(lid)["price"] == 1500000
+        enq.assert_not_called()
+
+    def test_unchanged_price_does_not_rescore(self, temp_db):
+        lid = self._make(price=1500000)
+        enq = self._apply(lid, address="110 Oliver Rd", town="Bedford", price=1500000)
+        enq.assert_not_called()
+
+    def test_sold_email_flags_rather_than_deletes(self, temp_db):
+        """Sold from an email is a suspicion — flag Sold? and let the prune's
+        two-strike logic confirm, so a misparse can't destroy a listing."""
+        lid = self._make(status="Active")
+        self._apply(lid, address="110 Oliver Rd", town="Bedford", listing_status="Sold")
+        assert db.get_listing_by_id(lid) is not None
+        assert db.get_listing_by_id(lid)["listing_status"] == "Sold?"
+
+    def test_normal_status_passes_through(self, temp_db):
+        lid = self._make(status="Active")
+        self._apply(lid, address="110 Oliver Rd", town="Bedford", listing_status="Pending")
+        assert db.get_listing_by_id(lid)["listing_status"] == "Pending"
+
+    def test_missing_price_backfilled(self, temp_db):
+        lid = self._make(price=None)
+        self._apply(lid, address="110 Oliver Rd", town="Bedford", price=1450000)
+        assert db.get_listing_by_id(lid)["price"] == 1450000

@@ -345,16 +345,62 @@ def sync_search(max_pages: int = 5) -> dict:
     }
 
 
-def _update_duplicate(existing: tuple[int, str | None], listing: ParsedListing):
-    """Update an existing duplicate listing's status and backfill URL if missing."""
-    existing_id, existing_status = existing
+_SOLD_STATUSES = {"sold", "closed"}
 
-    # Update status if changed
+# A "price change" this large is almost certainly a parse error (wrong listing,
+# monthly payment mistaken for price, etc.) rather than a real market move.
+_MAX_PLAUSIBLE_PRICE_SWING = 0.5
+
+
+def _update_duplicate(existing: tuple[int, str | None], listing: ParsedListing):
+    """Sync an already-tracked listing from a fresh alert email.
+
+    Redfin sends a steady stream of price-drop and sold/status emails about
+    homes already in the DB. Those used to be discarded as duplicates; now they
+    keep the record current: price changes are applied (and trigger a re-score,
+    since price is scored), and a sold status is flagged.
+    """
+    existing_id, existing_status = existing
+    row = db.get_listing_by_id(existing_id) or {}
+
+    # --- Price change (the main signal in "Price decrease to $X" emails) ---
+    new_price = listing.price
+    old_price = row.get("price")
+    if new_price and new_price >= 100000 and old_price and new_price != old_price:
+        swing = abs(new_price - old_price) / old_price
+        if swing > _MAX_PLAUSIBLE_PRICE_SWING:
+            logger.warning(
+                f"Listing #{existing_id}: ignoring implausible price change "
+                f"${old_price:,} → ${new_price:,} (likely a parse error)"
+            )
+        else:
+            db.update_listing_fields_by_id(existing_id, force=True, price=new_price)
+            direction = "drop" if new_price < old_price else "increase"
+            logger.info(
+                f"Listing #{existing_id} price {direction}: ${old_price:,} → ${new_price:,}"
+            )
+            # Price is a scored factor — re-score so the verdict reflects it
+            try:
+                from app import jobs
+                jobs.enqueue_listing(existing_id, tasks=["score"], force=True)
+                jobs.kick()
+            except Exception:
+                logger.exception(f"Could not queue re-score for listing #{existing_id}")
+    elif new_price and not old_price:
+        db.update_listing_fields_by_id(existing_id, price=new_price)
+
+    # --- Status ---
     if listing.listing_status and listing.listing_status != existing_status:
-        db.update_listing_status(existing_id, listing.listing_status)
-        logger.info(
-            f"Updated listing #{existing_id} status: {existing_status!r} → {listing.listing_status!r}"
-        )
+        # A sold notice is a suspicion, not proof — flag it and let the prune's
+        # two-strike logic confirm, so a misparse never destroys a listing.
+        if listing.listing_status.strip().lower() in _SOLD_STATUSES:
+            db.update_listing_status(existing_id, "Sold?")
+            logger.info(f"Listing #{existing_id} flagged Sold? from email status")
+        else:
+            db.update_listing_status(existing_id, listing.listing_status)
+            logger.info(
+                f"Updated listing #{existing_id} status: {existing_status!r} → {listing.listing_status!r}"
+            )
 
     # Backfill URL if the existing listing has none
     if listing.listing_url:
