@@ -3665,35 +3665,147 @@ def manage_rescrape_unknowns(request: Request):
 
 
 @app.post("/manage/import-csv")
+async def _read_csv_body(request: Request) -> str:
+    """Read a CSV payload from either a multipart upload or a raw body."""
+    if "multipart" in request.headers.get("content-type", ""):
+        form = await request.form()
+        upload = form.get("file")
+        if not upload:
+            raise HTTPException(status_code=400, detail="No file uploaded")
+        return (await upload.read()).decode("utf-8-sig")
+    return (await request.body()).decode("utf-8-sig")
+
+
+def _parse_redfin_csv(raw: str) -> list[dict]:
+    """Parse a Redfin CSV export into normalized dicts (home_id, address, price…)."""
+    import csv
+    import io
+    import re as _re
+
+    rows = list(csv.DictReader(io.StringIO(raw)))
+    if not rows:
+        return []
+    url_key = next((c for c in rows[0] if c and c.startswith("URL (")), "URL")
+    out = []
+    for r in rows:
+        address = (r.get("ADDRESS") or "").strip()
+        if not address:
+            continue
+        url = (r.get(url_key) or "").strip()
+        m = _re.search(r"/home/(\d+)", url)
+        price_raw = (r.get("PRICE") or "").strip()
+        try:
+            price = int(float(price_raw)) if price_raw else None
+        except ValueError:
+            price = None
+        out.append({
+            "home_id": m.group(1) if m else None,
+            "address": address,
+            "town": (r.get("CITY") or "").strip(),
+            "price": price,
+            "status": (r.get("STATUS") or "").strip(),
+            "url": url,
+            "row": r,
+        })
+    return out
+
+
+@app.post("/manage/reconcile-csv")
+async def manage_reconcile_csv(request: Request):
+    """Diff a Redfin CSV export against the DB — and optionally apply the fixes.
+
+    Redfin's alert emails don't cover every match and don't always report price
+    cuts, so the saved-search CSV is the authoritative cross-check. Dry run by
+    default; `?apply=true` imports the missing listings, corrects drifted
+    prices, and re-scores what changed.
+    """
+    key = request.headers.get("x-manage-key", "")
+    if not (settings.manage_key and key == settings.manage_key):
+        _require_auth(request)
+
+    apply = request.query_params.get("apply", "").lower() == "true"
+    rows = _parse_redfin_csv(await _read_csv_body(request))
+    if not rows:
+        raise HTTPException(status_code=400, detail="No listings found in CSV")
+
+    import re as _re
+    db_by_home = {}
+    for l in db.get_all_listings():
+        m = _re.search(r"/home/(\d+)", l.get("listing_url") or "")
+        if m:
+            db_by_home[m.group(1)] = l
+
+    missing, price_changes = [], []
+    for r in rows:
+        hit = db_by_home.get(r["home_id"]) if r["home_id"] else None
+        if not hit:
+            missing.append(r)
+            continue
+        old, new = hit.get("price"), r["price"]
+        if old and new and old != new:
+            price_changes.append({
+                "listing_id": hit["id"], "address": hit.get("address"),
+                "old_price": old, "new_price": new, "delta": new - old,
+            })
+
+    report = {
+        "csv_listings": len(rows),
+        "in_sync": len(rows) - len(missing) - len(price_changes),
+        "missing_count": len(missing),
+        "missing": [{"address": m["address"], "town": m["town"], "price": m["price"]}
+                    for m in missing],
+        "price_change_count": len(price_changes),
+        "price_changes": price_changes,
+        "applied": apply,
+    }
+    if not apply:
+        return report
+
+    # Apply price corrections and re-score, since price is a scored factor
+    for pc in price_changes:
+        db.update_listing_fields_by_id(pc["listing_id"], force=True, price=pc["new_price"])
+        jobs.enqueue_listing(pc["listing_id"], tasks=["score"], force=True)
+
+    # Import the missing rows through the existing CSV import path
+    imported = 0
+    if missing:
+        import csv as _csv
+        import io as _io
+        buf = _io.StringIO()
+        writer = _csv.DictWriter(buf, fieldnames=list(missing[0]["row"].keys()))
+        writer.writeheader()
+        for m in missing:
+            writer.writerow(m["row"])
+        imported = _import_csv_rows(buf.getvalue()).get("imported", 0)
+    if price_changes or missing:
+        jobs.kick()
+    report["imported"] = imported
+    report["prices_updated"] = len(price_changes)
+    return report
+
+
 async def manage_import_csv(request: Request):
     """Bulk-import listings from a Redfin CSV export.
 
-    Accepts multipart form upload of a Redfin CSV. Creates listings with the
-    structured data from the CSV (price, beds, baths, sqft, year_built, etc.),
-    deduplicates by address, then queues enrichment + scoring jobs for each
-    new listing (scrape description/images, commute, schools, AI score).
+    Creates listings with the structured data from the CSV (price, beds, baths,
+    sqft, year_built, etc.), deduplicates by address, then queues enrichment +
+    scoring jobs for each new listing.
 
     Protected by MANAGE_KEY env var.
     """
+    key = request.headers.get("x-manage-key", "")
+    if not settings.manage_key or key != settings.manage_key:
+        raise HTTPException(status_code=403, detail="Invalid or missing management key")
+    return _import_csv_rows(await _read_csv_body(request))
+
+
+def _import_csv_rows(raw: str) -> dict:
+    """Import Redfin CSV text, skipping listings already tracked."""
     import csv
     import io
 
     from app.enrichment import normalize_address
     from app.models import ParsedListing, ScoringResult
-
-    key = request.headers.get("x-manage-key", "")
-    if not settings.manage_key or key != settings.manage_key:
-        raise HTTPException(status_code=403, detail="Invalid or missing management key")
-
-    content_type = request.headers.get("content-type", "")
-    if "multipart" in content_type:
-        form = await request.form()
-        upload = form.get("file")
-        if not upload:
-            raise HTTPException(status_code=400, detail="No file uploaded")
-        raw = (await upload.read()).decode("utf-8-sig")
-    else:
-        raw = (await request.body()).decode("utf-8-sig")
 
     reader = csv.DictReader(io.StringIO(raw))
     rows = list(reader)

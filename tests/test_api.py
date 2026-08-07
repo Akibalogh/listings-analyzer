@@ -1658,3 +1658,93 @@ class TestBuyerNotes:
         res = authed_client.post("/listings/1/notes", json={"notes": "  "})
         assert res.status_code == 200
         mock_update.assert_called_once_with(1, force=True, buyer_notes=None)
+
+
+CSV_HDR = ("SALE TYPE,SOLD DATE,PROPERTY TYPE,ADDRESS,CITY,STATE OR PROVINCE,"
+           "ZIP OR POSTAL CODE,PRICE,BEDS,BATHS,LOCATION,SQUARE FEET,LOT SIZE,YEAR BUILT,"
+           "DAYS ON MARKET,$/SQUARE FEET,HOA/MONTH,STATUS,NEXT OPEN HOUSE START TIME,"
+           "NEXT OPEN HOUSE END TIME,URL (SEE https://www.redfin.com/x FOR INFO ON PRICING),"
+           "SOURCE,MLS#,FAVORITE,INTERESTED,LATITUDE,LONGITUDE")
+
+
+def _csv_row(addr, city, price, home_id):
+    return (f"MLS Listing,,Single Family Residential,{addr},{city},NY,10536,{price},4,3,"
+            f"{city},3000,20000,1990,5,300,,Active,,,"
+            f"https://www.redfin.com/NY/{city}/{addr.replace(' ','-')}-10536/home/{home_id},"
+            f"OneKey,123,N,Y,41.0,-73.0")
+
+
+class TestReconcileCsv:
+    """POST /manage/reconcile-csv — diff a saved-search CSV against the DB."""
+
+    def test_requires_auth(self, client):
+        res = client.post("/manage/reconcile-csv", content="x", headers={"Content-Type": "text/csv"})
+        assert res.status_code in (401, 403)
+
+    @patch("app.main.settings")
+    def test_rejects_empty_csv(self, mock_settings, client):
+        mock_settings.manage_key = "k"
+        res = client.post("/manage/reconcile-csv", content=CSV_HDR,
+                          headers={"x-manage-key": "k", "Content-Type": "text/csv"})
+        assert res.status_code == 400
+
+    @patch("app.main.db.get_all_listings")
+    @patch("app.main.settings")
+    def test_reports_missing_and_price_changes(self, mock_settings, mock_all, client):
+        mock_settings.manage_key = "k"
+        mock_all.return_value = [
+            {"id": 1, "address": "1 A St", "price": 1500000,
+             "listing_url": "https://www.redfin.com/NY/Katonah/1-A-St-10536/home/111"},
+        ]
+        body = "\n".join([CSV_HDR,
+                          _csv_row("1 A St", "Katonah", 1400000, "111"),   # price drop
+                          _csv_row("2 B St", "Katonah", 1200000, "222")])  # missing
+        res = client.post("/manage/reconcile-csv", content=body,
+                          headers={"x-manage-key": "k", "Content-Type": "text/csv"})
+        assert res.status_code == 200
+        d = res.json()
+        assert d["missing_count"] == 1
+        assert d["missing"][0]["address"] == "2 B St"
+        assert d["price_change_count"] == 1
+        assert d["price_changes"][0]["delta"] == -100000
+        assert d["applied"] is False
+
+    @patch("app.main.db.get_all_listings")
+    @patch("app.main.settings")
+    def test_reports_in_sync(self, mock_settings, mock_all, client):
+        mock_settings.manage_key = "k"
+        mock_all.return_value = [
+            {"id": 1, "address": "1 A St", "price": 1400000,
+             "listing_url": "https://www.redfin.com/NY/Katonah/1-A-St-10536/home/111"},
+        ]
+        body = "\n".join([CSV_HDR, _csv_row("1 A St", "Katonah", 1400000, "111")])
+        res = client.post("/manage/reconcile-csv", content=body,
+                          headers={"x-manage-key": "k", "Content-Type": "text/csv"})
+        d = res.json()
+        assert d["missing_count"] == 0 and d["price_change_count"] == 0
+        assert d["in_sync"] == 1
+
+    @patch("app.main.jobs.kick")
+    @patch("app.main.jobs.enqueue_listing")
+    @patch("app.main._import_csv_rows", return_value={"imported": 1})
+    @patch("app.main.db.update_listing_fields_by_id")
+    @patch("app.main.db.get_all_listings")
+    @patch("app.main.settings")
+    def test_apply_updates_prices_and_imports(self, mock_settings, mock_all, mock_upd,
+                                              mock_imp, mock_enq, mock_kick, client):
+        mock_settings.manage_key = "k"
+        mock_all.return_value = [
+            {"id": 1, "address": "1 A St", "price": 1500000,
+             "listing_url": "https://www.redfin.com/NY/Katonah/1-A-St-10536/home/111"},
+        ]
+        body = "\n".join([CSV_HDR,
+                          _csv_row("1 A St", "Katonah", 1400000, "111"),
+                          _csv_row("2 B St", "Katonah", 1200000, "222")])
+        res = client.post("/manage/reconcile-csv?apply=true", content=body,
+                          headers={"x-manage-key": "k", "Content-Type": "text/csv"})
+        d = res.json()
+        assert d["applied"] is True
+        assert d["prices_updated"] == 1 and d["imported"] == 1
+        mock_upd.assert_called_once_with(1, force=True, price=1400000)
+        mock_enq.assert_called_once()          # re-score the repriced listing
+        assert mock_enq.call_args[1]["tasks"] == ["score"]

@@ -909,6 +909,27 @@
     text-align: right;
   }
 
+  /* Reconcile CSV against the live saved search */
+  .reconcile-btn {
+    display: inline-block; padding: 7px 12px; margin-left: 8px; cursor: pointer;
+    font-size: 12px; font-weight: 600; white-space: nowrap;
+    color: var(--text-secondary); background: #f1f5f9;
+    border: 1px solid #e2e8f0; border-radius: 8px;
+  }
+  .reconcile-btn:hover { background: #e2e8f0; }
+  .reconcile-result {
+    margin: 8px 12px 0; padding: 10px 12px; border-radius: 8px;
+    background: #f8fafc; border: 1px solid #e2e8f0;
+    font-size: 12px; line-height: 1.6; color: var(--text-secondary);
+  }
+  .reconcile-result b { color: var(--text-primary); }
+  .reconcile-apply {
+    margin-top: 8px; padding: 7px 14px; font-size: 12px; font-weight: 600;
+    color: #fff; background: var(--blue, #2563eb);
+    border: none; border-radius: 8px; cursor: pointer;
+  }
+  .reconcile-apply:disabled { opacity: 0.6; cursor: default; }
+
   /* Buyer notes (feedback → re-score) */
   .buyer-notes-section { margin-top: 12px; }
   .buyer-notes-header {
@@ -1605,7 +1626,13 @@
     <input type="text" id="addListingUrl" placeholder="Paste a Redfin or listing URL..." class="add-listing-input"
            onkeydown="if(event.key==='Enter')addListingFromUrl()">
     <button onclick="addListingFromUrl()" class="add-listing-btn" id="addListingBtn">Add</button>
+    <label class="reconcile-btn" title="Check a Redfin saved-search CSV against your listings">
+      Reconcile CSV
+      <input type="file" accept=".csv" id="reconcileFile" style="display:none"
+             onchange="reconcileCsv(this)">
+    </label>
   </div>
+  <div id="reconcileResult" class="reconcile-result" style="display:none"></div>
 
   <div class="controls" id="controls">
     <button class="filter-chip active" data-filter="all">Active</button>
@@ -2730,6 +2757,84 @@ function buildImageSection(l) {
   section.appendChild(inputRow);
 
   return section;
+}
+
+/* ==== Reconcile a Redfin saved-search CSV against the DB ==== */
+var _reconcileCsvText = null;
+
+async function reconcileCsv(input) {
+  var file = input.files && input.files[0];
+  if (!file) return;
+  var box = document.getElementById('reconcileResult');
+  box.style.display = 'block';
+  box.textContent = 'Checking ' + file.name + '…';
+  _reconcileCsvText = await file.text();
+  input.value = '';  // allow re-picking the same file
+  try {
+    var res = await fetch('/manage/reconcile-csv', {
+      method: 'POST', headers: {'Content-Type': 'text/csv'}, body: _reconcileCsvText
+    });
+    if (!res.ok) {
+      var e = await res.json().catch(function(){ return {}; });
+      throw new Error(e.detail || ('HTTP ' + res.status));
+    }
+    renderReconcile(await res.json());
+  } catch (err) {
+    box.textContent = 'Reconcile failed: ' + err.message;
+  }
+}
+
+function renderReconcile(r) {
+  var box = document.getElementById('reconcileResult');
+  box.textContent = '';
+  if (!r.missing_count && !r.price_change_count) {
+    box.appendChild(el('div', {}, '✓ Up to date — all ' + r.csv_listings +
+      ' listings in the CSV match, no price changes.'));
+    return;
+  }
+  var head = el('div', {}, [
+    el('b', {}, String(r.missing_count) + ' missing'),
+    txt(' · '),
+    el('b', {}, String(r.price_change_count) + ' price change' + (r.price_change_count === 1 ? '' : 's')),
+    txt(' · ' + r.in_sync + ' in sync')
+  ]);
+  box.appendChild(head);
+  (r.missing || []).slice(0, 8).forEach(function(m) {
+    box.appendChild(el('div', {}, '   + ' + m.address + ', ' + m.town +
+      (m.price ? '  $' + m.price.toLocaleString() : '')));
+  });
+  (r.price_changes || []).slice(0, 8).forEach(function(p) {
+    var arrow = p.delta < 0 ? '▼' : '▲';
+    box.appendChild(el('div', {}, '   ' + arrow + ' ' + p.address + ': $' +
+      p.old_price.toLocaleString() + ' → $' + p.new_price.toLocaleString()));
+  });
+  var btn = el('button', {className: 'reconcile-apply'},
+    'Import ' + r.missing_count + ' & update ' + r.price_change_count + ' price' +
+    (r.price_change_count === 1 ? '' : 's'));
+  btn.addEventListener('click', function() { applyReconcile(btn); });
+  box.appendChild(btn);
+}
+
+async function applyReconcile(btn) {
+  if (!_reconcileCsvText) return;
+  btn.disabled = true;
+  btn.textContent = 'Applying…';
+  try {
+    var res = await fetch('/manage/reconcile-csv?apply=true', {
+      method: 'POST', headers: {'Content-Type': 'text/csv'}, body: _reconcileCsvText
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    var r = await res.json();
+    document.getElementById('reconcileResult').textContent =
+      '✓ Imported ' + (r.imported || 0) + ', updated ' + (r.prices_updated || 0) +
+      ' price(s). Scoring in the background — refresh in a minute.';
+    showToast('Reconcile applied');
+    loadListings();
+  } catch (err) {
+    btn.disabled = false;
+    btn.textContent = 'Retry';
+    showToast('Apply failed: ' + err.message);
+  }
 }
 
 function buildBuyerNotesSection(l) {
