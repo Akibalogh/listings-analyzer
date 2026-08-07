@@ -2487,6 +2487,56 @@ def manage_recent_emails(request: Request):
     return {"count": len(rows), "emails": rows}
 
 
+@app.get("/manage/email-preview")
+def manage_email_preview(request: Request):
+    """Re-fetch a processed email and show its body — for parser debugging.
+
+    A new sender (e.g. an MLS auto-email) often needs parser work; this shows
+    what the poller actually received. Match by `subject` substring, newest
+    first. Protected by MANAGE_KEY.
+    """
+    key = request.headers.get("x-manage-key", "")
+    if not settings.manage_key or key != settings.manage_key:
+        raise HTTPException(status_code=403, detail="Invalid or missing management key")
+
+    subject_q = (request.query_params.get("subject") or "").strip()
+    if not subject_q:
+        raise HTTPException(status_code=400, detail="Provide ?subject=<substring>")
+    try:
+        chars = min(int(request.query_params.get("chars", 3000)), 20000)
+    except ValueError:
+        chars = 3000
+
+    ph = db._placeholder()
+    with db.get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            f"SELECT gmail_id, sender, subject FROM processed_emails "
+            f"WHERE subject LIKE {ph} ORDER BY id DESC LIMIT 1",
+            (f"%{subject_q}%",),
+        )
+        row = cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail=f"No processed email matching {subject_q!r}")
+    gmail_id, sender, subject = row[0], row[1], row[2]
+
+    from app.gmail import fetch_email_by_id
+    data = fetch_email_by_id(gmail_id)
+    if not data:
+        raise HTTPException(status_code=502, detail="Could not re-fetch the email from Gmail")
+
+    text = (data.get("text") or "")
+    html = (data.get("html") or "")
+    return {
+        "sender": sender,
+        "subject": subject,
+        "text_len": len(text),
+        "html_len": len(html),
+        "text": text[:chars],
+        "html_sample": html[:chars] if not text else "",
+    }
+
+
 @app.get("/manage/senders")
 def manage_senders(request: Request):
     """List distinct email senders and their listing counts. Requires manage key."""
