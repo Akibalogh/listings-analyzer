@@ -1748,3 +1748,55 @@ class TestReconcileCsv:
         mock_upd.assert_called_once_with(1, force=True, price=1400000)
         mock_enq.assert_called_once()          # re-score the repriced listing
         assert mock_enq.call_args[1]["tasks"] == ["score"]
+
+
+class TestEmailPreviewAccess:
+    """The preview returns raw email bodies, so it's session-gated (not
+    manage-key) and limited to configured alert senders."""
+
+    def test_manage_key_alone_is_rejected(self, client):
+        res = client.get("/manage/email-preview?subject=x", headers={"x-manage-key": "anything"})
+        assert res.status_code == 401
+
+    @patch("app.main.db.get_connection")
+    @patch("app.main.settings")
+    def test_non_alert_sender_refused(self, mock_settings, mock_conn, authed_client):
+        mock_settings.sender_list = ["redfin.com", "northeastmatrixmail.com"]
+        cur = MagicMock()
+        cur.fetchone.return_value = ("gid1", "Bronwyn <bronwyn@personal.com>", "Birthday party")
+        mock_conn.return_value.__enter__.return_value.cursor.return_value = cur
+        res = authed_client.get("/manage/email-preview?subject=Birthday")
+        assert res.status_code == 403
+        assert "alert senders" in res.json()["detail"]
+
+    @patch("app.main.db.get_connection")
+    @patch("app.main.settings")
+    def test_alert_sender_allowed(self, mock_settings, mock_conn, authed_client):
+        mock_settings.sender_list = ["northeastmatrixmail.com"]
+        cur = MagicMock()
+        cur.fetchone.return_value = ("gid2", "Ken Wile <KEY@northeastmatrixmail.com>", "Only sold")
+        mock_conn.return_value.__enter__.return_value.cursor.return_value = cur
+        with patch("app.gmail.fetch_email_by_id", return_value={"text": "listing body", "html": ""}):
+            res = authed_client.get("/manage/email-preview?subject=Only%20sold")
+        assert res.status_code == 200
+        assert res.json()["text"] == "listing body"
+
+
+class TestHealthEmailMasking:
+    """/health is public, so the connected inbox is masked to anonymous callers."""
+
+    def test_masked_when_anonymous(self, client):
+        d = client.get("/health").json()["ingest"]
+        for f in ("connected_account", "expected_account"):
+            v = d.get(f)
+            if v:
+                assert "***" in v, f"{f} leaked in public /health: {v}"
+
+    def test_revealed_when_signed_in(self, authed_client):
+        d = authed_client.get("/health").json()["ingest"]
+        v = d.get("expected_account")
+        if v:
+            assert "***" not in v
+
+    def test_match_flag_present(self, client):
+        assert "accounts_match" in client.get("/health").json()["ingest"]
