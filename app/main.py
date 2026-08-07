@@ -330,7 +330,15 @@ def dashboard():
 # --- API endpoints (protected) ---
 
 
-def _ingest_health(poll: dict) -> dict:
+def _mask_email(addr: str | None) -> str | None:
+    """a***@gmail.com — enough to confirm the right inbox, not a harvestable address."""
+    if not addr or "@" not in addr:
+        return addr
+    local, _, domain = addr.partition("@")
+    return f"{local[0]}***@{domain}" if local else addr
+
+
+def _ingest_health(poll: dict, reveal_accounts: bool = False) -> dict:
     """Assess whether the listing pipeline is actually updating.
 
     Distinguishes a broken pipeline (auth failure, or no successful poll in
@@ -349,6 +357,9 @@ def _ingest_health(poll: dict) -> dict:
         except ValueError:
             pass
 
+    connected = db.get_app_state("gmail_connected_account")
+    expected = settings.gmail_account_email or None
+
     stale = hours_since is not None and hours_since > _STALE_AFTER_HOURS
     # Unknown (never polled successfully, no auth error) is not a failure —
     # don't alarm on a fresh boot before the first poll completes
@@ -365,23 +376,27 @@ def _ingest_health(poll: dict) -> dict:
         "auth_expired": auth_expired,
         "last_successful_poll": last_ok,
         "hours_since_success": hours_since,
-        "connected_account": db.get_app_state("gmail_connected_account"),
-        "expected_account": settings.gmail_account_email or None,
+        "connected_account": connected if reveal_accounts else _mask_email(connected),
+        "expected_account": expected if reveal_accounts else _mask_email(expected),
+        "accounts_match": bool(connected and expected and connected.lower() == expected.lower()),
     }
 
 
 @app.get("/health")
-def health():
+def health(request: Request):
     with _poll_lock:
         poll = dict(_poll_status)
     try:
         commute_gate = _log_commute_gate_drift()
     except Exception:
         commute_gate = None
+    # /health is public (the dashboard polls it before sign-in), so email
+    # addresses are masked unless the caller is actually signed in
+    signed_in = bool(_get_current_user(request))
     return {
         "status": "ok",
         "poll": poll,
-        "ingest": _ingest_health(poll),
+        "ingest": _ingest_health(poll, reveal_accounts=signed_in),
         "commute_gate": commute_gate,
     }
 
@@ -2493,11 +2508,14 @@ def manage_email_preview(request: Request):
 
     A new sender (e.g. an MLS auto-email) often needs parser work; this shows
     what the poller actually received. Match by `subject` substring, newest
-    first. Protected by MANAGE_KEY.
+    first.
+
+    Requires a signed-in session, NOT the manage key: this returns raw email
+    content, and the manage key travels further (scheduled jobs, scripts) than
+    a credential with that reach should. It's also limited to alert senders so
+    it can't be used to read unrelated mail that the poller happened to touch.
     """
-    key = request.headers.get("x-manage-key", "")
-    if not settings.manage_key or key != settings.manage_key:
-        raise HTTPException(status_code=403, detail="Invalid or missing management key")
+    _require_auth(request)
 
     subject_q = (request.query_params.get("subject") or "").strip()
     if not subject_q:
@@ -2519,6 +2537,15 @@ def manage_email_preview(request: Request):
     if not row:
         raise HTTPException(status_code=404, detail=f"No processed email matching {subject_q!r}")
     gmail_id, sender, subject = row[0], row[1], row[2]
+
+    # Only alert senders — the poller also touches unrelated personal mail, and
+    # a debugging tool has no business surfacing that.
+    sender_l = (sender or "").lower()
+    if not any(s.lower() in sender_l for s in settings.sender_list if s.strip()):
+        raise HTTPException(
+            status_code=403,
+            detail="Preview is limited to configured alert senders",
+        )
 
     from app.gmail import fetch_email_by_id
     data = fetch_email_by_id(gmail_id)
