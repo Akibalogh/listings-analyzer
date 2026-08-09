@@ -4,6 +4,56 @@ All notable changes to Listings Analyzer are documented here.
 
 ---
 
+## [2026-08-09] — sqft provenance, immediate MLS emails, retuned criteria, ntfy
+
+### Context
+Ken is switching the MLS auto-email from a daily digest to immediate delivery,
+and pointed out that a station 20 minutes away is worse than the commute number
+suggests once you add parking. Aki also retuned the budget and wants push
+alerts on an open-source service instead of paid Pushover.
+
+### Added
+- **Square-footage provenance** — OneKey/Matrix listings state where the sqft
+  came from. Only a municipal measurement (assessor / tax roll / public record)
+  is third-party verified; Owner, Estimated, Builder, Agent and Other are
+  self-reported. `parse_sqft_source()` reads the field from the scraped
+  description into new `sqft_source` / `sqft_verified` columns, the scorer gets
+  it as `sqft_provenance`, and the dashboard shows
+  "Size ⚠ — 2,850 sqft (owner-reported — verify)". An unknown source stays
+  unknown: flagging every listing would make the flag meaningless.
+- **ntfy push notifications** (`NTFY_TOPIC`, optional `NTFY_SERVER` /
+  `NTFY_TOKEN`) — one topic serves Aki, Bronwyn and Ken. Supersedes Pushover
+  as soon as the topic is set; Pushover stays wired up until then, and exactly
+  one phone channel fires. ⚠️ On public ntfy.sh the topic name is the only
+  access control — anyone who knows it can read the alerts and publish fake
+  ones — so it must be a long random string and must never be committed.
+- **`docs/criteria-v74-proposed.txt`** — the proposed criteria text, reviewable
+  in the repo (criteria themselves live in the DB). A test keeps its stated
+  commute limit in sync with `COMMUTE_HARD_LIMIT_MINUTES`.
+
+### Changed
+- **Criteria v74 (proposed, not applied)** — station DRIVE time plus the
+  parking hunt is now penalized (up to -15 at 18+ minutes) while WALKING
+  distance stays explicitly irrelevant; the commute curve is steeper
+  throughout; the $1.5M–$2M band carries no price penalty at all (was -3/-8)
+  and above $2M is -8 (was -14), hard cap unchanged at $2.25M. Applying it
+  triggers a full rescore.
+- **Scorer system prompt** — its own price and commute curves contradicted the
+  criteria and would have blunted the retune; they now defer to the criteria
+  text. `commute_data.drive_minutes` is passed to the model.
+
+### Fixed
+- **Repeat alerts matched by Redfin home ID now update the listing** instead of
+  being dropped, so a price change arriving in a second email is applied. With
+  immediate delivery the same home shows up across several small emails.
+- **Gmail message list pagination** — `messages.list` returns 100 per page and
+  `nextPageToken` was ignored, which one-email-per-listing makes reachable
+  after any outage. Bounded at 5 pages.
+- Flaky `test_enrich_starts_background_task`, which leaked a background thread
+  into the next test.
+
+---
+
 ## [2026-07-24] — Staleness takeover + retire the dead Redfin scrape
 
 ### Context
