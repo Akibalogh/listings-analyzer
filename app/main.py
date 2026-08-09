@@ -1128,6 +1128,14 @@ def _build_listing_data(listing_row: dict) -> dict:
             try:
                 cd = json.loads(commute_json)
                 listing_data["commute_mode"] = cd.get("commute_mode", "transit")
+                # The drive to the station is scored separately from the
+                # door-to-door total (a long drive also means a parking hunt)
+                commute_detail = {
+                    k: cd[k] for k in ("drive_minutes", "transit_minutes", "station")
+                    if cd.get(k) is not None
+                }
+                if commute_detail:
+                    listing_data["commute_data"] = commute_detail
             except (json.JSONDecodeError, TypeError):
                 pass
 
