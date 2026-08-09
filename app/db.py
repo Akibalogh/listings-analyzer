@@ -490,6 +490,35 @@ def get_listing_id_and_status_by_address_key(address_key: str) -> tuple[int, str
         return (row["id"], row["listing_status"])
 
 
+def get_listing_id_and_status_by_home_id(home_id: str) -> tuple[int, str | None] | None:
+    """Return (id, listing_status) for the listing with this Redfin home ID.
+
+    Lets a repeat alert about an already-tracked home update it (price, status)
+    instead of being dropped as a duplicate — the home ID is matched before
+    address_key, so without this the update path never ran for Redfin emails.
+    """
+    if not home_id:
+        return None
+    import re as _re
+
+    ph = _placeholder()
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            f"SELECT id, listing_status, listing_url FROM listings "
+            f"WHERE listing_url LIKE {ph} ORDER BY id",
+            (f"%/home/{home_id}%",),
+        )
+        rows = cur.fetchall()
+    # LIKE also matches /home/12345 for home_id 1234 — confirm the exact segment
+    for row in rows:
+        url = row[2] if settings.is_postgres else row["listing_url"]
+        m = _re.search(r"/home/(\d+)", url or "")
+        if m and m.group(1) == home_id:
+            return (row[0], row[1]) if settings.is_postgres else (row["id"], row["listing_status"])
+    return None
+
+
 def update_listing_status(listing_id: int, status: str):
     """Unconditionally update listing_status for a listing."""
     ph = _placeholder()
@@ -674,6 +703,8 @@ def _migrate_add_columns():
         ("listings", "has_basement", "BOOLEAN"),
         ("listings", "basement_type", "TEXT"),
         ("listings", "agent_name", "TEXT"),
+        ("listings", "sqft_source", "TEXT"),
+        ("listings", "sqft_verified", "BOOLEAN"),
         ("scores", "evaluation_method", "TEXT DEFAULT 'deterministic'"),
         ("scores", "criteria_version", "INTEGER"),
         ("scores", "ai_reasoning", "TEXT"),
@@ -1020,7 +1051,7 @@ def update_listing_enrichment(listing_id: int, enrichment: dict):
         "property_tax_json", "power_line_json", "flood_zone_json", "station_json",
         "lat", "lng", "garage_count", "garage_type", "hoa_monthly",
         "has_pool", "pool_type", "has_basement", "basement_type",
-        "year_built", "list_date",
+        "year_built", "list_date", "sqft_source", "sqft_verified",
     }
     cols_to_update = {k: v for k, v in enrichment.items() if k in allowed_cols}
     if not cols_to_update:

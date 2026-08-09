@@ -1,4 +1,5 @@
-"""Slack webhook notifications for high-scoring listings."""
+"""Notifications for high-scoring listings: phone push (ntfy, or Pushover
+before the migration completes) plus a Slack webhook."""
 import logging
 import httpx
 from app.config import settings
@@ -130,9 +131,64 @@ def notify_pushover(listing: dict, score: int, verdict: str) -> bool:
     return sent_any
 
 
+def _header_safe(text: str) -> str:
+    """Strip characters HTTP headers can't carry (emoji, smart quotes)."""
+    return text.encode("ascii", "ignore").decode("ascii").strip()
+
+
+def notify_ntfy(listing: dict, score: int, verdict: str) -> bool:
+    """Send a phone push via ntfy to the configured topic.
+
+    One topic serves everyone subscribed (Aki, Bronwyn, Ken) — a single publish
+    reaches all of them, so there is no per-recipient fan-out.
+
+    The title and body carry the address, price and score so the alert is
+    readable straight from the lock screen; ntfy renders both without opening
+    the app. Returns True when published. Fails silently.
+    """
+    url = settings.ntfy_url
+    if not url:
+        return False
+    headline, stats, listing_url = _listing_summary(listing)
+    headers = {
+        # Emoji go in Tags, not the Title — header values must be ASCII
+        "Title": _header_safe(f"New {verdict} ({score}) - {listing.get('town', '')}"),
+        "Tags": "house_with_garden" if verdict == "Strong Match" else "house",
+        # High priority: sounds and surfaces on the lock screen rather than
+        # sitting silently in the notification drawer.
+        "Priority": "high",
+    }
+    if listing_url:
+        headers["Click"] = listing_url
+    if settings.ntfy_token:
+        headers["Authorization"] = f"Bearer {settings.ntfy_token}"
+    try:
+        resp = httpx.post(
+            url,
+            content=f"{headline}\n{stats}".encode("utf-8"),
+            headers=headers,
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+        logger.info(f"ntfy sent for {headline} ({verdict} {score})")
+        return True
+    except Exception as e:
+        logger.warning(f"ntfy notification failed for {headline}: {e}")
+        return False
+
+
 def send_high_score_alert(listing: dict, score: int, verdict: str) -> None:
-    """Fan out a new-high-score alert to all configured channels (Pushover + Slack)."""
-    notify_pushover(listing, score, verdict)
+    """Fan out a new-high-score alert to every configured channel.
+
+    ntfy supersedes Pushover (open source, no per-seat cost) and takes over as
+    soon as NTFY_TOPIC is set; Pushover stays wired up so nothing goes quiet
+    mid-migration while the topic is unset. Exactly one of the two runs, so a
+    half-migrated config can't double-buzz every phone.
+    """
+    if settings.ntfy_url:
+        notify_ntfy(listing, score, verdict)
+    else:
+        notify_pushover(listing, score, verdict)
     notify_new_listing(listing, score, verdict, listing.get("evaluation_method", "ai"))
 
 

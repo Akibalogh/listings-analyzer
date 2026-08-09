@@ -1048,17 +1048,20 @@ def rescore_status():
 
 @app.post("/manage/notify-test")
 def notify_test(request: Request):
-    """Send a test alert (Pushover + Slack) using the highest-scored listing."""
+    """Send a test alert (ntfy or Pushover, plus Slack) using the top listing."""
     key = request.headers.get("x-manage-key", "")
     if not (settings.manage_key and key == settings.manage_key):
         _require_auth(request)
     from app.notifier import send_high_score_alert
+    ntfy = bool(settings.ntfy_url)
     channels = {
-        "pushover": bool(settings.pushover_token and settings.pushover_user),
+        "ntfy": ntfy,
+        # ntfy supersedes Pushover — only one phone channel fires
+        "pushover": (not ntfy) and bool(settings.pushover_token and settings.pushover_user),
         "slack": bool(settings.slack_webhook_url),
     }
     if not any(channels.values()):
-        raise HTTPException(status_code=400, detail="No notification channel configured (set Pushover or Slack)")
+        raise HTTPException(status_code=400, detail="No notification channel configured (set ntfy, Pushover, or Slack)")
     listings = db.get_all_listings()
     top = sorted(listings, key=lambda l: l.get("score") or 0, reverse=True)
     if not top or (top[0].get("score") or 0) == 0:
@@ -1091,6 +1094,22 @@ def _build_listing_data(listing_row: dict) -> dict:
         "lot_acres": listing_row.get("lot_acres"),
     }
 
+    # Square-footage provenance: only a municipal measurement is third-party
+    # verified. Falls back to parsing the description when the enrich pass
+    # hasn't stored a source yet, so scoring never waits on it.
+    if listing_row.get("sqft") is not None:
+        from app.enrichment import parse_sqft_source
+
+        sqft_source = listing_row.get("sqft_source")
+        sqft_verified = listing_row.get("sqft_verified")
+        if not sqft_source:
+            parsed = parse_sqft_source(listing_row.get("description"))
+            sqft_source, sqft_verified = parsed["sqft_source"], parsed["sqft_verified"]
+        listing_data["sqft_provenance"] = {
+            "source": sqft_source,
+            "verified": None if sqft_verified is None else bool(sqft_verified),
+        }
+
     # Infer property_type from description if not available in metadata
     if not listing_data.get("property_type") and listing_data.get("description"):
         from app.enrichment import infer_property_type_from_description
@@ -1112,6 +1131,14 @@ def _build_listing_data(listing_row: dict) -> dict:
             try:
                 cd = json.loads(commute_json)
                 listing_data["commute_mode"] = cd.get("commute_mode", "transit")
+                # The drive to the station is scored separately from the
+                # door-to-door total (a long drive also means a parking hunt)
+                commute_detail = {
+                    k: cd[k] for k in ("drive_minutes", "transit_minutes", "station")
+                    if cd.get(k) is not None
+                }
+                if commute_detail:
+                    listing_data["commute_data"] = commute_detail
             except (json.JSONDecodeError, TypeError):
                 pass
 
@@ -2111,7 +2138,7 @@ def _enrich_all(clear_bogus: bool = False, clear_bogus_commute: bool = False,
         logger.info(f"Cleared commute for {cleared_towns} listings in towns {sorted(recompute_set)}")
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    from app.enrichment import fetch_commute_time, fetch_school_data, normalize_address, fetch_property_tax, fetch_property_tax_orpts, fetch_power_line_proximity, fetch_flood_zone, fetch_station_proximity, parse_garage_count, parse_hoa_amount, parse_pool_flag, parse_basement, parse_year_built, parse_list_date, _geocode_address, enrich_missing_urls, fetch_lot_acres_parcel
+    from app.enrichment import fetch_commute_time, fetch_school_data, normalize_address, fetch_property_tax, fetch_property_tax_orpts, fetch_power_line_proximity, fetch_flood_zone, fetch_station_proximity, parse_garage_count, parse_hoa_amount, parse_pool_flag, parse_basement, parse_sqft_source, parse_year_built, parse_list_date, _geocode_address, enrich_missing_urls, fetch_lot_acres_parcel
 
     try:
         listing_ids = db.get_all_listing_ids()
@@ -2331,6 +2358,14 @@ def _enrich_all(clear_bogus: bool = False, clear_bogus_commute: bool = False,
                         enrichment["has_basement"] = b["has_basement"]
                         enrichment["basement_type"] = b.get("basement_type")
                         changed = True
+
+                # MLS "SqFt Source" — re-parsed every time so a rescrape that
+                # finally exposes the field updates a listing already stored
+                s = parse_sqft_source(desc)
+                if s.get("sqft_source") and s["sqft_source"] != listing.get("sqft_source"):
+                    enrichment["sqft_source"] = s["sqft_source"]
+                    enrichment["sqft_verified"] = s["sqft_verified"]
+                    changed = True
 
                 if listing.get("year_built") is None:
                     yb = parse_year_built(desc)

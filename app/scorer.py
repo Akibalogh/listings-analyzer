@@ -165,10 +165,10 @@ Worth Touring — 65/100
 ✅ Detached: Single-family home.
 ✅ Ground-floor bedroom: CONFIRMED — floor plan shows 12' x 14'11" bedroom on main floor. (Nice-to-have bonus)
 ✅ Basement suitable for gym: CONFIRMED — 1,200 sqft finished basement with rec room, high ceilings, rubber flooring evident in photos.
-⚠️ Price: $1.65M is $150K above the ideal $1.5M target, within the $1.8M hard cap.
+⚠️ Price: $2.1M is above the $1.5M-$2M target range, within the $2.25M hard cap.
 ❓ Lot: Size not stated in listing.
 
-A confirmed basement gym setup is a major plus. Ground floor bedroom adds convenience for parents visiting. Price at $1.65M is above target but within range — negotiate accordingly.
+A confirmed basement gym setup is a major plus. Ground floor bedroom adds convenience for parents visiting. Price at $2.1M is above the target range but within the cap — negotiate accordingly.
 
 GROUND-FLOOR BEDROOM — NICE-TO-HAVE (NOT A HARD CRITERION):
 The buyer's parents may occasionally need a ground-floor bedroom. This is a CONVENIENCE, not a dealbreaker.
@@ -202,19 +202,20 @@ The buyer's three highest-priority criteria are: (1) commute time, (2) school di
 These should carry the most weight in your scoring.
 
 - COMMUTE: If commute_minutes is provided in <listing_data>, this is a TOP PRIORITY factor.
-  Apply a SMOOTH PENALTY CURVE based on total minutes (drive-to-station + transit):
-  Under 60 min = excellent (+10 to +15). 60–75 min = good (+5). 75–90 min = acceptable (0).
-  90–120 min = gradual penalty (−1 to −2 pts per minute over 90). Over 120 min = significant concern (−40+ pts).
-  Mention commute time in property_summary. Use this curve, not a binary hard reject.
+  Apply the commute curve in the EVALUATION INSTRUCTIONS exactly as written — it is
+  the authority on the penalty bands. Then apply the station-drive penalty on top:
+  the buyer drives to the station and has to park, and the door-to-door number
+  includes neither the parking hunt nor the cost of a long drive to the platform.
+  Mention both the commute time and the station drive in property_summary.
 - SCHOOLS: If school_data is provided in <listing_data>, this is a TOP PRIORITY factor.
   HARD REJECT if below 50th percentile (score 0, verdict "Reject").
   95th+ percentile = excellent (+25). 80–94th = good (+15). 50–79th = weak/caution (+5, flag as concern).
   Weight elementary schools most heavily. Mention specific school names and percentiles.
   Note: Missing school data is EXCLUDED from scoring (not penalized as unknown).
-- PRICE: Target is $1.5M. Apply a SMOOTH PENALTY CURVE:
-  Under $1.5M = positive factor (+5 to +10 for deals). $1.5M–$1.65M = mild concern (−5 to −10 pts).
-  $1.65M–$1.75M = moderate concern (−15 to −20 pts, approaching max). Over $1.75M = strong concern (−25 to −40 pts).
-  Can potentially go to $1.75M if everything else is excellent, but expect heavy penalty. Never auto-reject on price alone.
+- PRICE: The target range is $1.5M–$2M and carries NO penalty anywhere inside it.
+  Under $1.5M = mildly positive (+5 for a genuine deal). $1.5M–$2M = neutral (0).
+  $2M–$2.25M = less desirable (−8). $2.25M is the buyer's hard cap.
+  Never auto-reject on price alone.
   MISSING PRICE: If price is null/unknown/not listed, treat it as a "missing data" unknown — mark the price criterion as passed: null with reason "Price not listed". Do NOT reject or heavily penalize for a missing price. Score the listing on its other merits; flag price as unverifiable.
 - If age_condition is provided, apply the age_adjustment and condition_adjustment directly
   to your score. Note the age_tier and any keywords_matched in your reasoning.

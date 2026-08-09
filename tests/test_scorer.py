@@ -765,6 +765,91 @@ class TestCommuteGateInclusivePhrasing:
         assert criteria_commute_limit(text) == 110
 
 
+class TestProposedCriteriaFile:
+    """docs/criteria-v74-proposed.txt is the text Aki pastes into PUT /criteria.
+
+    The commute gate is enforced in code, so the prose must keep stating the
+    same limit — commute_gate_drift() exists precisely to catch this drift.
+    """
+
+    @staticmethod
+    def _text():
+        from pathlib import Path
+        path = Path(__file__).resolve().parent.parent / "docs" / "criteria-v74-proposed.txt"
+        return path.read_text()
+
+    def test_commute_limit_matches_the_code_gate(self):
+        from app.config import settings
+        from app.scorer import commute_gate_drift
+
+        drift = commute_gate_drift(self._text())
+        assert drift["criteria_minutes"] == settings.commute_hard_limit_minutes
+        assert drift["in_sync"] is True
+
+    def test_target_price_band_carries_no_penalty(self):
+        text = self._text()
+        assert " 0  price $1.5M-$2.0M" in text
+        assert "-3  price $1.5M-$1.75M" not in text
+        assert "-8  price $1.75M-$2.0M" not in text
+
+    def test_station_drive_is_penalized_and_walking_is_not(self):
+        text = self._text()
+        assert "-15 18 minutes or more" in text
+        assert "WALKING distance to the station is irrelevant" in text
+
+    def test_pool_stays_a_mild_negative(self):
+        text = self._text()
+        assert "-5 in-ground pool" in text
+        assert "-3 above-ground pool" in text
+
+    def test_unverified_sqft_is_a_concern_not_a_reject(self):
+        text = self._text()
+        assert "needs manual verification" in text
+        assert "must never fail the 2,200 sqft hard" in text
+        assert "Do NOT" in text and "reject and do NOT deduct points for the provenance" in text
+
+
+class TestSqftProvenanceInListingData:
+    """The AI must know whether the stated sqft was measured by the town."""
+
+    def test_stored_self_reported_source_surfaces(self):
+        from app.main import _build_listing_data
+
+        data = _build_listing_data({
+            "sqft": 2850, "sqft_source": "owner", "sqft_verified": False,
+        })
+        assert data["sqft_provenance"] == {"source": "owner", "verified": False}
+
+    def test_municipal_source_is_verified(self):
+        from app.main import _build_listing_data
+
+        data = _build_listing_data({
+            "sqft": 2850, "sqft_source": "municipality", "sqft_verified": True,
+        })
+        assert data["sqft_provenance"] == {"source": "municipality", "verified": True}
+
+    def test_falls_back_to_description_parse(self):
+        """Scoring can't wait on the enrich pass to store the source."""
+        from app.main import _build_listing_data
+
+        data = _build_listing_data({
+            "sqft": 2850, "description": "SqFt Source: Estimated. Lovely colonial.",
+        })
+        assert data["sqft_provenance"] == {"source": "estimated", "verified": False}
+
+    def test_unknown_source_is_not_flagged_false(self):
+        """Unknown must stay unknown — flagging everything makes it meaningless."""
+        from app.main import _build_listing_data
+
+        data = _build_listing_data({"sqft": 2850, "description": "Lovely colonial."})
+        assert data["sqft_provenance"] == {"source": None, "verified": None}
+
+    def test_absent_when_no_sqft(self):
+        from app.main import _build_listing_data
+
+        assert "sqft_provenance" not in _build_listing_data({"address": "1 A St"})
+
+
 class TestBuyerVerifiedNotes:
     """Buyer notes are authoritative and must sit OUTSIDE the untrusted
     <listing_data> block so the model treats them as fact, not as scraped text."""

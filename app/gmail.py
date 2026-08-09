@@ -93,6 +93,13 @@ def fetch_new_emails() -> list[dict]:
     return all_emails
 
 
+# Gmail's messages.list returns 100 results per page. The MLS alert now sends
+# one email per new listing instead of a daily digest, so a backlog can exceed
+# a single page — follow nextPageToken, bounded so a runaway query can't stall
+# the poll.
+_MAX_LIST_PAGES = 5
+
+
 def _fetch_query(
     service, query: str, label_id: str, seen_ids: set[str]
 ) -> list[dict]:
@@ -102,8 +109,24 @@ def _fetch_query(
     """
     logger.info(f"Gmail search: {query}")
 
-    results = service.users().messages().list(userId="me", q=query).execute()
-    messages = results.get("messages", [])
+    messages: list[dict] = []
+    page_token = None
+    for _ in range(_MAX_LIST_PAGES):
+        results = (
+            service.users()
+            .messages()
+            .list(userId="me", q=query, pageToken=page_token)
+            .execute()
+        )
+        messages.extend(results.get("messages", []))
+        page_token = results.get("nextPageToken")
+        if not page_token:
+            break
+    else:
+        logger.warning(
+            f"Gmail search hit the {_MAX_LIST_PAGES}-page cap "
+            f"({len(messages)} emails); the remainder waits for the next poll"
+        )
 
     if not messages:
         return []

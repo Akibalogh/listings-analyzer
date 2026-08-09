@@ -302,3 +302,142 @@ class TestPushover:
                 assert p.call_count == 2
                 users = {c[1]["data"]["user"] for c in p.call_args_list}
                 assert users == {"aki_key", "bron_key"}
+
+
+class TestNtfy:
+    """ntfy replaces Pushover: one topic, everyone subscribed gets the alert."""
+
+    LISTING = {"address": "1 A St", "town": "Katonah", "state": "NY", "price": 1400000,
+               "sqft": 3000, "bedrooms": 4, "commute_minutes": 75,
+               "listing_url": "https://www.redfin.com/NY/Katonah/1-A-St/home/1"}
+
+    def test_noop_without_topic(self):
+        from app.notifier import notify_ntfy
+        with patch("app.notifier.settings") as s:
+            s.ntfy_url = ""
+            with patch("app.notifier.httpx.post") as p:
+                assert notify_ntfy(self.LISTING, 82, "Strong Match") is False
+                p.assert_not_called()
+
+    def test_publishes_to_topic_url(self):
+        from app.notifier import notify_ntfy
+        with patch("app.notifier.settings") as s:
+            s.ntfy_url = "https://ntfy.sh/secret-topic"
+            s.ntfy_token = ""
+            with patch("app.notifier.httpx.post") as p:
+                p.return_value = MagicMock(raise_for_status=MagicMock())
+                assert notify_ntfy(self.LISTING, 82, "Strong Match") is True
+                assert p.call_args[0][0] == "https://ntfy.sh/secret-topic"
+
+    def test_content_is_readable_from_the_lock_screen(self):
+        """Address, price and score must be in the notification itself."""
+        from app.notifier import notify_ntfy
+        with patch("app.notifier.settings") as s:
+            s.ntfy_url = "https://ntfy.sh/secret-topic"
+            s.ntfy_token = ""
+            with patch("app.notifier.httpx.post") as p:
+                p.return_value = MagicMock(raise_for_status=MagicMock())
+                notify_ntfy(self.LISTING, 82, "Strong Match")
+                headers = p.call_args[1]["headers"]
+                body = p.call_args[1]["content"].decode("utf-8")
+                assert "82" in headers["Title"] and "Strong Match" in headers["Title"]
+                assert "Katonah" in headers["Title"]
+                assert "1 A St, Katonah" in body
+                assert "1,400,000" in body
+                assert headers["Priority"] == "high"
+                assert headers["Click"].endswith("/home/1")
+
+    def test_title_stays_ascii(self):
+        """HTTP headers can't carry emoji — they belong in Tags."""
+        from app.notifier import notify_ntfy
+        with patch("app.notifier.settings") as s:
+            s.ntfy_url = "https://ntfy.sh/secret-topic"
+            s.ntfy_token = ""
+            with patch("app.notifier.httpx.post") as p:
+                p.return_value = MagicMock(raise_for_status=MagicMock())
+                notify_ntfy({**self.LISTING, "town": "Croton-on-Hudson — NY"}, 82, "Strong Match")
+                headers = p.call_args[1]["headers"]
+                headers["Title"].encode("ascii")  # must not raise
+                assert headers["Tags"] == "house_with_garden"
+
+    def test_worth_touring_uses_plain_house_tag(self):
+        from app.notifier import notify_ntfy
+        with patch("app.notifier.settings") as s:
+            s.ntfy_url = "https://ntfy.sh/secret-topic"
+            s.ntfy_token = ""
+            with patch("app.notifier.httpx.post") as p:
+                p.return_value = MagicMock(raise_for_status=MagicMock())
+                notify_ntfy(self.LISTING, 72, "Worth Touring")
+                assert p.call_args[1]["headers"]["Tags"] == "house"
+
+    def test_token_sent_as_bearer_when_set(self):
+        from app.notifier import notify_ntfy
+        with patch("app.notifier.settings") as s:
+            s.ntfy_url = "https://ntfy.example.com/secret-topic"
+            s.ntfy_token = "tk_abc"
+            with patch("app.notifier.httpx.post") as p:
+                p.return_value = MagicMock(raise_for_status=MagicMock())
+                notify_ntfy(self.LISTING, 82, "Strong Match")
+                assert p.call_args[1]["headers"]["Authorization"] == "Bearer tk_abc"
+
+    def test_no_auth_header_without_token(self):
+        from app.notifier import notify_ntfy
+        with patch("app.notifier.settings") as s:
+            s.ntfy_url = "https://ntfy.sh/secret-topic"
+            s.ntfy_token = ""
+            with patch("app.notifier.httpx.post") as p:
+                p.return_value = MagicMock(raise_for_status=MagicMock())
+                notify_ntfy(self.LISTING, 82, "Strong Match")
+                assert "Authorization" not in p.call_args[1]["headers"]
+
+    def test_fails_silently_on_http_error(self):
+        from app.notifier import notify_ntfy
+        with patch("app.notifier.settings") as s:
+            s.ntfy_url = "https://ntfy.sh/secret-topic"
+            s.ntfy_token = ""
+            with patch("app.notifier.httpx.post", side_effect=Exception("connection refused")):
+                assert notify_ntfy(self.LISTING, 82, "Strong Match") is False
+
+
+class TestPushChannelSelection:
+    """Exactly one phone channel fires, so a half-migrated config can't
+    double-buzz every phone."""
+
+    LISTING = TestNtfy.LISTING
+
+    def test_ntfy_takes_over_when_topic_is_set(self):
+        from app.notifier import send_high_score_alert
+        with patch("app.notifier.settings") as s:
+            s.ntfy_url = "https://ntfy.sh/secret-topic"
+            s.slack_webhook_url = ""
+            with patch("app.notifier.notify_ntfy") as ntfy, \
+                 patch("app.notifier.notify_pushover") as push:
+                send_high_score_alert(self.LISTING, 82, "Strong Match")
+                ntfy.assert_called_once()
+                push.assert_not_called()
+
+    def test_pushover_still_used_until_the_topic_is_set(self):
+        from app.notifier import send_high_score_alert
+        with patch("app.notifier.settings") as s:
+            s.ntfy_url = ""
+            s.slack_webhook_url = ""
+            with patch("app.notifier.notify_ntfy") as ntfy, \
+                 patch("app.notifier.notify_pushover") as push:
+                send_high_score_alert(self.LISTING, 82, "Strong Match")
+                push.assert_called_once()
+                ntfy.assert_not_called()
+
+
+class TestNtfyConfig:
+    def test_url_empty_without_topic(self):
+        from app.config import Settings
+        assert Settings(ntfy_topic="").ntfy_url == ""
+
+    def test_url_built_from_topic(self):
+        from app.config import Settings
+        assert Settings(ntfy_topic="abc123").ntfy_url == "https://ntfy.sh/abc123"
+
+    def test_custom_server_and_trailing_slash(self):
+        from app.config import Settings
+        s = Settings(ntfy_topic="abc123", ntfy_server="https://ntfy.example.com/")
+        assert s.ntfy_url == "https://ntfy.example.com/abc123"

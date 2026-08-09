@@ -98,6 +98,9 @@ def poll_once() -> list[dict]:
                 hm = re.search(r"/home/(\d+)", listing.listing_url)
                 home_id = hm.group(1) if hm else None
             if home_id and home_id in db.get_all_redfin_home_ids():
+                existing = db.get_listing_id_and_status_by_home_id(home_id)
+                if existing:
+                    _update_duplicate(existing, listing)
                 logger.info(f"Duplicate listing by Redfin home ID {home_id}: {listing.address}")
                 continue
 

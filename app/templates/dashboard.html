@@ -2287,7 +2287,16 @@ function buildCard(l) {
   }
 
   /* Stats row */
-  var statsArr = [buildStat('Price', price), buildStat('Size', sqft + ' sqft'), buildStat('Beds', beds), buildStat('Baths', baths)];
+  /* MLS sqft source: anything other than a municipal measurement is
+     self-reported, so the size needs checking by hand before trusting it. */
+  var sizeLabel = 'Size';
+  var sizeValue = sqft + ' sqft';
+  /* SQLite stores booleans as 0/1, Postgres as true/false — accept both. */
+  if (l.sqft != null && (l.sqft_verified === false || l.sqft_verified === 0)) {
+    sizeLabel = 'Size ⚠';
+    sizeValue += ' (' + (l.sqft_source || 'self') + '-reported — verify)';
+  }
+  var statsArr = [buildStat('Price', price), buildStat(sizeLabel, sizeValue), buildStat('Beds', beds), buildStat('Baths', baths)];
   if (l.year_built) statsArr.push(buildStat('Built', String(l.year_built)));
   if (l.list_date) {
     var listedDate = new Date(l.list_date);
