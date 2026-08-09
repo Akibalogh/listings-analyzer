@@ -1,5 +1,6 @@
 """Tests for the AI scoring engine."""
 
+import json
 from unittest.mock import MagicMock
 
 from app.scorer import (
@@ -848,6 +849,242 @@ class TestSqftProvenanceInListingData:
         from app.main import _build_listing_data
 
         assert "sqft_provenance" not in _build_listing_data({"address": "1 A St"})
+
+
+class TestCommuteRejectRetryIntegration:
+    """End-to-end through ai_score_listing(): the retry must actually fire and
+    the override must actually apply. Testing the helpers alone would not have
+    caught the prompt-only fix failing in production."""
+
+    REJECT = json.dumps({
+        "score": 0, "verdict": "Reject",
+        "hard_results": [{"criterion": "Commute ≤110 min door-to-door",
+                          "passed": False, "value": "108 min",
+                          "reason": "108 min, ~128 with parking — exceeds the cap"}],
+        "reasoning": "Fails the hard commute requirement at 108 minutes.",
+    })
+    GOOD = json.dumps({
+        "score": 55, "verdict": "Low Priority",
+        "hard_results": [{"criterion": "Minimum 2,200 sqft", "passed": True, "value": "2,544"}],
+        "reasoning": "Long commute is a heavy penalty, not a disqualifier.",
+    })
+
+    @staticmethod
+    def _run(texts, commute=108):
+        """Drive ai_score_listing with a scripted sequence of AI responses."""
+        from unittest.mock import MagicMock, patch
+        from app.config import Settings
+        from app.scorer import ai_score_listing
+
+        real = Settings(_env_file=None)
+        with patch("app.scorer.settings") as s:
+            s.anthropic_api_key = "sk-test"
+            s.ai_eval_model = "claude-haiku-4-5-20251001"
+            s.commute_hard_limit_minutes = real.commute_hard_limit_minutes
+            client = MagicMock()
+
+            def respond(*_, **__):
+                msg = MagicMock()
+                msg.content = [MagicMock()]
+                msg.content[0].text = texts[min(client.messages.create.call_count - 1,
+                                                len(texts) - 1)]
+                return msg
+
+            client.messages.create.side_effect = respond
+            with patch("app.scorer._build_user_message", return_value=[]), \
+                 patch("app.scorer._build_system_prompt", return_value=[]), \
+                 patch("app.scorer.anthropic.Anthropic", return_value=client):
+                result, _ = ai_score_listing(
+                    {"address": "29 Appleby Dr", "commute_minutes": commute}, "Criteria",
+                )
+        return result, client.messages.create.call_count
+
+    def test_retry_fires_and_second_answer_is_used(self):
+        result, calls = self._run([self.REJECT, self.GOOD])
+        assert calls == 2, "the model should have been re-asked"
+        assert result.verdict == "Low Priority"
+        assert result.score == 55
+
+    def test_correction_text_is_actually_sent(self):
+        """Guard against re-asking with the identical prompt."""
+        from unittest.mock import MagicMock, patch
+        from app.config import Settings
+        from app.scorer import _COMMUTE_RETRY_NOTE, ai_score_listing
+
+        real = Settings(_env_file=None)
+        with patch("app.scorer.settings") as s:
+            s.anthropic_api_key = "sk-test"
+            s.ai_eval_model = "claude-haiku-4-5-20251001"
+            s.commute_hard_limit_minutes = real.commute_hard_limit_minutes
+            client = MagicMock()
+            texts = [self.REJECT, self.GOOD]
+
+            def respond(*_, **__):
+                msg = MagicMock()
+                msg.content = [MagicMock()]
+                msg.content[0].text = texts[min(client.messages.create.call_count - 1, 1)]
+                return msg
+
+            client.messages.create.side_effect = respond
+            with patch("app.scorer._build_user_message", return_value=[]), \
+                 patch("app.scorer._build_system_prompt", return_value=[]), \
+                 patch("app.scorer.anthropic.Anthropic", return_value=client):
+                ai_score_listing({"address": "X", "commute_minutes": 108}, "Criteria")
+
+            second = client.messages.create.call_args_list[1].kwargs["messages"][0]["content"]
+        assert any(_COMMUTE_RETRY_NOTE in b.get("text", "") for b in second)
+
+    def test_override_applies_when_model_insists(self):
+        """Both attempts reject on commute → rejection is withdrawn anyway."""
+        result, calls = self._run([self.REJECT, self.REJECT])
+        assert calls == 2
+        assert result.verdict != "Reject"
+        assert not any("ommute" in h.criterion for h in result.hard_results)
+        assert any("overridden" in c for c in result.concerns)
+
+    def test_no_retry_when_the_answer_was_fine(self):
+        """A normal result must not cost a second call."""
+        result, calls = self._run([self.GOOD])
+        assert calls == 1
+        assert result.score == 55
+
+    def test_no_retry_above_the_limit(self):
+        """At/over the limit the gate rejects first — the AI is never called."""
+        result, calls = self._run([self.GOOD], commute=200)
+        assert calls == 0
+        assert result.evaluation_method == "deterministic-gate"
+        assert result.verdict == "Reject"
+
+
+class TestCommuteOnlyRejectDetection:
+    """The prompt-only fix did not hold: after it shipped, 11 of 14 listings
+    were STILL hard-rejected on sub-limit commutes. The model worked around the
+    instruction — adding parking time to breach the cap, inventing a stricter
+    threshold, or flatly asserting that 104 "exceeds" 110. Every case below is
+    real production reasoning, so detection is now enforced in code.
+    """
+
+    @staticmethod
+    def _reject(criterion, commute):
+        from app.models import HardResult, ScoringResult
+        return ScoringResult(
+            score=0, verdict="Reject",
+            hard_results=[HardResult(criterion=criterion, passed=False, value=f"{commute} min")],
+        )
+
+    def test_detects_invented_stricter_threshold(self):
+        """6 Annarock: criterion named "Commute ≤ 109 minutes door-to-door"."""
+        from app.scorer import commute_only_reject
+        r = self._reject("Commute ≤ 109 minutes door-to-door", 109)
+        assert commute_only_reject(r, {"commute_minutes": 109}) is True
+
+    def test_detects_parking_inflation(self):
+        """29 Appleby: 108 min "real-world burden: ~128 min" with parking."""
+        from app.scorer import commute_only_reject
+        r = self._reject("Commute ≤110 min door-to-door", 108)
+        assert commute_only_reject(r, {"commute_minutes": 108}) is True
+
+    def test_detects_self_contradicting_criterion(self):
+        """35 Shady Brook: "104 minutes exceeds hard cap of 110 minutes"."""
+        from app.scorer import commute_only_reject
+        r = self._reject("Commute < 110 minutes door-to-door", 104)
+        assert commute_only_reject(r, {"commute_minutes": 104}) is True
+
+    def test_ignores_rejects_with_a_real_hard_failure(self):
+        """A commute complaint alongside a genuine failure is still a Reject."""
+        from app.models import HardResult
+        from app.scorer import commute_only_reject
+        r = self._reject("Commute ≤110 min", 105)
+        r.hard_results.append(
+            HardResult(criterion="Price within cap", passed=False, value="$6,050,000"),
+        )
+        assert commute_only_reject(r, {"commute_minutes": 105}) is False
+
+    def test_ignores_non_commute_rejects(self):
+        """19 Overlook Rd: rejected on a $6.05M price. Untouched."""
+        from app.scorer import commute_only_reject
+        r = self._reject("Price within $2.25M cap", 70)
+        assert commute_only_reject(r, {"commute_minutes": 70}) is False
+
+    def test_ignores_listings_at_or_over_the_limit(self):
+        """Above the limit the gate owns the reject — nothing to override."""
+        from app.config import settings
+        from app.scorer import commute_only_reject
+        limit = settings.commute_hard_limit_minutes
+        r = self._reject("Commute", limit)
+        assert commute_only_reject(r, {"commute_minutes": limit}) is False
+
+    def test_ignores_unknown_commute(self):
+        from app.scorer import commute_only_reject
+        r = self._reject("Commute", 0)
+        assert commute_only_reject(r, {"commute_minutes": None}) is False
+
+    def test_ignores_non_reject_verdicts(self):
+        from app.scorer import commute_only_reject
+        r = self._reject("Commute", 105)
+        r.verdict = "Low Priority"
+        assert commute_only_reject(r, {"commute_minutes": 105}) is False
+
+
+class TestStripCommuteReject:
+    """The override of last resort, when the model rejects even after correction."""
+
+    @staticmethod
+    def _rejected():
+        from app.models import HardResult, ScoringResult
+        return ScoringResult(
+            score=0, verdict="Reject",
+            hard_results=[
+                HardResult(criterion="Commute ≤109 min door-to-door", passed=False),
+                HardResult(criterion="Minimum 2,200 sqft", passed=True, value="3,100"),
+            ],
+            concerns=["Commute is grueling"],
+        )
+
+    def test_verdict_drops_out_of_reject(self):
+        from app.scorer import strip_commute_reject
+        assert strip_commute_reject(self._rejected()).verdict == "Weak Match"
+
+    def test_commute_hard_result_removed(self):
+        from app.scorer import strip_commute_reject
+        out = strip_commute_reject(self._rejected())
+        assert not any("ommute" in h.criterion for h in out.hard_results)
+
+    def test_other_hard_results_survive(self):
+        from app.scorer import strip_commute_reject
+        out = strip_commute_reject(self._rejected())
+        assert [h.criterion for h in out.hard_results] == ["Minimum 2,200 sqft"]
+
+    def test_override_is_recorded_as_a_concern(self):
+        """The override must be visible, not silent."""
+        from app.scorer import strip_commute_reject
+        out = strip_commute_reject(self._rejected())
+        assert any("overridden" in c for c in out.concerns)
+        assert "Commute is grueling" in out.concerns
+
+    def test_confidence_drops(self):
+        from app.scorer import strip_commute_reject
+        assert strip_commute_reject(self._rejected()).confidence == "low"
+
+
+class TestCommuteRetryNote:
+    """The correction names each workaround seen in production."""
+
+    def test_forbids_parking_inflation(self):
+        from app.scorer import _COMMUTE_RETRY_NOTE
+        assert "Do NOT add parking time" in _COMMUTE_RETRY_NOTE
+
+    def test_forbids_inventing_a_stricter_threshold(self):
+        from app.scorer import _COMMUTE_RETRY_NOTE
+        assert "Do NOT invent a stricter threshold" in _COMMUTE_RETRY_NOTE
+
+    def test_forbids_claiming_a_sub_limit_number_exceeds(self):
+        from app.scorer import _COMMUTE_RETRY_NOTE
+        assert 'below the limit "exceeds"' in _COMMUTE_RETRY_NOTE
+
+    def test_says_station_penalty_cannot_reject(self):
+        from app.scorer import _COMMUTE_RETRY_NOTE
+        assert "never produce a Reject" in _COMMUTE_RETRY_NOTE
 
 
 class TestCommuteIsNeverAnAIReject:
