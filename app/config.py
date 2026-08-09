@@ -49,6 +49,22 @@ class Settings(BaseSettings):
     def pushover_user_keys(self) -> list[str]:
         """Individual Pushover recipient keys (comma-separated in the env var)."""
         return [u.strip() for u in self.pushover_user.split(",") if u.strip()]
+
+    # ntfy phone push (open-source; replaces Pushover when NTFY_TOPIC is set).
+    # SECURITY: on public ntfy.sh the topic name is the ONLY access control —
+    # anyone who knows or guesses it can read every alert and publish fake
+    # ones. Use a long random topic, keep it in .env, never commit it. Set
+    # NTFY_TOKEN as well to use an access-controlled topic.
+    ntfy_topic: str = ""
+    ntfy_server: str = "https://ntfy.sh"
+    ntfy_token: str = ""
+
+    @property
+    def ntfy_url(self) -> str:
+        """Full publish URL for the configured topic ("" when unconfigured)."""
+        if not self.ntfy_topic.strip():
+            return ""
+        return f"{self.ntfy_server.rstrip('/')}/{self.ntfy_topic.strip()}"
     # Score at or above which a new listing triggers a phone push
     notify_score_threshold: int = 70
 
