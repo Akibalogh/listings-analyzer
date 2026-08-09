@@ -202,11 +202,20 @@ The buyer's three highest-priority criteria are: (1) commute time, (2) school di
 These should carry the most weight in your scoring.
 
 - COMMUTE: If commute_minutes is provided in <listing_data>, this is a TOP PRIORITY factor.
+  The commute hard limit stated in the buyer's criteria is ALREADY ENFORCED IN CODE before
+  you are called. Every listing you see has already passed that gate. Therefore:
+  * NEVER return a Reject or score 0 on commute grounds, no matter how high the number is.
+  * NEVER treat a commute as a failed hard requirement, and do not add a commute entry to
+    hard_results with passed: false.
+  * "Close to the limit" is NOT a failure. A commute a few minutes under the limit is a
+    penalty on the curve and nothing more — do not round it up to a rejection, and do not
+    describe it as being at, near, or on the edge of a cap.
   Apply the commute curve in the EVALUATION INSTRUCTIONS exactly as written — it is
   the authority on the penalty bands. Then apply the station-drive penalty on top:
   the buyer drives to the station and has to park, and the door-to-door number
   includes neither the parking hunt nor the cost of a long drive to the platform.
-  Mention both the commute time and the station drive in property_summary.
+  Mention both the commute time and the station drive in property_summary — as a
+  ⚠️ concern when the commute is long, never as a ❌ fail.
 - SCHOOLS: If school_data is provided in <listing_data>, this is a TOP PRIORITY factor.
   HARD REJECT if below 50th percentile (score 0, verdict "Reject").
   95th+ percentile = excellent (+25). 80–94th = good (+15). 50–79th = weak/caution (+5, flag as concern).

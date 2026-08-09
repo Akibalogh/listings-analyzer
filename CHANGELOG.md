@@ -4,6 +4,25 @@ All notable changes to Listings Analyzer are documented here.
 
 ---
 
+## [Unreleased] — commute is never an AI reject
+
+### Fixed
+- **The scorer stopped hard-rejecting listings that had already cleared the
+  commute gate.** `deterministic_gate()` rejects commutes at or above
+  `COMMUTE_HARD_LIMIT_MINUTES` before the AI is called, so every listing the
+  model sees has passed it. The model applied the limit a second time anyway,
+  and fuzzily: 29 Appleby Dr scored 0 on "fails the hard commute requirement at
+  108 minutes (edge of 110-minute cap)" with `evaluation_method: ai`, not
+  `deterministic-gate` — the code gate had correctly let it through. 35 Shady
+  Brook Ln got the same treatment at 104 min. Since commute is already a soft
+  penalty, these listings paid for it on the curve and then got rejected on top.
+  The system prompt now states that the gate runs upstream and that proximity to
+  the limit is not a failure. The gate, the 110-minute limit, and v74's penalty
+  curve and station-drive penalty are all unchanged; tests assert the gate still
+  rejects at and above the limit so loosening the prompt cannot loosen the cap.
+
+---
+
 ## [2026-08-09] — sqft provenance, immediate MLS emails, retuned criteria, ntfy
 
 ### Context
