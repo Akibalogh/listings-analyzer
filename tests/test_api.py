@@ -718,15 +718,21 @@ class TestManageEnrichEndpoint:
         res = client.post("/manage/enrich", headers={"x-manage-key": "wrong"})
         assert res.status_code == 403
 
+    # _enrich_all is patched out: the real one runs in a background thread that
+    # outlives the test and flips _enrich_state, which flakes the next test.
+    @patch("app.main._enrich_all")
     @patch("app.main.settings")
-    def test_enrich_starts_background_task(self, mock_settings, client):
+    def test_enrich_starts_background_task(self, mock_settings, mock_enrich, client):
         mock_settings.manage_key = "test-key"
         from app.main import _enrich_state
         _enrich_state["in_progress"] = False
-        res = client.post("/manage/enrich", headers={"x-manage-key": "test-key"})
-        assert res.status_code == 200
-        data = res.json()
-        assert data["status"] == "started"
+        try:
+            res = client.post("/manage/enrich", headers={"x-manage-key": "test-key"})
+            assert res.status_code == 200
+            data = res.json()
+            assert data["status"] == "started"
+        finally:
+            _enrich_state["in_progress"] = False
 
     @patch("app.main._enrich_all")
     @patch("app.main.settings")
@@ -1360,6 +1366,59 @@ class TestMaxEmailAgeConfig:
         call_args = mock_svc.users().messages().list.call_args
         query = call_args[1].get("q", "") if call_args[1] else ""
         assert "newer_than" not in query
+
+
+class TestGmailListPagination:
+    """The MLS alert now sends one email per listing, so a backlog can exceed
+    Gmail's 100-per-page list response. Every page must be fetched."""
+
+    @patch("app.gmail._build_service")
+    @patch("app.gmail._get_or_create_label", return_value="label_123")
+    @patch("app.gmail.settings")
+    def test_follows_next_page_token(self, mock_settings, mock_label, mock_service):
+        mock_settings.sender_list = ["KEY@northeastmatrixmail.com"]
+        mock_settings.date_filtered_sender_list = []
+        mock_settings.max_email_age_days = 21
+
+        mock_svc = MagicMock()
+        mock_svc.users().messages().list().execute.side_effect = [
+            {"messages": [{"id": "a"}], "nextPageToken": "p2"},
+            {"messages": [{"id": "b"}]},
+        ]
+        mock_svc.users().messages().get().execute.return_value = {
+            "payload": {"headers": [{"name": "Subject", "value": "New listing"}], "parts": []}
+        }
+        mock_service.return_value = mock_svc
+
+        from app.gmail import fetch_new_emails
+        emails = fetch_new_emails()
+
+        assert [e["gmail_id"] for e in emails] == ["a", "b"]
+        tokens = [c[1].get("pageToken") for c in mock_svc.users().messages().list.call_args_list
+                  if "q" in c[1]]
+        assert tokens == [None, "p2"]
+
+    @patch("app.gmail._build_service")
+    @patch("app.gmail._get_or_create_label", return_value="label_123")
+    @patch("app.gmail.settings")
+    def test_page_cap_stops_the_walk(self, mock_settings, mock_label, mock_service):
+        """A never-ending token must not stall the poll forever."""
+        from app.gmail import _MAX_LIST_PAGES
+
+        mock_settings.sender_list = ["redfin.com"]
+        mock_settings.date_filtered_sender_list = []
+        mock_settings.max_email_age_days = 21
+
+        mock_svc = MagicMock()
+        mock_svc.users().messages().list().execute.return_value = {
+            "messages": [], "nextPageToken": "always-more",
+        }
+        mock_service.return_value = mock_svc
+
+        from app.gmail import fetch_new_emails
+        assert fetch_new_emails() == []
+        paged = [c for c in mock_svc.users().messages().list.call_args_list if "q" in c[1]]
+        assert len(paged) == _MAX_LIST_PAGES
 
 
 class TestManageUpdateCriteria:

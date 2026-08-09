@@ -621,6 +621,82 @@ class TestHomeIdDedup:
         assert db.get_listing_by_id(lid) is not None
 
 
+class TestManySmallEmails:
+    """Ken's MLS alert is moving from a daily digest to immediate delivery, so
+    the same home now arrives across many small emails instead of one big one.
+    Each repeat must update the existing row, never create a second one."""
+
+    def _poll(self, emails: list[tuple[str, ParsedListing]]):
+        """Run poll_once over one parsed listing per email, with no network."""
+        from app.poller import poll_once
+
+        fetched = [{
+            "gmail_id": gmail_id, "subject": f"New listing {gmail_id}",
+            "sender": "KEY@northeastmatrixmail.com", "html": "<html/>", "text": "",
+            "message_id": gmail_id, "label_id": "lbl",
+        } for gmail_id, _ in emails]
+        parsed = [[listing] for _, listing in emails]
+
+        with patch("app.poller.fetch_new_emails", return_value=fetched), \
+             patch("app.poller.mark_processed"), \
+             patch("app.poller.scrape_listing_description", return_value=(None, [])), \
+             patch("app.poller.scrape_listing_structured_data", return_value=None), \
+             patch("app.poller._enrich_listing",
+                   side_effect=lambda _l, key: {"address_key": key}), \
+             patch("app.poller._evaluate_listing",
+                   return_value=ScoringResult(score=70, verdict="Worth Touring")), \
+             patch("app.jobs.kick"), patch("app.jobs.enqueue_listing"), \
+             patch("app.poller.parser_chain") as mock_parser:
+            mock_parser.parse.side_effect = parsed
+            poll_once()
+
+    @staticmethod
+    def _listing(**overrides):
+        fields = {
+            "source_format": "onehome_html", "address": "121 Law Rd",
+            "town": "Briarcliff Manor", "state": "NY", "zip_code": "10510",
+            "mls_id": "888111", "price": 1750000,
+        }
+        fields.update(overrides)
+        return ParsedListing(**fields)
+
+    def test_same_listing_in_two_emails_stays_one_row(self, temp_db):
+        self._poll([("e1", self._listing()), ("e2", self._listing())])
+        listings = db.get_all_listings()
+        assert len(listings) == 1
+        assert listings[0]["mls_id"] == "888111"
+
+    def test_price_change_in_second_email_updates_the_row(self, temp_db):
+        self._poll([
+            ("e1", self._listing(price=1750000)),
+            ("e2", self._listing(price=1650000)),
+        ])
+        listings = db.get_all_listings()
+        assert len(listings) == 1
+        assert listings[0]["price"] == 1650000
+
+    def test_repeat_without_mls_id_dedups_by_home_id(self, temp_db):
+        """Redfin-sourced repeats carry a home ID but no MLS number."""
+        url = "https://www.redfin.com/NY/Yorktown-Heights/2341-Blue-Spruce-Dr-10598/home/20140001"
+        base = {"mls_id": None, "address": "2341 Blue Spruce Dr",
+                "town": "Yorktown Heights", "listing_url": url}
+        self._poll([
+            ("e1", self._listing(price=1150000, **base)),
+            ("e2", self._listing(price=1095000, **base)),
+        ])
+        listings = db.get_all_listings()
+        assert len(listings) == 1
+        # The home-ID branch used to drop the repeat without applying its update
+        assert listings[0]["price"] == 1095000
+
+    def test_address_spelling_variant_dedups_by_address_key(self, temp_db):
+        self._poll([
+            ("e1", self._listing(mls_id=None, address="163 Mount Airy Road S")),
+            ("e2", self._listing(mls_id=None, address="163 Mount Airy Rd S")),
+        ])
+        assert len(db.get_all_listings()) == 1
+
+
 class TestListingUpdatesFromEmails:
     """Redfin price-drop / sold emails about already-tracked homes must update
     the record instead of being discarded as duplicates."""
