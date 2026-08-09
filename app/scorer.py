@@ -91,6 +91,80 @@ def deterministic_gate(listing_data: dict) -> ScoringResult | None:
         )
     return None
 
+
+_COMMUTE_WORDS = re.compile(r"commute|door-to-door|station|parking", re.IGNORECASE)
+
+
+def _is_commute_criterion(hard_result: HardResult) -> bool:
+    """Does this hard_result refer to the commute?
+
+    Matches on the criterion name only. The model invents its own names —
+    "Commute ≤ 109 minutes door-to-door", "Commute to Brookfield Place" — so
+    an exact match is useless here.
+    """
+    return bool(_COMMUTE_WORDS.search(hard_result.criterion or ""))
+
+
+def commute_only_reject(result: ScoringResult, listing_data: dict) -> bool:
+    """Is this a Reject whose ONLY hard failure is a commute under the gate?
+
+    deterministic_gate() already ruled on commute before the AI was called, so
+    a sub-limit commute cannot be a hard failure. The model rejects anyway —
+    inflating the number with parking time ("real-world burden: ~128 min"),
+    inventing a stricter cap, or simply asserting that 104 "exceeds" 110.
+    """
+    if result.verdict != "Reject":
+        return False
+    commute = listing_data.get("commute_minutes")
+    if commute is None or commute >= settings.commute_hard_limit_minutes:
+        return False
+    failures = [h for h in result.hard_results if h.passed is False]
+    return bool(failures) and all(_is_commute_criterion(h) for h in failures)
+
+
+def strip_commute_reject(result: ScoringResult) -> ScoringResult:
+    """Drop a sub-limit commute rejection the AI had no standing to make.
+
+    Last resort, applied when the model rejects on commute even after being
+    corrected. The commute hard-failures are removed and the verdict drops to
+    the score-0 default ("Weak Match"), so the listing stays visible and
+    poorly-rated rather than hard-rejected. The commute penalty in the criteria
+    still applies — only the *rejection* is withdrawn.
+    """
+    note = (
+        "Commute rejection overridden: the commute is under the "
+        f"{settings.commute_hard_limit_minutes}-minute hard limit, which is "
+        "enforced before scoring. Scored on its other merits."
+    )
+    return result.model_copy(update={
+        "verdict": "Weak Match",
+        "hard_results": [h for h in result.hard_results if not _is_commute_criterion(h)],
+        "concerns": [*result.concerns, note],
+        "confidence": "low",
+    })
+
+
+# Corrective note appended when the model rejects on a sub-limit commute.
+_COMMUTE_RETRY_NOTE = """
+CORRECTION — YOUR PREVIOUS ANSWER WAS REJECTED AND YOU ARE BEING ASKED AGAIN.
+
+You rejected this listing on commute. That is not a decision you are permitted
+to make. The commute hard limit is enforced in code BEFORE you are called, and
+this listing already passed it — its commute is under the limit. Specifically:
+
+- Do NOT add parking time, station-drive time, or any other adjustment to the
+  door-to-door number and then compare THAT to the limit. The limit applies to
+  the raw door-to-door number only, and it has already been checked.
+- Do NOT invent a stricter threshold than the one in the criteria.
+- Do NOT state that a number below the limit "exceeds" or "breaches" it.
+- The station-drive penalty is a POINT DEDUCTION on the curve. It is not a
+  hard requirement and can never produce a Reject.
+
+Score this listing again on its actual merits. Apply the commute and
+station-drive penalties as point deductions. Return "Reject" ONLY if some
+non-commute hard requirement genuinely fails.
+"""
+
 # Max image size (5 MB) and fetch timeout (10s)
 _MAX_IMAGE_BYTES = 5 * 1024 * 1024
 _IMAGE_TIMEOUT = 10.0
@@ -524,16 +598,19 @@ def ai_score_listing(
     system_prompt = _build_system_prompt()
     user_content = _build_user_message(instructions, listing_data, image_urls)
 
-    def _call_ai() -> tuple[ScoringResult, str | None]:
+    def _call_ai(correction: str | None = None) -> tuple[ScoringResult, str | None]:
         """Single AI call attempt — raises on failure."""
         client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+        content = user_content if correction is None else [
+            *user_content, {"type": "text", "text": correction},
+        ]
         response = client.messages.create(
             model=settings.ai_eval_model,
             # 2048 truncated mid-JSON on listings with rich scraped
             # descriptions (unterminated-string parse failures)
             max_tokens=4096,
             system=system_prompt,
-            messages=[{"role": "user", "content": user_content}],
+            messages=[{"role": "user", "content": content}],
         )
 
         response_text = response.content[0].text.strip()
@@ -553,6 +630,27 @@ def ai_score_listing(
 
     try:
         result, reasoning = _call_ai()
+
+        # The gate already ruled on commute; the model doesn't get a second
+        # vote. Ask once with a correction, then override if it insists.
+        if commute_only_reject(result, listing_data):
+            logger.warning(
+                f"AI rejected on a sub-limit commute "
+                f"({listing_data.get('commute_minutes')} min) — re-asking with correction"
+            )
+            try:
+                retry, retry_reasoning = _call_ai(_COMMUTE_RETRY_NOTE)
+                if commute_only_reject(retry, listing_data):
+                    logger.warning("AI rejected on commute again — overriding the rejection")
+                    result = strip_commute_reject(retry)
+                    reasoning = result.reasoning
+                else:
+                    result, reasoning = retry, retry_reasoning
+            except (json.JSONDecodeError, anthropic.APIError) as e:
+                logger.warning(f"Commute-correction retry failed ({e}) — overriding instead")
+                result = strip_commute_reject(result)
+                reasoning = result.reasoning
+
         logger.info(
             f"AI evaluation: score={result.score}, verdict={result.verdict}, "
             f"confidence={result.confidence}"
@@ -635,11 +733,16 @@ def build_batch_request(
     }
 
 
-def parse_batch_result(result) -> tuple[ScoringResult | None, str | None]:
+def parse_batch_result(
+    result, listing_data: dict | None = None,
+) -> tuple[ScoringResult | None, str | None]:
     """Parse a single batch result into a ScoringResult.
 
     Args:
         result: A MessageBatchIndividualResponse from the batch results iterator.
+        listing_data: The listing that was scored. Supply it so a sub-limit
+            commute rejection can be overridden — the batch API gives no
+            opportunity to re-ask, so the override is applied directly.
 
     Returns:
         Tuple of (ScoringResult, reasoning_text) or (None, None) on failure.
@@ -666,6 +769,12 @@ def parse_batch_result(result) -> tuple[ScoringResult | None, str | None]:
 
         ai_data = json.loads(cleaned)
         score_result = _validate_ai_response(ai_data)
+        if listing_data is not None and commute_only_reject(score_result, listing_data):
+            logger.warning(
+                f"Batch item {result.custom_id} rejected on a sub-limit commute "
+                f"({listing_data.get('commute_minutes')} min) — overriding the rejection"
+            )
+            score_result = strip_commute_reject(score_result)
         return score_result, score_result.reasoning
 
     except Exception as e:

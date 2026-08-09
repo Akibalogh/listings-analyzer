@@ -4,7 +4,31 @@ All notable changes to Listings Analyzer are documented here.
 
 ---
 
-## [Unreleased] — commute is never an AI reject
+## [Unreleased] — enforce the commute reject in code, not in the prompt
+
+### Fixed
+- **The prompt-only commute fix did not hold, so it is now enforced in code.**
+  After the previous change shipped and all 112 listings were re-scored, 11 of
+  the 14 affected listings were *still* hard-rejected on sub-limit commutes.
+  The model worked around the instruction three ways, all seen in production:
+  adding parking time to breach the cap ("108 minutes… real-world burden: ~128
+  min"), inventing a stricter threshold (`Commute ≤ 109 minutes door-to-door`),
+  and flatly asserting a sub-limit number exceeded the cap ("104 minutes
+  exceeds hard cap of 110 minutes. Meets the hard requirement by 6 minutes").
+  The root cause is structural: the criteria lists commute under Hard
+  Requirements, and the prompt names the criteria as the authority on scoring,
+  so a prompt-level guardrail was always going to lose the argument.
+
+  `commute_only_reject()` now detects a Reject whose only hard failures are
+  commute-related on a listing under the limit. The model is re-asked once with
+  a correction naming each workaround; if it rejects again,
+  `strip_commute_reject()` withdraws the rejection, drops the verdict to Weak
+  Match, and records the override as a visible concern rather than applying it
+  silently. The batch path applies the override directly, having no way to
+  re-ask. The gate, the limit, and v74's penalty curve remain unchanged — only
+  the *rejection* is withdrawn, never the penalty.
+
+## [Superseded] — commute is never an AI reject
 
 ### Fixed
 - **The scorer stopped hard-rejecting listings that had already cleared the

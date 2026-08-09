@@ -1433,7 +1433,10 @@ def _rescore_all(criteria_version: int, instructions: str):
                     custom_id = result.custom_id
                     lid = int(custom_id.split("_")[1])
 
-                    score_result, reasoning = parse_batch_result(result)
+                    scored_listing = db.get_listing_by_id(lid)
+                    score_result, reasoning = parse_batch_result(
+                        result, _build_listing_data(scored_listing) if scored_listing else None,
+                    )
                     if score_result:
                         score_result.criteria_version = criteria_version
                         db.update_score(
