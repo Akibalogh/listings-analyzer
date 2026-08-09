@@ -850,6 +850,47 @@ class TestSqftProvenanceInListingData:
         assert "sqft_provenance" not in _build_listing_data({"address": "1 A St"})
 
 
+class TestCommuteIsNeverAnAIReject:
+    """The commute hard limit is enforced by deterministic_gate() before the AI
+    call, so the model must never re-apply it — least of all to listings that
+    merely sit near the threshold (108 min was being rejected as "edge of the
+    110-minute cap" while the code gate had correctly passed it)."""
+
+    def test_prompt_says_limit_is_enforced_upstream(self):
+        prompt = _build_system_prompt()[0]["text"]
+        assert "ALREADY ENFORCED IN CODE" in prompt
+
+    def test_prompt_forbids_commute_reject(self):
+        prompt = _build_system_prompt()[0]["text"]
+        assert "NEVER return a Reject or score 0 on commute grounds" in prompt
+
+    def test_prompt_forbids_near_threshold_rejection(self):
+        """The specific failure mode: treating 'close to the cap' as a fail."""
+        prompt = _build_system_prompt()[0]["text"]
+        assert '"Close to the limit" is NOT a failure' in prompt
+
+    def test_prompt_forbids_failed_commute_hard_result(self):
+        prompt = _build_system_prompt()[0]["text"]
+        assert "do not add a commute entry to" in prompt
+
+    def test_gate_still_rejects_at_and_above_limit(self):
+        """The code gate remains the sole enforcer — loosening the prompt must
+        not loosen the actual limit."""
+        from app.config import settings
+        from app.scorer import deterministic_gate
+        limit = settings.commute_hard_limit_minutes
+        assert deterministic_gate({"commute_minutes": limit}) is not None
+        assert deterministic_gate({"commute_minutes": limit + 1}) is not None
+
+    def test_gate_passes_listings_just_under_the_limit(self):
+        """Anything the AI sees has already cleared the gate."""
+        from app.config import settings
+        from app.scorer import deterministic_gate
+        limit = settings.commute_hard_limit_minutes
+        assert deterministic_gate({"commute_minutes": limit - 1}) is None
+        assert deterministic_gate({"commute_minutes": limit - 2}) is None
+
+
 class TestBuyerVerifiedNotes:
     """Buyer notes are authoritative and must sit OUTSIDE the untrusted
     <listing_data> block so the model treats them as fact, not as scraped text."""
