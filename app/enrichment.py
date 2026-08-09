@@ -1743,6 +1743,92 @@ def parse_basement(description: str | None) -> dict:
     return {"has_basement": None, "basement_type": None, "basement_gym_suitable": None, "source": "description_parse"}
 
 
+# --- Square-footage provenance -------------------------------------------
+#
+# OneKey/Matrix MLS listings carry a "SqFt Source" field. Only a municipal
+# measurement (assessor / tax roll / public record) is third-party verified;
+# every other value is self-reported by the owner, builder, or agent and the
+# stated size has to be checked by hand before it can be trusted.
+
+# Sources that mean "someone measured it and filed it with the town"
+_SQFT_SOURCE_VERIFIED = {
+    "municipality": ("municipality", "municipal", "town", "city", "village",
+                     "assessor", "assessors", "tax record", "tax records",
+                     "public record", "public records", "county"),
+}
+# Self-reported sources → the number needs manual verification
+_SQFT_SOURCE_SELF_REPORTED = {
+    "owner": ("owner", "owners", "seller", "sellers", "landlord"),
+    "estimated": ("estimated", "estimate", "approximate", "approximated"),
+    "builder": ("builder", "developer"),
+    "appraiser": ("appraiser", "appraisal"),
+    "agent": ("agent", "broker", "listing agent", "agent measured"),
+    "plans": ("plans", "floor plans", "architect", "architectural plans", "blueprints"),
+    "other": ("other",),
+}
+
+_SQFT_SOURCE_RE = re.compile(
+    r"(?:sq(?:uare)?\s*\.?\s*(?:ft|feet|footage)\s*\.?|living\s+area|gla)\s*"
+    r"(?:source|src)\s*(?:is|:|=|-|–|—)?\s*"
+    r"([A-Za-z][A-Za-z' ]{1,28})",
+    re.IGNORECASE,
+)
+# Reversed phrasing: "Source of Square Footage: Owner"
+_SQFT_SOURCE_REVERSED_RE = re.compile(
+    r"source\s+of\s+(?:the\s+)?(?:sq(?:uare)?\s*\.?\s*(?:ft|feet|footage)\s*\.?|living\s+area)"
+    r"\s*(?:is|:|=|-|–|—)?\s*([A-Za-z][A-Za-z' ]{1,28})",
+    re.IGNORECASE,
+)
+
+
+def _canonical_sqft_source(raw: str) -> tuple[str | None, bool | None]:
+    """Map a raw SqFt-source label to (canonical_label, verified).
+
+    Returns (None, None) for values outside the known MLS vocabulary — an
+    unrecognized phrase ("deemed reliable but not guaranteed") tells us
+    nothing, and guessing would make the verify flag meaningless.
+    """
+    value = " ".join((raw or "").strip().lower().split())
+    if not value:
+        return None, None
+    for canonical, aliases in _SQFT_SOURCE_VERIFIED.items():
+        for alias in aliases:
+            if value == alias or value.startswith(alias + " "):
+                return canonical, True
+    for canonical, aliases in _SQFT_SOURCE_SELF_REPORTED.items():
+        for alias in aliases:
+            if value == alias or value.startswith(alias + " "):
+                return canonical, False
+    return None, None
+
+
+def parse_sqft_source(description: str | None) -> dict:
+    """Parse the MLS "SqFt Source" field out of a listing description.
+
+    Returns:
+        dict with keys:
+          - sqft_source (str | None): canonical label ("municipality", "owner",
+            "estimated", "builder", "appraiser", "agent", "plans", "other")
+          - sqft_verified (bool | None): True only for a municipal source,
+            False for a self-reported one, None when no source is stated
+          - source (str): "description_parse"
+    """
+    if not description:
+        return {"sqft_source": None, "sqft_verified": None, "source": "description_parse"}
+
+    for pattern in (_SQFT_SOURCE_RE, _SQFT_SOURCE_REVERSED_RE):
+        for match in pattern.finditer(description):
+            canonical, verified = _canonical_sqft_source(match.group(1))
+            if canonical:
+                return {
+                    "sqft_source": canonical,
+                    "sqft_verified": verified,
+                    "source": "description_parse",
+                }
+
+    return {"sqft_source": None, "sqft_verified": None, "source": "description_parse"}
+
+
 def parse_energy_efficiency(description: str | None) -> dict:
     """Detect energy efficiency features from listing description.
 

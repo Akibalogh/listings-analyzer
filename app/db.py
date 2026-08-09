@@ -674,6 +674,8 @@ def _migrate_add_columns():
         ("listings", "has_basement", "BOOLEAN"),
         ("listings", "basement_type", "TEXT"),
         ("listings", "agent_name", "TEXT"),
+        ("listings", "sqft_source", "TEXT"),
+        ("listings", "sqft_verified", "BOOLEAN"),
         ("scores", "evaluation_method", "TEXT DEFAULT 'deterministic'"),
         ("scores", "criteria_version", "INTEGER"),
         ("scores", "ai_reasoning", "TEXT"),
@@ -1020,7 +1022,7 @@ def update_listing_enrichment(listing_id: int, enrichment: dict):
         "property_tax_json", "power_line_json", "flood_zone_json", "station_json",
         "lat", "lng", "garage_count", "garage_type", "hoa_monthly",
         "has_pool", "pool_type", "has_basement", "basement_type",
-        "year_built", "list_date",
+        "year_built", "list_date", "sqft_source", "sqft_verified",
     }
     cols_to_update = {k: v for k, v in enrichment.items() if k in allowed_cols}
     if not cols_to_update:

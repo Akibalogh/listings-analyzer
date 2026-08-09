@@ -765,6 +765,47 @@ class TestCommuteGateInclusivePhrasing:
         assert criteria_commute_limit(text) == 110
 
 
+class TestSqftProvenanceInListingData:
+    """The AI must know whether the stated sqft was measured by the town."""
+
+    def test_stored_self_reported_source_surfaces(self):
+        from app.main import _build_listing_data
+
+        data = _build_listing_data({
+            "sqft": 2850, "sqft_source": "owner", "sqft_verified": False,
+        })
+        assert data["sqft_provenance"] == {"source": "owner", "verified": False}
+
+    def test_municipal_source_is_verified(self):
+        from app.main import _build_listing_data
+
+        data = _build_listing_data({
+            "sqft": 2850, "sqft_source": "municipality", "sqft_verified": True,
+        })
+        assert data["sqft_provenance"] == {"source": "municipality", "verified": True}
+
+    def test_falls_back_to_description_parse(self):
+        """Scoring can't wait on the enrich pass to store the source."""
+        from app.main import _build_listing_data
+
+        data = _build_listing_data({
+            "sqft": 2850, "description": "SqFt Source: Estimated. Lovely colonial.",
+        })
+        assert data["sqft_provenance"] == {"source": "estimated", "verified": False}
+
+    def test_unknown_source_is_not_flagged_false(self):
+        """Unknown must stay unknown — flagging everything makes it meaningless."""
+        from app.main import _build_listing_data
+
+        data = _build_listing_data({"sqft": 2850, "description": "Lovely colonial."})
+        assert data["sqft_provenance"] == {"source": None, "verified": None}
+
+    def test_absent_when_no_sqft(self):
+        from app.main import _build_listing_data
+
+        assert "sqft_provenance" not in _build_listing_data({"address": "1 A St"})
+
+
 class TestBuyerVerifiedNotes:
     """Buyer notes are authoritative and must sit OUTSIDE the untrusted
     <listing_data> block so the model treats them as fact, not as scraped text."""

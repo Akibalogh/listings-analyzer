@@ -1306,6 +1306,78 @@ class TestParsePoolFlag:
 
 
 # ---------------------------------------------------------------------------
+# parse_sqft_source tests
+# ---------------------------------------------------------------------------
+
+
+class TestParseSqftSource:
+    """Tests for parse_sqft_source() — MLS square-footage provenance."""
+
+    def test_none_description(self):
+        from app.enrichment import parse_sqft_source
+        result = parse_sqft_source(None)
+        assert result["sqft_source"] is None
+        assert result["sqft_verified"] is None
+
+    def test_no_source_stated(self):
+        from app.enrichment import parse_sqft_source
+        result = parse_sqft_source("Charming colonial with 2,800 sq ft of living space.")
+        assert result["sqft_source"] is None
+        assert result["sqft_verified"] is None
+
+    def test_municipality_is_verified(self):
+        from app.enrichment import parse_sqft_source
+        result = parse_sqft_source("SqFt Source: Municipality\nBeds: 4")
+        assert result["sqft_source"] == "municipality"
+        assert result["sqft_verified"] is True
+
+    def test_owner_is_self_reported(self):
+        from app.enrichment import parse_sqft_source
+        result = parse_sqft_source("Sq Ft Source: Owner")
+        assert result["sqft_source"] == "owner"
+        assert result["sqft_verified"] is False
+
+    def test_estimated_is_self_reported(self):
+        from app.enrichment import parse_sqft_source
+        result = parse_sqft_source("Square Footage Source - Estimated")
+        assert result["sqft_source"] == "estimated"
+        assert result["sqft_verified"] is False
+
+    def test_builder_is_self_reported(self):
+        from app.enrichment import parse_sqft_source
+        result = parse_sqft_source("SQFT SOURCE: BUILDER")
+        assert result["sqft_source"] == "builder"
+        assert result["sqft_verified"] is False
+
+    def test_other_is_self_reported(self):
+        from app.enrichment import parse_sqft_source
+        result = parse_sqft_source("Sq. Ft. Source: Other")
+        assert result["sqft_source"] == "other"
+        assert result["sqft_verified"] is False
+
+    def test_public_records_counts_as_municipal(self):
+        from app.enrichment import parse_sqft_source
+        result = parse_sqft_source("Living Area Source: Public Records")
+        assert result["sqft_source"] == "municipality"
+        assert result["sqft_verified"] is True
+
+    def test_reversed_phrasing(self):
+        from app.enrichment import parse_sqft_source
+        result = parse_sqft_source("Source of Square Footage: Seller")
+        assert result["sqft_source"] == "owner"
+        assert result["sqft_verified"] is False
+
+    def test_unrecognized_value_is_not_guessed(self):
+        """Boilerplate disclaimers must not masquerade as a real source."""
+        from app.enrichment import parse_sqft_source
+        result = parse_sqft_source(
+            "Square footage source deemed reliable but not guaranteed."
+        )
+        assert result["sqft_source"] is None
+        assert result["sqft_verified"] is None
+
+
+# ---------------------------------------------------------------------------
 # parse_basement tests
 # ---------------------------------------------------------------------------
 
