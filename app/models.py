@@ -41,3 +41,7 @@ class ScoringResult(BaseModel):
     property_summary: str | None = None  # AI-generated structured factor analysis
     evaluation_method: str = "deterministic"  # "deterministic" or "ai"
     criteria_version: int | None = None
+    # The score the AI gave before a "Reject" verdict forced it to 0. Kept so a
+    # withdrawn rejection can land on the merit score the AI actually assigned
+    # instead of a flat 0 — 29 Appleby Dr's 42 was otherwise unrecoverable.
+    pre_reject_score: int | None = None

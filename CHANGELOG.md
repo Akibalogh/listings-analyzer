@@ -4,7 +4,58 @@ All notable changes to Listings Analyzer are documented here.
 
 ---
 
-## [Unreleased] — the gate owns every checkable hard requirement
+## [Unreleased] — a Reject must be confirmable, not merely asserted
+
+### Changed
+- **`invalid_reject()` inverted from a blocklist to an allowlist.** Enumerating
+  the criteria the model may *not* fail a listing on was defeated three times
+  running, each time because the fabrication relocated to a name the list
+  didn't cover: commute, then price and sqft, then "School District Quality
+  (Primary Driver)". A blocklist can never be complete when the model invents
+  the criterion names. A model Reject now stands only where
+  `validated_failure()` can confirm a stated failure against structured data.
+  Everything the gate owns is excluded by construction — the listing reached
+  the AI, so it passed all of those. What remains is the short list of hard
+  requirements only the model can surface:
+  - **schools** — confirmed when the elementary `rank_percentile` is genuinely
+    below `MIN_SCHOOL_PERCENTILE` (50). This fixes 29 Appleby Dr, zeroed on a
+    "failure" whose own reason read "75th percentile … triggering a -20 point
+    penalty" — a penalty marked as a hard fail.
+  - **confirmed sold** — an explicitly completed sale only. Pending, Under
+    Contract, Coming Soon and null are not sales; the criteria are emphatic
+    that null status is unknown, not a fail.
+  - **detached single-family** — confirmed when the property type says
+    otherwise. "Single Family Residential" (86 listings) is not a failure.
+
+  When code cannot confirm a failure, the rejection is withdrawn and the
+  objection survives as a scored concern. The trade is deliberate: a false
+  reject silently drops a good house off the shortlist, while a too-lenient low
+  score is visible and recoverable.
+
+### Fixed
+- **A withdrawn rejection keeps its score.** `_validate_ai_response` zeroes the
+  score whenever the verdict is Reject, so overrides landed at a flat 0 — 00
+  Belleview Ave came out as "Weak Match" scoring 0. `pre_reject_score` now
+  preserves what the AI assigned before its own verdict discarded it, and a
+  withdrawn rejection lands on that merit score with a matching verdict.
+
+### Added
+- **Self-contradiction telemetry.** Reasons that confess the "failure" isn't
+  one ("triggering a -20 point penalty", "this is not a failure on the
+  minimum", "technically passes") are counted and logged. Deliberately *not*
+  wired to verdicts: the patterns add no recall over `validated_failure()` —
+  the invented "$1,130,000 hard cap" contained no confession at all — they
+  decay silently as phrasing drifts, and each one risks discarding a legitimate
+  reject, since "22nd percentile is below the hard limit" is a real failure on
+  a floor but a pass-admission on a cap. Logging shows the next relocation
+  instead of letting it surface as a silent regression.
+
+Dry-run over all 114 production listings: the gate still rejects 27, exactly
+one AI Reject is withdrawn (29 Appleby Dr, the regression), and three are
+preserved on confirmed grounds — 54 Hillside Ave and 12 Brandon Dr on 22nd-
+percentile elementary schools, 14 Aldridge Rd on a confirmed sale.
+
+## [Superseded] — the gate owns every checkable hard requirement
 
 ### Changed
 - **`deterministic_gate()` now enforces state, price band, minimum sqft and
