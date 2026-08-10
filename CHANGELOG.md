@@ -4,7 +4,43 @@ All notable changes to Listings Analyzer are documented here.
 
 ---
 
-## [Unreleased] — enforce the commute reject in code, not in the prompt
+## [Unreleased] — the gate owns every checkable hard requirement
+
+### Changed
+- **`deterministic_gate()` now enforces state, price band, minimum sqft and
+  minimum bedrooms**, not just the commute limit — and the AI can no longer
+  fail a listing on any of them. Overriding the commute reject alone recovered
+  6 of 14 listings; the rest stayed at zero because the model paired its
+  commute objection with a non-commute "failure" contradicted by the listing's
+  own data: `Price = $1,190,000` "ABOVE the hard cap of $1,130,000" when the
+  band is $2.25M, and `Minimum 2,200 sqft = 5,962 sqft` marked failed with the
+  reason admitting "this is not a failure on the minimum". A threshold the
+  model can read is a threshold it will misapply, so these moved to code.
+
+  New config: `PRICE_MIN_DOLLARS` (850,000), `PRICE_MAX_DOLLARS` (2,250,000),
+  `MIN_SQFT` (2,200), `MIN_BEDROOMS` (3), mirroring the criteria prose.
+  Unknown values still never gate — 9 of 112 listings have null sqft and
+  bedrooms and none may be rejected for it. A scraped `0` counts as unknown.
+
+### Fixed
+- **A Reject with no stated hard failure is no longer accepted.** Four
+  listings were rejected purely for having unverifiable sqft and bedroom
+  counts, contradicting the prompt's own instruction to score missing-data
+  unknowns 60-75 pending verification. A Reject must now name what failed.
+- **Factors the criteria calls soft can no longer reject.** 00 Belleview Ave
+  was rejected on a 0.23-acre lot, directly against "Note: this is NOT a hard
+  requirement. Dense does not Reject." Lot size, separation, ground-floor
+  bedroom, pool and age/condition are now unable to carry a hard failure.
+
+`commute_only_reject()`/`strip_commute_reject()` generalized to
+`invalid_reject()`/`strip_invalid_reject()`. Dry-run against all 112 production
+listings: the gate rejects 27 — 23 on commute (all ≥110 min) and 4 on price
+(all >$2.25M) — with no false rejections, and the override fires on 7 of the 8
+listings still stuck at zero. The eighth, 11 Kitchel Rd, is correctly left
+alone: a 22nd-percentile elementary school is a real failure and the model's
+call to make.
+
+## [Superseded] — enforce the commute reject in code, not in the prompt
 
 ### Fixed
 - **The prompt-only commute fix did not hold, so it is now enforced in code.**

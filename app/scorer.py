@@ -61,108 +61,199 @@ def commute_gate_drift(instructions: str) -> dict:
     }
 
 
+def _gate_reject(criterion: str, value: str, reason: str) -> ScoringResult:
+    """Build the Reject result a failed code-owned hard requirement produces."""
+    return ScoringResult(
+        score=0,
+        verdict="Reject",
+        hard_results=[HardResult(
+            criterion=criterion, passed=False, value=value, reason=reason,
+        )],
+        concerns=[reason],
+        confidence="high",
+        reasoning=reason,
+        evaluation_method="deterministic-gate",
+    )
+
+
 def deterministic_gate(listing_data: dict) -> ScoringResult | None:
     """Check hard gates that need no AI judgment. Returns a Reject result or None.
 
-    Mirrors the hard requirements in the active criteria (v65: commute over
-    110 min = hard reject). Enforcing them in code makes the result
-    reproducible and skips the AI call entirely. Unknown values never gate —
-    only explicit failures do.
+    Mirrors the checkable hard requirements in the active criteria: state,
+    price band, minimum sqft, minimum bedrooms, and the commute limit.
+    Enforcing them in code makes the result reproducible, skips the AI call
+    entirely, and — the reason the non-commute checks moved here — stops the
+    model from adjudicating numeric thresholds it demonstrably gets wrong.
+
+    Unknown values never gate; only explicit failures do. A listing with no
+    stated sqft is not a listing that fails the sqft minimum.
     """
     commute = listing_data.get("commute_minutes")
     if commute is not None and commute >= settings.commute_hard_limit_minutes:
-        reason = (
+        return _gate_reject(
+            "Commute to Brookfield Place", f"{commute} min",
             f"Commute {commute} min meets or exceeds hard limit "
-            f"of {settings.commute_hard_limit_minutes} min"
+            f"of {settings.commute_hard_limit_minutes} min",
         )
-        return ScoringResult(
-            score=0,
-            verdict="Reject",
-            hard_results=[HardResult(
-                criterion="Commute to Brookfield Place",
-                passed=False,
-                value=f"{commute} min",
-                reason=reason,
-            )],
-            concerns=[reason],
-            confidence="high",
-            reasoning=reason,
-            evaluation_method="deterministic-gate",
+
+    state = (listing_data.get("state") or "").strip().lower()
+    if state and state not in ("ny", "new york"):
+        return _gate_reject(
+            "Location in New York State", str(listing_data.get("state")),
+            f"Property is in {listing_data.get('state')}, not New York State",
         )
+
+    price = listing_data.get("price")
+    if price is not None and not (
+        settings.price_min_dollars <= price <= settings.price_max_dollars
+    ):
+        side = "below" if price < settings.price_min_dollars else "above"
+        return _gate_reject(
+            "Price within budget", f"${price:,}",
+            f"Price ${price:,} is {side} the ${settings.price_min_dollars:,}–"
+            f"${settings.price_max_dollars:,} hard band",
+        )
+
+    sqft = listing_data.get("sqft")
+    if sqft is not None and sqft > 0 and sqft < settings.min_sqft:
+        return _gate_reject(
+            f"Minimum {settings.min_sqft:,} sqft", f"{sqft:,} sqft",
+            f"{sqft:,} sqft is below the {settings.min_sqft:,} sqft minimum",
+        )
+
+    beds = listing_data.get("bedrooms")
+    if beds is not None and beds > 0 and beds < settings.min_bedrooms:
+        return _gate_reject(
+            f"Minimum {settings.min_bedrooms} bedrooms", f"{beds} bedrooms",
+            f"{beds} bedrooms is below the {settings.min_bedrooms}-bedroom minimum",
+        )
+
     return None
 
 
-_COMMUTE_WORDS = re.compile(r"commute|door-to-door|station|parking", re.IGNORECASE)
+# Criterion names that deterministic_gate() owns. The model invents its own
+# names for these — "Commute ≤ 109 minutes door-to-door", "Price ($850K–$2.25M
+# hard cap)", "Minimum 2,200 sqft" — so matching is by keyword, not equality.
+_CODE_OWNED_CRITERIA = re.compile(
+    r"commute|door-to-door|station|parking"      # commute limit
+    r"|price|budget|cap|\$"                       # price band
+    r"|sqft|sq\.? ?ft|square (?:foot|feet|footage)"  # sqft minimum
+    r"|bedroom|\bbeds?\b"                         # bedroom minimum
+    r"|new york|\bNY\b|location in|state",        # location
+    re.IGNORECASE,
+)
 
 
-def _is_commute_criterion(hard_result: HardResult) -> bool:
-    """Does this hard_result refer to the commute?
+# Factors the criteria explicitly designates as non-rejecting. Lot size:
+# "Note: this is NOT a hard requirement. Dense does not Reject. It is a
+# meaningful soft factor." Ground-floor bedroom: "its absence should NOT
+# trigger a reject or major penalty." The model rejected 00 Belleview Ave on a
+# 0.23-acre lot anyway, so a stated failure on either cannot stand.
+_NEVER_HARD_CRITERIA = re.compile(
+    r"lot|acre|separation|neighbo|dense|hiking"
+    r"|ground.floor|ground floor|gfb|in.law"
+    r"|pool|age|condition|renovat",
+    re.IGNORECASE,
+)
 
-    Matches on the criterion name only. The model invents its own names —
-    "Commute ≤ 109 minutes door-to-door", "Commute to Brookfield Place" — so
-    an exact match is useless here.
+
+def _is_code_owned(hard_result: HardResult) -> bool:
+    """Is this a requirement the model has no standing to fail a listing on?
+
+    Either deterministic_gate() already ruled on it, or the criteria declares
+    it a soft factor that cannot produce a Reject.
     """
-    return bool(_COMMUTE_WORDS.search(hard_result.criterion or ""))
+    criterion = hard_result.criterion or ""
+    return bool(
+        _CODE_OWNED_CRITERIA.search(criterion) or _NEVER_HARD_CRITERIA.search(criterion)
+    )
 
 
-def commute_only_reject(result: ScoringResult, listing_data: dict) -> bool:
-    """Is this a Reject whose ONLY hard failure is a commute under the gate?
+def invalid_reject(result: ScoringResult, listing_data: dict) -> bool:
+    """Is this a Reject the model was not entitled to make?
 
-    deterministic_gate() already ruled on commute before the AI was called, so
-    a sub-limit commute cannot be a hard failure. The model rejects anyway —
-    inflating the number with parking time ("real-world burden: ~128 min"),
-    inventing a stricter cap, or simply asserting that 104 "exceeds" 110.
+    Two shapes, both seen in production after the prompt-only fix:
+
+    1. Every stated hard failure is one deterministic_gate() already checked.
+       The listing reached the AI, so it passed all of them — the model is
+       re-litigating a settled question. It does this by inflating the commute
+       with parking time ("real-world burden: ~128 min"), inventing a
+       "$1,130,000 hard cap" where the band is $2.25M, or marking a 5,962 sqft
+       house as failing a 2,200 sqft minimum while admitting in the same reason
+       that "this is not a failure on the minimum".
+
+    2. No hard requirement is marked failed at all. A Reject has to name what
+       failed; four listings were rejected purely for having unknown sqft and
+       bedroom counts, which the prompt explicitly says to score 60-75 pending
+       verification rather than reject.
     """
     if result.verdict != "Reject":
         return False
-    commute = listing_data.get("commute_minutes")
-    if commute is None or commute >= settings.commute_hard_limit_minutes:
-        return False
+    if deterministic_gate(listing_data) is not None:
+        return False  # the gate agrees; this is a real reject
     failures = [h for h in result.hard_results if h.passed is False]
-    return bool(failures) and all(_is_commute_criterion(h) for h in failures)
+    if not failures:
+        return True
+    return all(_is_code_owned(h) for h in failures)
 
 
-def strip_commute_reject(result: ScoringResult) -> ScoringResult:
-    """Drop a sub-limit commute rejection the AI had no standing to make.
+def strip_invalid_reject(result: ScoringResult) -> ScoringResult:
+    """Withdraw a rejection the AI had no standing to make.
 
-    Last resort, applied when the model rejects on commute even after being
-    corrected. The commute hard-failures are removed and the verdict drops to
-    the score-0 default ("Weak Match"), so the listing stays visible and
-    poorly-rated rather than hard-rejected. The commute penalty in the criteria
-    still applies — only the *rejection* is withdrawn.
+    Last resort, applied when the model rejects again after being corrected.
+    Code-owned hard failures are removed and the verdict drops to the score-0
+    default ("Weak Match"), so the listing stays visible and poorly-rated
+    rather than hard-rejected. The soft penalties still apply in full — only
+    the *rejection* is withdrawn.
     """
     note = (
-        "Commute rejection overridden: the commute is under the "
-        f"{settings.commute_hard_limit_minutes}-minute hard limit, which is "
-        "enforced before scoring. Scored on its other merits."
+        "Rejection overridden: every hard requirement the AI marked failed is "
+        "one enforced in code before scoring, and this listing passed all of "
+        "them. Scored on its other merits."
     )
     return result.model_copy(update={
         "verdict": "Weak Match",
-        "hard_results": [h for h in result.hard_results if not _is_commute_criterion(h)],
+        "hard_results": [
+            h for h in result.hard_results if not (h.passed is False and _is_code_owned(h))
+        ],
         "concerns": [*result.concerns, note],
         "confidence": "low",
     })
 
 
-# Corrective note appended when the model rejects on a sub-limit commute.
-_COMMUTE_RETRY_NOTE = """
+# Corrective note appended when the model makes a reject it isn't entitled to.
+_INVALID_REJECT_RETRY_NOTE = """
 CORRECTION — YOUR PREVIOUS ANSWER WAS REJECTED AND YOU ARE BEING ASKED AGAIN.
 
-You rejected this listing on commute. That is not a decision you are permitted
-to make. The commute hard limit is enforced in code BEFORE you are called, and
-this listing already passed it — its commute is under the limit. Specifically:
+You returned "Reject" without a valid basis. These hard requirements are
+enforced IN CODE before you are called, and this listing already passed every
+one of them, so you cannot fail it on any of them:
 
-- Do NOT add parking time, station-drive time, or any other adjustment to the
-  door-to-door number and then compare THAT to the limit. The limit applies to
-  the raw door-to-door number only, and it has already been checked.
-- Do NOT invent a stricter threshold than the one in the criteria.
-- Do NOT state that a number below the limit "exceeds" or "breaches" it.
-- The station-drive penalty is a POINT DEDUCTION on the curve. It is not a
-  hard requirement and can never produce a Reject.
+  - the commute limit
+  - the price band
+  - the minimum square footage
+  - the minimum bedroom count
+  - location in New York State
 
-Score this listing again on its actual merits. Apply the commute and
-station-drive penalties as point deductions. Return "Reject" ONLY if some
-non-commute hard requirement genuinely fails.
+Specifically:
+
+- Do NOT add parking time, station-drive time, or any other adjustment to a
+  number and then compare THAT to a limit. Limits apply to the raw value, and
+  they have already been checked.
+- Do NOT invent a threshold. Use only the numbers in the criteria.
+- Do NOT state that a value inside a limit "exceeds" or "breaches" it.
+- Do NOT mark a requirement failed and then admit in the reason that it is not
+  actually a failure.
+- Do NOT reject because data is MISSING. Unknown sqft, unknown bedroom count,
+  or unknown schools are unknowns, not failures — score the listing on what is
+  known and flag the gaps as concerns.
+- The station-drive penalty and every other soft factor are POINT DEDUCTIONS.
+  None of them can produce a Reject.
+
+If you return "Reject" again, you MUST mark the specific failing requirement
+with passed: false in hard_results, and it must be something other than the
+five code-enforced requirements above. Otherwise score the listing on its
+merits and return a non-Reject verdict.
 """
 
 # Max image size (5 MB) and fetch timeout (10s)
@@ -633,22 +724,24 @@ def ai_score_listing(
 
         # The gate already ruled on commute; the model doesn't get a second
         # vote. Ask once with a correction, then override if it insists.
-        if commute_only_reject(result, listing_data):
+        if invalid_reject(result, listing_data):
             logger.warning(
-                f"AI rejected on a sub-limit commute "
-                f"({listing_data.get('commute_minutes')} min) — re-asking with correction"
+                "AI returned a Reject it isn't entitled to make "
+                f"(commute={listing_data.get('commute_minutes')}, "
+                f"price={listing_data.get('price')}, sqft={listing_data.get('sqft')}) "
+                "— re-asking with correction"
             )
             try:
-                retry, retry_reasoning = _call_ai(_COMMUTE_RETRY_NOTE)
-                if commute_only_reject(retry, listing_data):
-                    logger.warning("AI rejected on commute again — overriding the rejection")
-                    result = strip_commute_reject(retry)
+                retry, retry_reasoning = _call_ai(_INVALID_REJECT_RETRY_NOTE)
+                if invalid_reject(retry, listing_data):
+                    logger.warning("AI rejected invalidly again — overriding the rejection")
+                    result = strip_invalid_reject(retry)
                     reasoning = result.reasoning
                 else:
                     result, reasoning = retry, retry_reasoning
             except (json.JSONDecodeError, anthropic.APIError) as e:
-                logger.warning(f"Commute-correction retry failed ({e}) — overriding instead")
-                result = strip_commute_reject(result)
+                logger.warning(f"Reject-correction retry failed ({e}) — overriding instead")
+                result = strip_invalid_reject(result)
                 reasoning = result.reasoning
 
         logger.info(
@@ -769,12 +862,12 @@ def parse_batch_result(
 
         ai_data = json.loads(cleaned)
         score_result = _validate_ai_response(ai_data)
-        if listing_data is not None and commute_only_reject(score_result, listing_data):
+        if listing_data is not None and invalid_reject(score_result, listing_data):
             logger.warning(
-                f"Batch item {result.custom_id} rejected on a sub-limit commute "
-                f"({listing_data.get('commute_minutes')} min) — overriding the rejection"
+                f"Batch item {result.custom_id} returned a Reject it isn't entitled "
+                "to make — overriding the rejection"
             )
-            score_result = strip_commute_reject(score_result)
+            score_result = strip_invalid_reject(score_result)
         return score_result, score_result.reasoning
 
     except Exception as e:

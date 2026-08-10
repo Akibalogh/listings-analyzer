@@ -79,6 +79,17 @@ class Settings(BaseSettings):
     # deterministically before any AI call (mirrors criteria hard requirements)
     commute_hard_limit_minutes: int = 110
 
+    # The rest of the checkable hard requirements. These mirror the criteria
+    # prose and are enforced in code for the same reason the commute limit is:
+    # the AI cannot be trusted to apply a numeric threshold it can see. It
+    # invented a "$1,130,000 hard cap" for a $2.25M band and marked a
+    # 5,962 sqft house as failing a 2,200 sqft minimum. Unknown values never
+    # gate — only explicit failures do.
+    price_min_dollars: int = 850_000
+    price_max_dollars: int = 2_250_000
+    min_sqft: int = 2_200
+    min_bedrooms: int = 3
+
     # Redfin saved-search filter. Redfin CAPTCHA-gates the scrape, so this no
     # longer feeds a scheduled sync — it's used only by the pending-detection
     # presence check (best-effort) and the manual /manage/sync-search endpoint.
