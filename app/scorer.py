@@ -61,6 +61,17 @@ def commute_gate_drift(instructions: str) -> dict:
     }
 
 
+def _verdict_for_score(score: int) -> str:
+    """The verdict a score implies, mirroring _validate_ai_response's ladder."""
+    if score >= 80:
+        return "Strong Match"
+    if score >= 60:
+        return "Worth Touring"
+    if score >= 40:
+        return "Low Priority"
+    return "Weak Match"
+
+
 def _gate_reject(criterion: str, value: str, reason: str) -> ScoringResult:
     """Build the Reject result a failed code-owned hard requirement produces."""
     return ScoringResult(
@@ -157,35 +168,143 @@ _NEVER_HARD_CRITERIA = re.compile(
 )
 
 
-def _is_code_owned(hard_result: HardResult) -> bool:
-    """Is this a requirement the model has no standing to fail a listing on?
+# Schools are the one CONDITIONALLY hard requirement: the criteria makes a
+# below-50th-percentile district a near-dealbreaker, but 50th-79th merely costs
+# -20 points. 29 Appleby Dr was zeroed on a school "failure" whose own reason
+# read "75th percentile ... triggering a -20 point penalty" — a penalty marked
+# as a hard fail. The percentile is structured data, so code decides.
+_SCHOOL_CRITERIA = re.compile(r"school|district|elementary|middle|high school", re.IGNORECASE)
 
-    Either deterministic_gate() already ruled on it, or the criteria declares
-    it a soft factor that cannot produce a Reject.
+
+def best_elementary_percentile(listing_data: dict) -> float | None:
+    """Highest elementary-school state ranking for the listing, if known.
+
+    The criteria weights elementary most heavily, and a listing sits in one
+    district's catchment — the best-ranked nearby elementary is the fair read.
+    Returns None when the data is absent or unranked (19 of 114 listings), in
+    which case a school rejection cannot be confirmed and does not stand.
+    """
+    schools = (listing_data.get("school_data") or {}).get("elementary") or []
+    ranks = [
+        s.get("rank_percentile") for s in schools
+        if isinstance(s, dict) and isinstance(s.get("rank_percentile"), (int, float))
+    ]
+    return max(ranks) if ranks else None
+
+
+_SOLD_CRITERIA = re.compile(r"sold|status|off.market|closed", re.IGNORECASE)
+_DETACHED_CRITERIA = re.compile(r"detached|single.family|property type", re.IGNORECASE)
+
+# Property types that genuinely fail "detached single-family only".
+_NOT_DETACHED = re.compile(r"condo|co-?op|town|multi|attached|apartment", re.IGNORECASE)
+
+# Only an explicitly completed sale rejects. The criteria are emphatic: "Treat
+# null listing_status as unknown, not a fail" — brokers share pre-listings.
+_SOLD_STATUSES = {"sold", "closed"}
+
+
+def validated_failure(hard_result: HardResult, listing_data: dict) -> bool:
+    """Can code confirm this claimed hard failure against the listing's data?
+
+    This is an ALLOWLIST, and that direction is the whole point. A blocklist of
+    criteria the model may not fail on can never be complete, because the model
+    invents the criterion names: three rounds of fixes were each defeated by the
+    fabrication relocating to a name the blocklist didn't list — commute, then
+    price and sqft, then "School District Quality (Primary Driver)".
+
+    So a model Reject now stands only where code can positively confirm the
+    stated failure. Everything the gate owns is excluded by construction: the
+    listing reached the AI, so it passed all of those. What remains is the short
+    list of hard requirements only the model can surface, each checked against
+    structured data rather than against its own prose.
+
+    When code cannot confirm a failure the rejection is withdrawn and the
+    objection survives as a scored concern. That trade is deliberate: a false
+    reject silently drops a good house off the shortlist, while a too-lenient
+    Weak Match at a low score is visible and recoverable.
     """
     criterion = hard_result.criterion or ""
-    return bool(
-        _CODE_OWNED_CRITERIA.search(criterion) or _NEVER_HARD_CRITERIA.search(criterion)
-    )
+
+    # Schools: a near-dealbreaker below the floor, merely -20 points above it.
+    if _SCHOOL_CRITERIA.search(criterion):
+        percentile = best_elementary_percentile(listing_data)
+        return percentile is not None and percentile < settings.min_school_percentile
+
+    # Confirmed sold: a completed sale, never an unknown or pending status.
+    if _SOLD_CRITERIA.search(criterion):
+        return (listing_data.get("listing_status") or "").strip().lower() in _SOLD_STATUSES
+
+    # Detached single-family only: confirmable when the type says otherwise.
+    if _DETACHED_CRITERIA.search(criterion):
+        return bool(_NOT_DETACHED.search(listing_data.get("property_type") or ""))
+
+    return False
+
+
+# Reasons that confess the "failure" isn't one. Telemetry ONLY — these never
+# change a verdict. They have no marginal recall over validated_failure() (the
+# invented "$1,130,000 hard cap" contained no confession at all), they decay
+# silently as prose phrasing drifts, and each pattern can catch a legitimate
+# reject: "22nd percentile is below the hard limit" is a real failure on a
+# floor, while the identical phrasing on a cap is a pass-admission. Counting
+# them tells us how often the model contradicts itself without risking a
+# correct rejection being discarded.
+_SELF_CONTRADICTING_REASON = re.compile(
+    r"[-−]\s*\d+\s*(?:point|pt)s?\b[^.]{0,40}penalt"
+    r"|penalt\w*[^.]{0,25}[-−]?\d+\s*(?:point|pt)"
+    r"|\bnot\s+(?:actually\s+|really\s+)?a\s+(?:hard\s+)?fail"
+    r"|\btechnically\s+(?:passes|meets|satisfies|clears)\b",
+    re.IGNORECASE,
+)
+
+
+def log_self_contradicting_failures(result: ScoringResult, address: str = "") -> int:
+    """Count and log hard failures whose reason admits they aren't failures.
+
+    Observability only, so the next relocation of this pattern shows up in the
+    logs instead of as a silent regression months later.
+    """
+    hits = [
+        h for h in result.hard_results
+        if h.passed is False and _SELF_CONTRADICTING_REASON.search(h.reason or "")
+    ]
+    for h in hits:
+        logger.warning(
+            "Self-contradicting hard failure%s: %r — reason admits it is not a "
+            "failure: %r",
+            f" on {address}" if address else "", h.criterion, (h.reason or "")[:160],
+        )
+    return len(hits)
+
+
+def _describe_unvalidated(hard_result: HardResult) -> str:
+    """Label an unconfirmable failure for the log — why it didn't stand."""
+    criterion = hard_result.criterion or ""
+    if _CODE_OWNED_CRITERIA.search(criterion):
+        return f"{criterion!r} (enforced by the gate; listing already passed it)"
+    if _NEVER_HARD_CRITERIA.search(criterion):
+        return f"{criterion!r} (criteria designate this a soft factor)"
+    return f"{criterion!r} (not confirmable from listing data)"
 
 
 def invalid_reject(result: ScoringResult, listing_data: dict) -> bool:
     """Is this a Reject the model was not entitled to make?
 
-    Two shapes, both seen in production after the prompt-only fix:
+    A Reject stands only when code can confirm at least one stated failure. It
+    fails this test when:
 
-    1. Every stated hard failure is one deterministic_gate() already checked.
-       The listing reached the AI, so it passed all of them — the model is
-       re-litigating a settled question. It does this by inflating the commute
-       with parking time ("real-world burden: ~128 min"), inventing a
-       "$1,130,000 hard cap" where the band is $2.25M, or marking a 5,962 sqft
-       house as failing a 2,200 sqft minimum while admitting in the same reason
-       that "this is not a failure on the minimum".
-
-    2. No hard requirement is marked failed at all. A Reject has to name what
+    1. No hard requirement is marked failed at all. A Reject has to name what
        failed; four listings were rejected purely for having unknown sqft and
        bedroom counts, which the prompt explicitly says to score 60-75 pending
        verification rather than reject.
+
+    2. Nothing it named survives validated_failure() — because the gate already
+       ruled on it, because the criteria call it a soft factor, or because the
+       claim contradicts the listing's own data.
+
+    Deliberately not a blocklist. Enumerating criteria the model may not fail on
+    failed three times, each time because the fabrication moved to a name the
+    list didn't cover.
     """
     if result.verdict != "Reject":
         return False
@@ -194,27 +313,30 @@ def invalid_reject(result: ScoringResult, listing_data: dict) -> bool:
     failures = [h for h in result.hard_results if h.passed is False]
     if not failures:
         return True
-    return all(_is_code_owned(h) for h in failures)
+    return not any(validated_failure(h, listing_data) for h in failures)
 
 
-def strip_invalid_reject(result: ScoringResult) -> ScoringResult:
+def strip_invalid_reject(result: ScoringResult, listing_data: dict) -> ScoringResult:
     """Withdraw a rejection the AI had no standing to make.
 
     Last resort, applied when the model rejects again after being corrected.
-    Code-owned hard failures are removed and the verdict drops to the score-0
-    default ("Weak Match"), so the listing stays visible and poorly-rated
-    rather than hard-rejected. The soft penalties still apply in full — only
-    the *rejection* is withdrawn.
+    The unconfirmable failures are removed and the listing lands on the score
+    the AI assigned before its own "Reject" verdict zeroed it — so a withdrawn
+    rejection produces a real merit score instead of a flat 0. The soft
+    penalties still apply in full; only the *rejection* is withdrawn.
     """
     note = (
-        "Rejection overridden: every hard requirement the AI marked failed is "
-        "one enforced in code before scoring, and this listing passed all of "
-        "them. Scored on its other merits."
+        "Rejection overridden: none of the hard requirements the AI marked "
+        "failed could be confirmed against this listing's data. Scored on its "
+        "other merits."
     )
+    recovered = result.pre_reject_score or 0
     return result.model_copy(update={
-        "verdict": "Weak Match",
+        "score": recovered,
+        "verdict": _verdict_for_score(recovered),
         "hard_results": [
-            h for h in result.hard_results if not (h.passed is False and _is_code_owned(h))
+            h for h in result.hard_results
+            if not (h.passed is False and not validated_failure(h, listing_data))
         ],
         "concerns": [*result.concerns, note],
         "confidence": "low",
@@ -561,7 +683,9 @@ def _validate_ai_response(data: dict) -> ScoringResult:
     # Enforce score/verdict consistency so filter chips always work correctly:
     #   - "Reject" always means a hard fail → force score to 0
     #   - For all other verdicts, derive from score (prevents e.g. "Weak Match" at score=42)
+    pre_reject_score = None
     if verdict == "Reject":
+        pre_reject_score = score  # keep it in case the rejection is withdrawn
         score = 0
     elif score >= 80:
         verdict = "Strong Match"
@@ -623,6 +747,7 @@ def _validate_ai_response(data: dict) -> ScoringResult:
         reasoning=reasoning,
         property_summary=property_summary,
         evaluation_method="ai",
+        pre_reject_score=pre_reject_score,
     )
 
 
@@ -724,24 +849,26 @@ def ai_score_listing(
 
         # The gate already ruled on commute; the model doesn't get a second
         # vote. Ask once with a correction, then override if it insists.
+        log_self_contradicting_failures(result, listing_data.get("address", ""))
         if invalid_reject(result, listing_data):
+            unconfirmed = ", ".join(
+                _describe_unvalidated(h) for h in result.hard_results if h.passed is False
+            ) or "no hard requirement marked failed"
             logger.warning(
-                "AI returned a Reject it isn't entitled to make "
-                f"(commute={listing_data.get('commute_minutes')}, "
-                f"price={listing_data.get('price')}, sqft={listing_data.get('sqft')}) "
-                "— re-asking with correction"
+                "AI returned a Reject it isn't entitled to make (%s) — re-asking "
+                "with correction", unconfirmed,
             )
             try:
                 retry, retry_reasoning = _call_ai(_INVALID_REJECT_RETRY_NOTE)
                 if invalid_reject(retry, listing_data):
                     logger.warning("AI rejected invalidly again — overriding the rejection")
-                    result = strip_invalid_reject(retry)
+                    result = strip_invalid_reject(retry, listing_data)
                     reasoning = result.reasoning
                 else:
                     result, reasoning = retry, retry_reasoning
             except (json.JSONDecodeError, anthropic.APIError) as e:
                 logger.warning(f"Reject-correction retry failed ({e}) — overriding instead")
-                result = strip_invalid_reject(result)
+                result = strip_invalid_reject(result, listing_data)
                 reasoning = result.reasoning
 
         logger.info(
@@ -867,7 +994,7 @@ def parse_batch_result(
                 f"Batch item {result.custom_id} returned a Reject it isn't entitled "
                 "to make — overriding the rejection"
             )
-            score_result = strip_invalid_reject(score_result)
+            score_result = strip_invalid_reject(score_result, listing_data)
         return score_result, score_result.reasoning
 
     except Exception as e:

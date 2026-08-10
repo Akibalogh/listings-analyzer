@@ -851,6 +851,179 @@ class TestSqftProvenanceInListingData:
         assert "sqft_provenance" not in _build_listing_data({"address": "1 A St"})
 
 
+class TestWithdrawnRejectKeepsItsScore:
+    """`_validate_ai_response` zeroes the score whenever the verdict is Reject,
+    so a withdrawn rejection used to land at a flat 0 — 00 Belleview Ave came
+    out of the override as "Weak Match" with score 0. The AI's own pre-verdict
+    score is now preserved so the listing lands on its merits.
+    """
+
+    def test_pre_reject_score_is_captured(self):
+        r = _validate_ai_response({"score": 42, "verdict": "Reject"})
+        assert r.score == 0, "Reject still means 0 on the way out"
+        assert r.pre_reject_score == 42
+
+    def test_no_pre_reject_score_on_normal_verdicts(self):
+        assert _validate_ai_response({"score": 55, "verdict": "Low Priority"}).pre_reject_score is None
+
+    def test_withdrawn_reject_lands_on_its_merit_score(self):
+        """29 Appleby scored 42 before its own Reject zeroed it."""
+        from app.scorer import strip_invalid_reject
+        r = _validate_ai_response({
+            "score": 42, "verdict": "Reject",
+            "hard_results": [{"criterion": "Commute ≤110 min", "passed": False}],
+        })
+        out = strip_invalid_reject(r, {"commute_minutes": 108})
+        assert out.score == 42
+        assert out.verdict == "Low Priority"
+
+    def test_verdict_matches_the_recovered_score(self):
+        from app.scorer import strip_invalid_reject
+        for score, verdict in ((85, "Strong Match"), (65, "Worth Touring"),
+                               (45, "Low Priority"), (10, "Weak Match")):
+            r = _validate_ai_response({
+                "score": score, "verdict": "Reject",
+                "hard_results": [{"criterion": "Lot size", "passed": False}],
+            })
+            assert strip_invalid_reject(r, {"commute_minutes": 90}).verdict == verdict
+
+    def test_missing_pre_reject_score_falls_back_to_zero(self):
+        from app.models import HardResult, ScoringResult
+        from app.scorer import strip_invalid_reject
+        r = ScoringResult(score=0, verdict="Reject", hard_results=[
+            HardResult(criterion="Lot size", passed=False)])
+        out = strip_invalid_reject(r, {"commute_minutes": 90})
+        assert out.score == 0 and out.verdict == "Weak Match"
+
+
+class TestSelfContradictionTelemetry:
+    """Fable's review argued this pattern has no marginal recall over
+    validated_failure() — the invented "$1,130,000 hard cap" contained no
+    confession at all — and that every pattern risks discarding a legitimate
+    reject. So it counts and logs; it never changes a verdict.
+    """
+
+    @staticmethod
+    def _count(reason, criterion="School District Quality"):
+        from app.models import HardResult, ScoringResult
+        from app.scorer import log_self_contradicting_failures
+        return log_self_contradicting_failures(ScoringResult(
+            score=0, verdict="Reject",
+            hard_results=[HardResult(criterion=criterion, passed=False, reason=reason)],
+        ))
+
+    def test_counts_the_29_appleby_confession(self):
+        assert self._count(
+            "Middle School at 75th percentile falls into the 50–79th range "
+            "(mediocre), triggering a -20 point penalty."
+        ) == 1
+
+    def test_counts_the_6_annarock_confession(self):
+        assert self._count(
+            "Property exceeds minimum by far; this is not a failure on the minimum."
+        ) == 1
+
+    def test_counts_technically_passes(self):
+        assert self._count("Property technically passes at 2,544 sqft.") == 1
+
+    def test_does_not_count_a_legitimate_reject(self):
+        """The texts Fable warned a discard-guard would wrongly catch."""
+        assert self._count(
+            "Elementary school at 22nd percentile is below 50th percentile — "
+            "weak district, near-dealbreaker per evaluation criteria."
+        ) == 0
+        assert self._count("Property is in New Jersey, not New York State.") == 0
+        assert self._count("listing_status = Sold, sale confirmed.") == 0
+
+    def test_ignores_passing_criteria(self):
+        from app.models import HardResult, ScoringResult
+        from app.scorer import log_self_contradicting_failures
+        assert log_self_contradicting_failures(ScoringResult(
+            score=70, verdict="Worth Touring",
+            hard_results=[HardResult(criterion="Sqft", passed=True,
+                                     reason="technically passes")],
+        )) == 0
+
+    def test_telemetry_never_changes_the_verdict(self):
+        """The whole point: observability without authority."""
+        from app.models import HardResult, ScoringResult
+        from app.scorer import log_self_contradicting_failures
+        r = ScoringResult(score=0, verdict="Reject", hard_results=[
+            HardResult(criterion="X", passed=False, reason="not a failure")])
+        before = r.model_dump()
+        log_self_contradicting_failures(r)
+        assert r.model_dump() == before
+
+
+class TestSchoolsAreConditionallyHard:
+    """Schools are the only conditionally-hard requirement: below the 50th
+    percentile is a near-dealbreaker, 50th-79th is merely -20 points. 29 Appleby
+    Dr was zeroed on a school "failure" whose reason read "75th percentile ...
+    triggering a -20 point penalty" — the model marking a penalty as a hard fail.
+    """
+
+    @staticmethod
+    def _school_reject(*elementary_percentiles):
+        from app.models import HardResult, ScoringResult
+        from app.scorer import invalid_reject
+        data = {"commute_minutes": 90, "price": 1_500_000}
+        if elementary_percentiles:
+            data["school_data"] = {"elementary": [
+                {"name": f"School {i}", "rank_percentile": p}
+                for i, p in enumerate(elementary_percentiles)
+            ]}
+        r = ScoringResult(
+            score=0, verdict="Reject",
+            hard_results=[HardResult(criterion="School District Quality", passed=False)],
+        )
+        return invalid_reject(r, data)
+
+    def test_strong_district_cannot_be_a_school_failure(self):
+        """29 Appleby: elementary 86.7th percentile. Not a dealbreaker."""
+        assert self._school_reject(86.7) is True
+
+    def test_mediocre_district_cannot_be_a_school_failure(self):
+        """50th-79th is a -20 penalty per the criteria, not a hard fail."""
+        assert self._school_reject(75.1) is True
+        assert self._school_reject(50.0) is True
+
+    def test_weak_district_is_a_real_failure(self):
+        """54 Hillside / 11 Kitchel: Mount Kisco Elementary, 22nd percentile."""
+        assert self._school_reject(22.0) is False
+        assert self._school_reject(49.9) is False
+
+    def test_best_nearby_elementary_wins(self):
+        """A listing sits in one catchment; one weak school nearby isn't the district."""
+        assert self._school_reject(22.0, 96.3) is True
+
+    def test_unknown_school_data_cannot_confirm_a_rejection(self):
+        """19 of 114 listings have no parseable percentile.
+
+        Under the allowlist an unconfirmable failure doesn't stand: we don't
+        reject a house because we couldn't look up its schools.
+        """
+        assert self._school_reject() is True
+
+    def test_unranked_schools_are_treated_as_unknown(self):
+        from app.models import HardResult, ScoringResult
+        from app.scorer import invalid_reject
+        r = ScoringResult(
+            score=0, verdict="Reject",
+            hard_results=[HardResult(criterion="School district", passed=False)],
+        )
+        data = {"commute_minutes": 90, "school_data": {"elementary": [{"name": "X"}]}}
+        assert invalid_reject(r, data) is True
+
+    def test_percentile_helper_reads_the_production_shape(self):
+        from app.scorer import best_elementary_percentile
+        assert best_elementary_percentile({"school_data": {"elementary": [
+            {"name": "Westorchard School", "rank_percentile": 96.28},
+            {"name": "Roaring Brook School", "rank_percentile": 94.72},
+        ]}}) == 96.28
+        assert best_elementary_percentile({}) is None
+        assert best_elementary_percentile({"school_data": {}}) is None
+
+
 class TestCriteriaDeclaredSoftFactors:
     """Some factors the criteria explicitly forbids rejecting on. Lot size:
     "Note: this is NOT a hard requirement. Dense does not Reject." Ground-floor
@@ -881,11 +1054,52 @@ class TestCriteriaDeclaredSoftFactors:
         assert self._reject_on("In-ground pool") is True
         assert self._reject_on("Age / condition") is True
 
-    def test_genuinely_hard_criteria_still_reject(self):
-        """The model keeps the calls only it can make."""
-        assert self._reject_on("School district quality") is False
-        assert self._reject_on("Detached single-family only") is False
-        assert self._reject_on("Explicitly confirmed sold") is False
+    def test_confirmable_failures_still_reject(self):
+        """The model keeps the calls only it can make — when data backs them."""
+        from app.models import HardResult, ScoringResult
+        from app.scorer import invalid_reject
+
+        def rejects(criterion, **data):
+            r = ScoringResult(
+                score=0, verdict="Reject",
+                hard_results=[HardResult(criterion=criterion, passed=False)],
+            )
+            return invalid_reject(r, {"commute_minutes": 90, **data})
+
+        assert rejects("School district quality", school_data={
+            "elementary": [{"name": "Mount Kisco", "rank_percentile": 22.0}]}) is False
+        assert rejects("Listing Status", listing_status="Sold") is False
+        assert rejects("Detached single-family only",
+                       property_type="Condominium") is False
+
+    def test_unconfirmable_versions_of_the_same_criteria_do_not(self):
+        """Same criterion names, no supporting data — rejection withdrawn."""
+        assert self._reject_on("School district quality") is True
+        assert self._reject_on("Detached single-family only") is True
+        assert self._reject_on("Explicitly confirmed sold") is True
+
+    def test_pending_is_not_sold(self):
+        """24 listings are Pending. The criteria reject only a completed sale."""
+        from app.models import HardResult, ScoringResult
+        from app.scorer import invalid_reject
+        for status in ("Pending", "Under Contract", "Active", None, "Coming Soon"):
+            r = ScoringResult(
+                score=0, verdict="Reject",
+                hard_results=[HardResult(criterion="Listing Status", passed=False)],
+            )
+            assert invalid_reject(r, {"commute_minutes": 90,
+                                      "listing_status": status}) is True, status
+
+    def test_single_family_is_detached(self):
+        """86 listings are "Single Family Residential" — not a detached failure."""
+        from app.models import HardResult, ScoringResult
+        from app.scorer import invalid_reject
+        r = ScoringResult(
+            score=0, verdict="Reject",
+            hard_results=[HardResult(criterion="Detached single-family", passed=False)],
+        )
+        assert invalid_reject(r, {"commute_minutes": 90,
+                                  "property_type": "Single Family Residential"}) is True
 
 
 class TestGateOwnsCheckableRequirements:
@@ -1109,15 +1323,24 @@ class TestInvalidRejectDetection:
             criterion="School district quality", passed=False,
             value="Mount Kisco Elementary: 22nd percentile",
         ))
-        assert invalid_reject(r, {"commute_minutes": 105}) is False
+        assert invalid_reject(r, {
+            "commute_minutes": 105,
+            "school_data": {"elementary": [{"name": "MK", "rank_percentile": 22.0}]},
+        }) is False
 
-    def test_ignores_rejects_the_model_alone_can_judge(self):
-        """Basement, schools, condition — not code-owned, so not second-guessed."""
+    def test_unconfirmable_grounds_do_not_survive(self):
+        """The allowlist's core behaviour: no confirmation, no rejection.
+
+        "Basement suitable for gym" is the case the old blocklist missed
+        entirely — it matched none of the blocked patterns, so a reject on it
+        would have stood unchallenged.
+        """
         from app.scorer import invalid_reject
         for criterion in ("School district quality", "Detached single-family only",
-                          "Confirmed sold", "Basement suitable for gym"):
+                          "Confirmed sold", "Basement suitable for gym",
+                          "Flood zone", "HOA fees", "Invented Criterion 47"):
             r = self._reject(criterion, 90)
-            assert invalid_reject(r, {"commute_minutes": 90}) is False, criterion
+            assert invalid_reject(r, {"commute_minutes": 90}) is True, criterion
 
     def test_ignores_listings_at_or_over_the_limit(self):
         """Above the limit the gate owns the reject — nothing to override."""
@@ -1161,28 +1384,28 @@ class TestStripInvalidReject:
 
     def test_verdict_drops_out_of_reject(self):
         from app.scorer import strip_invalid_reject
-        assert strip_invalid_reject(self._rejected()).verdict == "Weak Match"
+        assert strip_invalid_reject(self._rejected(), {"commute_minutes": 90}).verdict == "Weak Match"
 
     def test_commute_hard_result_removed(self):
         from app.scorer import strip_invalid_reject
-        out = strip_invalid_reject(self._rejected())
+        out = strip_invalid_reject(self._rejected(), {"commute_minutes": 90})
         assert not any("ommute" in h.criterion for h in out.hard_results)
 
     def test_other_hard_results_survive(self):
         from app.scorer import strip_invalid_reject
-        out = strip_invalid_reject(self._rejected())
+        out = strip_invalid_reject(self._rejected(), {"commute_minutes": 90})
         assert [h.criterion for h in out.hard_results] == ["Minimum 2,200 sqft"]
 
     def test_override_is_recorded_as_a_concern(self):
         """The override must be visible, not silent."""
         from app.scorer import strip_invalid_reject
-        out = strip_invalid_reject(self._rejected())
+        out = strip_invalid_reject(self._rejected(), {"commute_minutes": 90})
         assert any("overridden" in c for c in out.concerns)
         assert "Commute is grueling" in out.concerns
 
     def test_confidence_drops(self):
         from app.scorer import strip_invalid_reject
-        assert strip_invalid_reject(self._rejected()).confidence == "low"
+        assert strip_invalid_reject(self._rejected(), {"commute_minutes": 90}).confidence == "low"
 
 
 class TestInvalidRejectRetryNote:

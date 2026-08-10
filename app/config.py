@@ -90,6 +90,11 @@ class Settings(BaseSettings):
     min_sqft: int = 2_200
     min_bedrooms: int = 3
 
+    # Elementary-school state ranking below which a district is a dealbreaker.
+    # Above it the criteria only deducts points (-20 for 50th-79th), so a
+    # school "hard failure" above this floor is not one.
+    min_school_percentile: int = 50
+
     # Redfin saved-search filter. Redfin CAPTCHA-gates the scrape, so this no
     # longer feeds a scheduled sync — it's used only by the pending-detection
     # presence check (best-effort) and the manual /manage/sync-search endpoint.
