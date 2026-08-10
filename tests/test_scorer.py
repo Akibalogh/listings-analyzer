@@ -851,7 +851,113 @@ class TestSqftProvenanceInListingData:
         assert "sqft_provenance" not in _build_listing_data({"address": "1 A St"})
 
 
-class TestCommuteRejectRetryIntegration:
+class TestCriteriaDeclaredSoftFactors:
+    """Some factors the criteria explicitly forbids rejecting on. Lot size:
+    "Note: this is NOT a hard requirement. Dense does not Reject." Ground-floor
+    bedroom: "its absence should NOT trigger a reject or major penalty."
+    """
+
+    @staticmethod
+    def _reject_on(criterion):
+        from app.models import HardResult, ScoringResult
+        from app.scorer import invalid_reject
+        r = ScoringResult(
+            score=0, verdict="Reject",
+            hard_results=[HardResult(criterion=criterion, passed=False)],
+        )
+        return invalid_reject(r, {"commute_minutes": 90, "price": 1_500_000})
+
+    def test_lot_size_cannot_reject(self):
+        """00 Belleview Ave, rejected on a 0.23-acre lot."""
+        assert self._reject_on("Lot size (separation/hiking criteria)") is True
+
+    def test_neighbor_separation_cannot_reject(self):
+        assert self._reject_on("Neighbor separation") is True
+
+    def test_ground_floor_bedroom_cannot_reject(self):
+        assert self._reject_on("Ground-floor bedroom") is True
+
+    def test_pool_and_age_cannot_reject(self):
+        assert self._reject_on("In-ground pool") is True
+        assert self._reject_on("Age / condition") is True
+
+    def test_genuinely_hard_criteria_still_reject(self):
+        """The model keeps the calls only it can make."""
+        assert self._reject_on("School district quality") is False
+        assert self._reject_on("Detached single-family only") is False
+        assert self._reject_on("Explicitly confirmed sold") is False
+
+
+class TestGateOwnsCheckableRequirements:
+    """The checkable hard requirements moved into deterministic_gate() because
+    the model can't be trusted with a threshold it can read: it invented a
+    "$1,130,000 hard cap" against a $2.25M band, and marked a 5,962 sqft house
+    as failing a 2,200 sqft minimum. Code decides these now.
+
+    The unknown-never-gates guarantee matters most here: 9 of 112 production
+    listings have null sqft and bedrooms, and gating them would wipe out a
+    twelfth of the database.
+    """
+
+    @staticmethod
+    def _gate(**fields):
+        from app.scorer import deterministic_gate
+        return deterministic_gate(fields)
+
+    def test_price_above_cap_rejects(self):
+        """48 Raafenberg Rd, $12M — no AI call needed."""
+        r = self._gate(price=12_000_000)
+        assert r is not None and r.verdict == "Reject"
+        assert r.evaluation_method == "deterministic-gate"
+
+    def test_price_below_floor_rejects(self):
+        assert self._gate(price=400_000) is not None
+
+    def test_price_inside_band_passes(self):
+        """4 Southwind Dr, $1.19M — the model called this above a cap it invented."""
+        assert self._gate(price=1_190_000) is None
+
+    def test_price_at_both_bounds_passes(self):
+        from app.config import settings
+        assert self._gate(price=settings.price_min_dollars) is None
+        assert self._gate(price=settings.price_max_dollars) is None
+
+    def test_sqft_below_minimum_rejects(self):
+        assert self._gate(sqft=1_500) is not None
+
+    def test_generous_sqft_passes(self):
+        """6 Annarock, 5,962 sqft — marked as failing a 2,200 minimum."""
+        assert self._gate(sqft=5_962) is None
+
+    def test_bedrooms_below_minimum_rejects(self):
+        assert self._gate(bedrooms=2) is not None
+
+    def test_non_ny_state_rejects(self):
+        r = self._gate(state="New Jersey")
+        assert r is not None and "New York" in r.hard_results[0].criterion
+
+    def test_both_ny_spellings_pass(self):
+        """Production has 104 rows of "NY" and 8 of "New York"."""
+        assert self._gate(state="NY") is None
+        assert self._gate(state="New York") is None
+        assert self._gate(state="ny") is None
+
+    def test_unknown_values_never_gate(self):
+        """9 production listings have null sqft/bedrooms. None may be rejected."""
+        assert self._gate(sqft=None, bedrooms=None, price=None, state=None) is None
+        assert self._gate() is None
+
+    def test_zero_is_treated_as_unknown_not_as_below_minimum(self):
+        """A scraped 0 means "not stated", not "a house with no bedrooms"."""
+        assert self._gate(sqft=0, bedrooms=0) is None
+
+    def test_a_fully_conforming_listing_passes(self):
+        assert self._gate(
+            state="NY", price=1_500_000, sqft=3_000, bedrooms=4, commute_minutes=90,
+        ) is None
+
+
+class TestInvalidRejectRetryIntegration:
     """End-to-end through ai_score_listing(): the retry must actually fire and
     the override must actually apply. Testing the helpers alone would not have
     caught the prompt-only fix failing in production."""
@@ -909,7 +1015,7 @@ class TestCommuteRejectRetryIntegration:
         """Guard against re-asking with the identical prompt."""
         from unittest.mock import MagicMock, patch
         from app.config import Settings
-        from app.scorer import _COMMUTE_RETRY_NOTE, ai_score_listing
+        from app.scorer import _INVALID_REJECT_RETRY_NOTE, ai_score_listing
 
         real = Settings(_env_file=None)
         with patch("app.scorer.settings") as s:
@@ -932,7 +1038,7 @@ class TestCommuteRejectRetryIntegration:
                 ai_score_listing({"address": "X", "commute_minutes": 108}, "Criteria")
 
             second = client.messages.create.call_args_list[1].kwargs["messages"][0]["content"]
-        assert any(_COMMUTE_RETRY_NOTE in b.get("text", "") for b in second)
+        assert any(_INVALID_REJECT_RETRY_NOTE in b.get("text", "") for b in second)
 
     def test_override_applies_when_model_insists(self):
         """Both attempts reject on commute → rejection is withdrawn anyway."""
@@ -956,7 +1062,7 @@ class TestCommuteRejectRetryIntegration:
         assert result.verdict == "Reject"
 
 
-class TestCommuteOnlyRejectDetection:
+class TestInvalidRejectDetection:
     """The prompt-only fix did not hold: after it shipped, 11 of 14 listings
     were STILL hard-rejected on sub-limit commutes. The model worked around the
     instruction — adding parking time to breach the cap, inventing a stricter
@@ -974,59 +1080,71 @@ class TestCommuteOnlyRejectDetection:
 
     def test_detects_invented_stricter_threshold(self):
         """6 Annarock: criterion named "Commute ≤ 109 minutes door-to-door"."""
-        from app.scorer import commute_only_reject
+        from app.scorer import invalid_reject
         r = self._reject("Commute ≤ 109 minutes door-to-door", 109)
-        assert commute_only_reject(r, {"commute_minutes": 109}) is True
+        assert invalid_reject(r, {"commute_minutes": 109}) is True
 
     def test_detects_parking_inflation(self):
         """29 Appleby: 108 min "real-world burden: ~128 min" with parking."""
-        from app.scorer import commute_only_reject
+        from app.scorer import invalid_reject
         r = self._reject("Commute ≤110 min door-to-door", 108)
-        assert commute_only_reject(r, {"commute_minutes": 108}) is True
+        assert invalid_reject(r, {"commute_minutes": 108}) is True
 
     def test_detects_self_contradicting_criterion(self):
         """35 Shady Brook: "104 minutes exceeds hard cap of 110 minutes"."""
-        from app.scorer import commute_only_reject
+        from app.scorer import invalid_reject
         r = self._reject("Commute < 110 minutes door-to-door", 104)
-        assert commute_only_reject(r, {"commute_minutes": 104}) is True
+        assert invalid_reject(r, {"commute_minutes": 104}) is True
 
     def test_ignores_rejects_with_a_real_hard_failure(self):
-        """A commute complaint alongside a genuine failure is still a Reject."""
-        from app.models import HardResult
-        from app.scorer import commute_only_reject
-        r = self._reject("Commute ≤110 min", 105)
-        r.hard_results.append(
-            HardResult(criterion="Price within cap", passed=False, value="$6,050,000"),
-        )
-        assert commute_only_reject(r, {"commute_minutes": 105}) is False
+        """A commute complaint alongside a genuine failure is still a Reject.
 
-    def test_ignores_non_commute_rejects(self):
-        """19 Overlook Rd: rejected on a $6.05M price. Untouched."""
-        from app.scorer import commute_only_reject
-        r = self._reject("Price within $2.25M cap", 70)
-        assert commute_only_reject(r, {"commute_minutes": 70}) is False
+        11 Kitchel Rd: commute grumble plus a 22nd-percentile elementary
+        school. Schools are the model's call, so the reject stands.
+        """
+        from app.models import HardResult
+        from app.scorer import invalid_reject
+        r = self._reject("Commute ≤110 min", 105)
+        r.hard_results.append(HardResult(
+            criterion="School district quality", passed=False,
+            value="Mount Kisco Elementary: 22nd percentile",
+        ))
+        assert invalid_reject(r, {"commute_minutes": 105}) is False
+
+    def test_ignores_rejects_the_model_alone_can_judge(self):
+        """Basement, schools, condition — not code-owned, so not second-guessed."""
+        from app.scorer import invalid_reject
+        for criterion in ("School district quality", "Detached single-family only",
+                          "Confirmed sold", "Basement suitable for gym"):
+            r = self._reject(criterion, 90)
+            assert invalid_reject(r, {"commute_minutes": 90}) is False, criterion
 
     def test_ignores_listings_at_or_over_the_limit(self):
         """Above the limit the gate owns the reject — nothing to override."""
         from app.config import settings
-        from app.scorer import commute_only_reject
+        from app.scorer import invalid_reject
         limit = settings.commute_hard_limit_minutes
         r = self._reject("Commute", limit)
-        assert commute_only_reject(r, {"commute_minutes": limit}) is False
+        assert invalid_reject(r, {"commute_minutes": limit}) is False
 
-    def test_ignores_unknown_commute(self):
-        from app.scorer import commute_only_reject
+    def test_rejecting_on_an_unknown_commute_is_invalid(self):
+        """The criteria says an unknown commute is unknown, not a fail.
+
+        The model can't fail a requirement on data it doesn't have, so this
+        counts as an invalid reject too.
+        """
+        from app.scorer import invalid_reject
         r = self._reject("Commute", 0)
-        assert commute_only_reject(r, {"commute_minutes": None}) is False
+        assert invalid_reject(r, {"commute_minutes": None}) is True
 
     def test_ignores_non_reject_verdicts(self):
-        from app.scorer import commute_only_reject
+        from app.scorer import invalid_reject
         r = self._reject("Commute", 105)
         r.verdict = "Low Priority"
-        assert commute_only_reject(r, {"commute_minutes": 105}) is False
+        assert invalid_reject(r, {"commute_minutes": 105}) is False
 
 
-class TestStripCommuteReject:
+class TestStripInvalidReject:
     """The override of last resort, when the model rejects even after correction."""
 
     @staticmethod
@@ -1042,49 +1160,59 @@ class TestStripCommuteReject:
         )
 
     def test_verdict_drops_out_of_reject(self):
-        from app.scorer import strip_commute_reject
-        assert strip_commute_reject(self._rejected()).verdict == "Weak Match"
+        from app.scorer import strip_invalid_reject
+        assert strip_invalid_reject(self._rejected()).verdict == "Weak Match"
 
     def test_commute_hard_result_removed(self):
-        from app.scorer import strip_commute_reject
-        out = strip_commute_reject(self._rejected())
+        from app.scorer import strip_invalid_reject
+        out = strip_invalid_reject(self._rejected())
         assert not any("ommute" in h.criterion for h in out.hard_results)
 
     def test_other_hard_results_survive(self):
-        from app.scorer import strip_commute_reject
-        out = strip_commute_reject(self._rejected())
+        from app.scorer import strip_invalid_reject
+        out = strip_invalid_reject(self._rejected())
         assert [h.criterion for h in out.hard_results] == ["Minimum 2,200 sqft"]
 
     def test_override_is_recorded_as_a_concern(self):
         """The override must be visible, not silent."""
-        from app.scorer import strip_commute_reject
-        out = strip_commute_reject(self._rejected())
+        from app.scorer import strip_invalid_reject
+        out = strip_invalid_reject(self._rejected())
         assert any("overridden" in c for c in out.concerns)
         assert "Commute is grueling" in out.concerns
 
     def test_confidence_drops(self):
-        from app.scorer import strip_commute_reject
-        assert strip_commute_reject(self._rejected()).confidence == "low"
+        from app.scorer import strip_invalid_reject
+        assert strip_invalid_reject(self._rejected()).confidence == "low"
 
 
-class TestCommuteRetryNote:
+class TestInvalidRejectRetryNote:
     """The correction names each workaround seen in production."""
 
     def test_forbids_parking_inflation(self):
-        from app.scorer import _COMMUTE_RETRY_NOTE
-        assert "Do NOT add parking time" in _COMMUTE_RETRY_NOTE
+        from app.scorer import _INVALID_REJECT_RETRY_NOTE
+        assert "Do NOT add parking time" in _INVALID_REJECT_RETRY_NOTE
 
     def test_forbids_inventing_a_stricter_threshold(self):
-        from app.scorer import _COMMUTE_RETRY_NOTE
-        assert "Do NOT invent a stricter threshold" in _COMMUTE_RETRY_NOTE
+        from app.scorer import _INVALID_REJECT_RETRY_NOTE
+        assert "Do NOT invent a threshold" in _INVALID_REJECT_RETRY_NOTE
 
     def test_forbids_claiming_a_sub_limit_number_exceeds(self):
-        from app.scorer import _COMMUTE_RETRY_NOTE
-        assert 'below the limit "exceeds"' in _COMMUTE_RETRY_NOTE
+        from app.scorer import _INVALID_REJECT_RETRY_NOTE
+        assert 'inside a limit "exceeds"' in _INVALID_REJECT_RETRY_NOTE
+
+    def test_forbids_rejecting_on_missing_data(self):
+        """The Group B failure: rejecting because sqft/beds are unknown."""
+        from app.scorer import _INVALID_REJECT_RETRY_NOTE
+        assert "Do NOT reject because data is MISSING" in _INVALID_REJECT_RETRY_NOTE
+
+    def test_forbids_self_contradicting_failures(self):
+        """6 Annarock marked sqft failed while admitting it wasn't a failure."""
+        from app.scorer import _INVALID_REJECT_RETRY_NOTE
+        assert "admit in the reason that it is not" in _INVALID_REJECT_RETRY_NOTE
 
     def test_says_station_penalty_cannot_reject(self):
-        from app.scorer import _COMMUTE_RETRY_NOTE
-        assert "never produce a Reject" in _COMMUTE_RETRY_NOTE
+        from app.scorer import _INVALID_REJECT_RETRY_NOTE
+        assert "None of them can produce a Reject" in _INVALID_REJECT_RETRY_NOTE
 
 
 class TestCommuteIsNeverAnAIReject:
