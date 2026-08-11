@@ -1938,3 +1938,48 @@ class TestPushHealth:
             s.pushover_token = s.pushover_user = s.slack_webhook_url = ""
             s.notify_score_threshold = 70
             assert _push_health()["channel"] is None
+
+
+class TestNtfyTokenPresenceIsReported:
+    """Whether a token is set decides whether ntfy.sh meters the quota against
+    your account or against a Fly egress IP shared with other tenants — the
+    difference between working alerts and a 429 strangers caused. /health
+    reports presence so that can be told apart; never the value.
+    """
+
+    def test_presence_is_reported(self):
+        from unittest.mock import patch
+        from app.main import _push_health
+        with patch("app.main.settings") as s:
+            s.ntfy_topic = "abc"
+            s.ntfy_url = "https://ntfy.sh/abc"
+            s.ntfy_server = "https://ntfy.sh"
+            s.ntfy_token = "tk_secret"
+            s.pushover_token = s.pushover_user = s.slack_webhook_url = ""
+            s.notify_score_threshold = 70
+            assert _push_health()["ntfy_token_configured"] is True
+
+    def test_absence_is_reported(self):
+        from unittest.mock import patch
+        from app.main import _push_health
+        with patch("app.main.settings") as s:
+            s.ntfy_topic = "abc"
+            s.ntfy_url = "https://ntfy.sh/abc"
+            s.ntfy_server = "https://ntfy.sh"
+            s.ntfy_token = ""
+            s.pushover_token = s.pushover_user = s.slack_webhook_url = ""
+            s.notify_score_threshold = 70
+            assert _push_health()["ntfy_token_configured"] is False
+
+    def test_token_value_never_appears(self):
+        import json
+        from unittest.mock import patch
+        from app.main import _push_health
+        with patch("app.main.settings") as s:
+            s.ntfy_topic = "abc"
+            s.ntfy_url = "https://ntfy.sh/abc"
+            s.ntfy_server = "https://ntfy.sh"
+            s.ntfy_token = "tk_supersecret"
+            s.pushover_token = s.pushover_user = s.slack_webhook_url = ""
+            s.notify_score_threshold = 70
+            assert "tk_supersecret" not in json.dumps(_push_health())
