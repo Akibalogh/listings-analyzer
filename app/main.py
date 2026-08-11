@@ -1087,7 +1087,7 @@ def notify_test(request: Request):
     key = request.headers.get("x-manage-key", "")
     if not (settings.manage_key and key == settings.manage_key):
         _require_auth(request)
-    from app.notifier import send_high_score_alert
+    from app.notifier import _alert_link, send_high_score_alert
     ntfy = bool(settings.ntfy_url)
     channels = {
         "ntfy": ntfy,
@@ -1102,8 +1102,18 @@ def notify_test(request: Request):
     if not top or (top[0].get("score") or 0) == 0:
         raise HTTPException(status_code=404, detail="No scored listings found")
     listing = top[0]
-    send_high_score_alert(listing, listing["score"], listing.get("verdict", ""))
-    return {"sent": True, "channels": channels, "listing": listing.get("address"), "score": listing.get("score")}
+    # Report what the channels actually returned. This used to answer
+    # {"sent": true} no matter what, so a publish ntfy rejected was
+    # indistinguishable from one that reached a phone.
+    delivered = send_high_score_alert(listing, listing["score"], listing.get("verdict", ""))
+    return {
+        "sent": any(delivered.values()),
+        "delivered": delivered,
+        "channels": channels,
+        "listing": listing.get("address"),
+        "score": listing.get("score"),
+        "link": _alert_link(listing),
+    }
 
 
 # --- Background re-scoring ---
