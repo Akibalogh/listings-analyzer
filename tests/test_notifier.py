@@ -496,3 +496,120 @@ class TestUnknownStatusIsCalledOut:
                 notify_ntfy(self.BELLWOOD, 72, "Worth Touring")
             body = post.call_args.kwargs.get("content") or post.call_args.args[1]
         assert "status unknown" in (body.decode() if isinstance(body, bytes) else body)
+
+
+class TestAlertLinkNeverLeaksTheOneHomeToken:
+    """A OneHome URL's `token` is base64 JSON carrying the buyer's email,
+    contact id, agent id, and the saved search's id and key. There is no login
+    behind it — the token IS the authentication — so the URL is a bearer
+    credential and must not go to a push topic or a Slack channel. It also
+    can't be trimmed: the listing id lives inside the token.
+    """
+
+    ONEHOME = ("https://portal.onehome.com/en-US/listing?token="
+               "eyJPU04iOiJLRVkiLCJlbWFpbCI6ImFraWJhbG9naEBnbWFpbC5jb20ifQ==&SMS=0")
+
+    def test_onehome_link_is_replaced(self):
+        from app.notifier import _alert_link
+        out = _alert_link({"listing_url": self.ONEHOME})
+        assert "onehome" not in out
+        assert "token=" not in out
+        assert out.startswith("http")
+
+    def test_replacement_is_the_dashboard(self):
+        from app.notifier import _alert_link
+        from app.config import settings
+        assert _alert_link({"listing_url": self.ONEHOME}) == settings.public_base_url.rstrip("/")
+
+    def test_real_listing_links_are_kept(self):
+        """Redfin URLs carry no credential — no reason to lose them."""
+        from app.notifier import _alert_link
+        redfin = "https://www.redfin.com/NY/Katonah/59-Orchard-Hill-Rd-10536/home/20050852"
+        assert _alert_link({"listing_url": redfin}) == redfin
+
+    def test_missing_url_stays_empty(self):
+        from app.notifier import _alert_link
+        assert _alert_link({}) == ""
+        assert _alert_link({"listing_url": None}) == ""
+
+    def test_ntfy_click_header_carries_no_token(self):
+        from unittest.mock import patch
+        from app.notifier import notify_ntfy
+        with patch("app.notifier.settings") as s:
+            s.ntfy_url = "https://ntfy.sh/topic"
+            s.ntfy_token = ""
+            s.public_base_url = "https://listings-analyzer.fly.dev"
+            with patch("app.notifier.httpx.post") as post:
+                notify_ntfy({"address": "120 Cedar Drive E", "town": "Briarcliff",
+                             "listing_url": self.ONEHOME, "listing_status": "Active"},
+                            82, "Strong Match")
+            headers = post.call_args.kwargs["headers"]
+        assert "token=" not in headers.get("Click", "")
+        assert "onehome" not in headers.get("Click", "")
+
+    def test_slack_body_carries_no_token(self):
+        from unittest.mock import patch
+        from app.notifier import notify_new_listing
+        with patch("app.notifier.settings") as s:
+            s.slack_webhook_url = "https://hooks.slack.com/services/x"
+            s.public_base_url = "https://listings-analyzer.fly.dev"
+            with patch("app.notifier._post_slack") as post:
+                notify_new_listing({"address": "120 Cedar Drive E", "town": "Briarcliff",
+                                    "listing_url": self.ONEHOME}, 82, "Strong Match", "ai")
+            text = post.call_args.args[0]
+        assert "token=" not in text and "onehome" not in text
+
+
+class TestAlertDeliveryIsReported:
+    """send_high_score_alert used to return None, so a publish ntfy rejected was
+    indistinguishable from one that reached a phone — /manage/notify-test
+    answered {"sent": true} either way.
+    """
+
+    LISTING = {"address": "1 A St", "town": "Rye", "listing_status": "Active"}
+
+    def test_reports_ntfy_success(self):
+        from unittest.mock import patch
+        from app.notifier import send_high_score_alert
+        with patch("app.notifier.settings") as s:
+            s.ntfy_url = "https://ntfy.sh/t"
+            s.slack_webhook_url = ""
+            with patch("app.notifier.notify_ntfy", return_value=True):
+                assert send_high_score_alert(self.LISTING, 82, "Strong Match") == {"ntfy": True}
+
+    def test_reports_ntfy_failure(self):
+        """The case that cost a debugging session."""
+        from unittest.mock import patch
+        from app.notifier import send_high_score_alert
+        with patch("app.notifier.settings") as s:
+            s.ntfy_url = "https://ntfy.sh/t"
+            s.slack_webhook_url = ""
+            with patch("app.notifier.notify_ntfy", return_value=False):
+                assert send_high_score_alert(self.LISTING, 82, "Strong Match") == {"ntfy": False}
+
+    def test_reports_pushover_when_ntfy_is_off(self):
+        from unittest.mock import patch
+        from app.notifier import send_high_score_alert
+        with patch("app.notifier.settings") as s:
+            s.ntfy_url = ""
+            s.slack_webhook_url = ""
+            with patch("app.notifier.notify_pushover", return_value=True):
+                assert send_high_score_alert(self.LISTING, 70, "Worth Touring") == {"pushover": True}
+
+    def test_http_error_logs_the_ntfy_response_body(self):
+        """ntfy explains rejections in the body; it used to be swallowed."""
+        import httpx
+        from unittest.mock import MagicMock, patch
+        from app.notifier import notify_ntfy
+        resp = MagicMock(status_code=400, text='{"code":40007,"error":"invalid header"}')
+        with patch("app.notifier.settings") as s:
+            s.ntfy_url = "https://ntfy.sh/t"
+            s.ntfy_token = ""
+            s.public_base_url = "https://x"
+            with patch("app.notifier.httpx.post") as post:
+                post.return_value.raise_for_status.side_effect = httpx.HTTPStatusError(
+                    "400", request=MagicMock(), response=resp)
+                with patch("app.notifier.logger") as log:
+                    assert notify_ntfy(self.LISTING, 82, "Strong Match") is False
+        logged = " ".join(str(a) for a in log.warning.call_args.args)
+        assert "40007" in logged or "invalid header" in logged or "%s" in logged

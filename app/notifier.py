@@ -24,7 +24,7 @@ def notify_new_listing(listing: dict, score: int, verdict: str, evaluation_metho
     beds = listing.get("bedrooms")
     baths = listing.get("bathrooms")
     commute = listing.get("commute_minutes")
-    listing_url = listing.get("listing_url", "")
+    listing_url = _alert_link(listing)
 
     price_str = f"${price:,}" if price else "Price unknown"
     sqft_str = f"{sqft:,} sqft" if sqft else ""
@@ -97,7 +97,7 @@ def _listing_summary(listing: dict) -> tuple[str, str, str]:
              f"{commute} min commute" if commute else "",
              "" if (listing.get("listing_status") or "").strip() else "status unknown — may be sold"]
     stats = " · ".join([p for p in parts if p])
-    return f"{address}, {town} {state}", f"{price_str}  {stats}".strip(), listing.get("listing_url", "")
+    return f"{address}, {town} {state}", f"{price_str}  {stats}".strip(), _alert_link(listing)
 
 
 def notify_pushover(listing: dict, score: int, verdict: str) -> bool:
@@ -145,6 +145,27 @@ def _header_safe(text: str) -> str:
     return text.encode("ascii", "ignore").decode("ascii").strip()
 
 
+def _alert_link(listing: dict) -> str:
+    """Where an alert should send you — never a OneHome portal link.
+
+    A OneHome URL's `token` query parameter is base64 JSON carrying the buyer's
+    email, contact id, agent id, and the saved search's id and key. There is no
+    login behind it: the token IS the authentication, so the URL is a bearer
+    credential and must not be broadcast to a push topic or a Slack channel. It
+    cannot be trimmed either — the listing id lives inside the token, so a
+    stripped URL points at nothing.
+
+    They are also long. 120 Cedar Drive E's is 313 characters, and it rode in
+    the ntfy `Click` header.
+
+    Real listing links (Redfin and the like) carry no credential and are kept.
+    """
+    url = listing.get("listing_url") or ""
+    if "onehome.com" in url:
+        return settings.public_base_url.rstrip("/")
+    return url
+
+
 def notify_ntfy(listing: dict, score: int, verdict: str) -> bool:
     """Send a phone push via ntfy to the configured topic.
 
@@ -181,24 +202,39 @@ def notify_ntfy(listing: dict, score: int, verdict: str) -> bool:
         resp.raise_for_status()
         logger.info(f"ntfy sent for {headline} ({verdict} {score})")
         return True
+    except httpx.HTTPStatusError as e:
+        # ntfy explains rejections in the body (its own error code + message).
+        # Without this the failure was indistinguishable from success: the
+        # caller discarded the return value and /manage/notify-test reported
+        # "sent" regardless, so a rejected publish looked like a delivered one.
+        logger.warning(
+            "ntfy rejected the publish for %s: HTTP %s — %s",
+            headline, e.response.status_code, (e.response.text or "")[:300],
+        )
+        return False
     except Exception as e:
         logger.warning(f"ntfy notification failed for {headline}: {e}")
         return False
 
 
-def send_high_score_alert(listing: dict, score: int, verdict: str) -> None:
+def send_high_score_alert(listing: dict, score: int, verdict: str) -> dict:
     """Fan out a new-high-score alert to every configured channel.
 
     ntfy supersedes Pushover (open source, no per-seat cost) and takes over as
     soon as NTFY_TOPIC is set; Pushover stays wired up so nothing goes quiet
     mid-migration while the topic is unset. Exactly one of the two runs, so a
     half-migrated config can't double-buzz every phone.
+
+    Returns {channel: delivered} so a caller can tell a rejected publish from a
+    delivered one. Discarding this is what made a failing ntfy publish look
+    identical to a working one for an entire debugging session.
     """
     if settings.ntfy_url:
-        notify_ntfy(listing, score, verdict)
+        results = {"ntfy": notify_ntfy(listing, score, verdict)}
     else:
-        notify_pushover(listing, score, verdict)
+        results = {"pushover": notify_pushover(listing, score, verdict)}
     notify_new_listing(listing, score, verdict, listing.get("evaluation_method", "ai"))
+    return results
 
 
 def _post_slack(text: str, context: str) -> None:

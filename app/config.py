@@ -68,6 +68,10 @@ class Settings(BaseSettings):
     # Score at or above which a new listing triggers a phone push
     notify_score_threshold: int = 70
 
+    # Public dashboard URL. Alerts link here instead of to a OneHome portal
+    # link, whose token is a bearer credential (see _alert_link).
+    public_base_url: str = "https://listings-analyzer.fly.dev"
+
     # Agent name mapping: "email_or_domain:Agent Name,email_or_domain:Agent Name"
     # e.g. "redfin.com:Redfin Agent,broker@example.com:Broker Name"
     agent_map: str = ""
