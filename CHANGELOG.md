@@ -4,7 +4,20 @@ All notable changes to Listings Analyzer are documented here.
 
 ---
 
-## [Unreleased] — a Reject must be confirmable, not merely asserted
+## [Unreleased] — alerts say when the status is unknown
+
+### Added
+- **Push and Slack alerts now flag a missing listing status**: "$2,000,000 ·
+  3,053 sqft · 4 bd · 79 min commute · status unknown — may be sold". 516
+  Bellwood Avenue was alerted as a new Worth Touring (72) after it had already
+  sold; its OneHome alert email carried no `listing_status` at all, and only 11
+  of 20 OneHome listings have one. Nothing in the system could have known, and
+  the criteria are right that a null status is unknown rather than sold — so the
+  alert now says which it is instead of reading as available. 13 of 124
+  listings have no status, 6 of them scoring at or above the notify threshold.
+  Added in `_listing_summary()`, so ntfy, Pushover and Slack all pick it up.
+
+## [Superseded] — a Reject must be confirmable, not merely asserted
 
 ### Changed
 - **`invalid_reject()` inverted from a blocklist to an allowlist.** Enumerating

@@ -441,3 +441,58 @@ class TestNtfyConfig:
         from app.config import Settings
         s = Settings(ntfy_topic="abc123", ntfy_server="https://ntfy.example.com/")
         assert s.ntfy_url == "https://ntfy.example.com/abc123"
+
+
+class TestUnknownStatusIsCalledOut:
+    """516 Bellwood Avenue was alerted as a new Worth Touring (72) after it had
+    already sold. Its OneHome alert email carried no listing_status at all — 9
+    of 14 status-less listings come from that source — so nothing in the system
+    could know. The criteria are right that a null status is unknown rather than
+    sold, so the alert says which it is instead of reading as available.
+    """
+
+    BELLWOOD = {
+        "address": "516 Bellwood Avenue", "town": "Sleepy Hollow", "state": "New York",
+        "price": 2000000, "sqft": 3053, "bedrooms": 4, "commute_minutes": 79,
+    }
+
+    def test_missing_status_is_flagged(self):
+        from app.notifier import _listing_summary
+        _, stats, _ = _listing_summary(self.BELLWOOD)
+        assert "status unknown — may be sold" in stats
+
+    def test_known_status_is_not_flagged(self):
+        from app.notifier import _listing_summary
+        _, stats, _ = _listing_summary({**self.BELLWOOD, "listing_status": "Active"})
+        assert "status unknown" not in stats
+
+    def test_blank_status_counts_as_missing(self):
+        from app.notifier import _listing_summary
+        for blank in ("", "   ", None):
+            _, stats, _ = _listing_summary({**self.BELLWOOD, "listing_status": blank})
+            assert "status unknown" in stats, repr(blank)
+
+    def test_the_real_stats_still_come_first(self):
+        """The flag is appended, not a replacement — price and specs stay."""
+        from app.notifier import _listing_summary
+        _, stats, _ = _listing_summary(self.BELLWOOD)
+        assert stats.startswith("$2,000,000")
+        for part in ("3,053 sqft", "4 bd", "79 min commute"):
+            assert part in stats
+        assert stats.index("79 min commute") < stats.index("status unknown")
+
+    def test_reaches_every_channel(self):
+        """One summary builder feeds ntfy, Pushover and Slack alike."""
+        from app.notifier import _listing_summary
+        assert "status unknown" in _listing_summary(self.BELLWOOD)[1]
+
+    def test_ntfy_body_carries_the_flag(self):
+        from unittest.mock import patch
+        from app.notifier import notify_ntfy
+        with patch("app.notifier.settings") as s:
+            s.ntfy_url = "https://ntfy.sh/topic"
+            s.ntfy_token = ""
+            with patch("app.notifier.httpx.post") as post:
+                notify_ntfy(self.BELLWOOD, 72, "Worth Touring")
+            body = post.call_args.kwargs.get("content") or post.call_args.args[1]
+        assert "status unknown" in (body.decode() if isinstance(body, bytes) else body)
