@@ -578,14 +578,17 @@ class TestAlertDeliveryIsReported:
                 assert send_high_score_alert(self.LISTING, 82, "Strong Match") == {"ntfy": True}
 
     def test_reports_ntfy_failure(self):
-        """The case that cost a debugging session."""
+        """The case that cost a debugging session. A failed ntfy publish now
+        also triggers the Pushover fallback, so both channels are reported."""
         from unittest.mock import patch
         from app.notifier import send_high_score_alert
         with patch("app.notifier.settings") as s:
             s.ntfy_url = "https://ntfy.sh/t"
             s.slack_webhook_url = ""
-            with patch("app.notifier.notify_ntfy", return_value=False):
-                assert send_high_score_alert(self.LISTING, 82, "Strong Match") == {"ntfy": False}
+            with patch("app.notifier.notify_ntfy", return_value=False), \
+                 patch("app.notifier.notify_pushover", return_value=False):
+                out = send_high_score_alert(self.LISTING, 82, "Strong Match")
+        assert out["ntfy"] is False
 
     def test_reports_pushover_when_ntfy_is_off(self):
         from unittest.mock import patch
@@ -677,3 +680,56 @@ class TestNtfyProbe:
                 out = ntfy_probe()
         assert out["ok"] is False
         assert out["exception_type"] == "ConnectError"
+
+
+class TestPushoverBacksNtfyUp:
+    """Public ntfy.sh rate-limits per visitor IP, and a Fly app shares its
+    egress IP with other tenants — so the daily quota can be exhausted by
+    strangers, returning 429 (code 42908) on every publish for the rest of the
+    day. That is exactly what happened, and every alert went silently nowhere.
+    A house worth touring shouldn't go unannounced because of it.
+    """
+
+    LISTING = {"address": "120 Cedar Drive E", "town": "Briarcliff Manor",
+               "listing_status": "Back On Market"}
+
+    @staticmethod
+    def _send(ntfy_ok, ntfy_configured=True):
+        from unittest.mock import patch
+        from app.notifier import send_high_score_alert
+        with patch("app.notifier.settings") as s:
+            s.ntfy_url = "https://ntfy.sh/t" if ntfy_configured else ""
+            s.slack_webhook_url = ""
+            with patch("app.notifier.notify_ntfy", return_value=ntfy_ok) as ntfy, \
+                 patch("app.notifier.notify_pushover", return_value=True) as push:
+                out = send_high_score_alert(
+                    TestPushoverBacksNtfyUp.LISTING, 82, "Strong Match")
+        return out, ntfy, push
+
+    def test_rate_limited_ntfy_falls_back_to_pushover(self):
+        out, _, push = self._send(ntfy_ok=False)
+        assert out == {"ntfy": False, "pushover": True}
+        push.assert_called_once()
+
+    def test_no_double_buzz_when_ntfy_works(self):
+        """The reason the two were mutually exclusive in the first place."""
+        out, _, push = self._send(ntfy_ok=True)
+        assert out == {"ntfy": True}
+        push.assert_not_called()
+
+    def test_pushover_alone_when_ntfy_unconfigured(self):
+        out, ntfy, push = self._send(ntfy_ok=True, ntfy_configured=False)
+        assert out == {"pushover": True}
+        ntfy.assert_not_called()
+
+    def test_both_failing_is_reported_honestly(self):
+        from unittest.mock import patch
+        from app.notifier import send_high_score_alert
+        with patch("app.notifier.settings") as s:
+            s.ntfy_url = "https://ntfy.sh/t"
+            s.slack_webhook_url = ""
+            with patch("app.notifier.notify_ntfy", return_value=False), \
+                 patch("app.notifier.notify_pushover", return_value=False):
+                out = send_high_score_alert(self.LISTING, 82, "Strong Match")
+        assert out == {"ntfy": False, "pushover": False}
+        assert not any(out.values())
