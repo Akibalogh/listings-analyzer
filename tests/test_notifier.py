@@ -613,3 +613,67 @@ class TestAlertDeliveryIsReported:
                     assert notify_ntfy(self.LISTING, 82, "Strong Match") is False
         logged = " ".join(str(a) for a in log.warning.call_args.args)
         assert "40007" in logged or "invalid header" in logged or "%s" in logged
+
+
+class TestNtfyProbe:
+    """A controlled experiment for when a publish fails silently: bare body, no
+    Title/Tags/Priority/Click, raw status and response body returned. Succeeding
+    where the real alert fails isolates the fault to a header.
+    """
+
+    def test_skipped_when_unconfigured(self):
+        from unittest.mock import patch
+        from app.notifier import ntfy_probe
+        with patch("app.notifier.settings") as s:
+            s.ntfy_url = ""
+            assert ntfy_probe()["probe"] == "skipped"
+
+    def test_reports_status_and_body(self):
+        from unittest.mock import MagicMock, patch
+        from app.notifier import ntfy_probe
+        with patch("app.notifier.settings") as s:
+            s.ntfy_url = "https://ntfy.sh/topic"
+            s.ntfy_server = "https://ntfy.sh"
+            resp = MagicMock(status_code=429, text='{"code":42901,"error":"limit reached"}')
+            resp.is_success = False
+            with patch("app.notifier.httpx.post", return_value=resp):
+                out = ntfy_probe()
+        assert out["status_code"] == 429
+        assert "42901" in out["response_body"]
+        assert out["ok"] is False
+
+    def test_sends_no_extra_headers(self):
+        """The whole point — a header can't be the cause if none are sent."""
+        from unittest.mock import MagicMock, patch
+        from app.notifier import ntfy_probe
+        with patch("app.notifier.settings") as s:
+            s.ntfy_url = "https://ntfy.sh/topic"
+            s.ntfy_server = "https://ntfy.sh"
+            with patch("app.notifier.httpx.post", return_value=MagicMock(
+                    status_code=200, text="", is_success=True)) as post:
+                ntfy_probe()
+        assert "headers" not in post.call_args.kwargs
+
+    def test_never_echoes_the_topic(self):
+        import json as _json
+        from unittest.mock import MagicMock, patch
+        from app.notifier import ntfy_probe
+        with patch("app.notifier.settings") as s:
+            s.ntfy_url = "https://ntfy.sh/s3cr3t-topic"
+            s.ntfy_server = "https://ntfy.sh"
+            with patch("app.notifier.httpx.post", return_value=MagicMock(
+                    status_code=200, text="", is_success=True)):
+                out = ntfy_probe()
+        assert "s3cr3t-topic" not in _json.dumps(out)
+
+    def test_network_failure_is_reported_not_raised(self):
+        import httpx
+        from unittest.mock import patch
+        from app.notifier import ntfy_probe
+        with patch("app.notifier.settings") as s:
+            s.ntfy_url = "https://ntfy.sh/topic"
+            s.ntfy_server = "https://ntfy.sh"
+            with patch("app.notifier.httpx.post", side_effect=httpx.ConnectError("no route")):
+                out = ntfy_probe()
+        assert out["ok"] is False
+        assert out["exception_type"] == "ConnectError"
