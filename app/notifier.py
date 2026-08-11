@@ -76,7 +76,15 @@ def notify_weekly_digest(new_listings: list[dict], quality_pct: float, ingest: d
 
 
 def _listing_summary(listing: dict) -> tuple[str, str, str]:
-    """Return (headline, stats_line, url) for a listing alert."""
+    """Return (headline, stats_line, url) for a listing alert.
+
+    An unknown listing status is called out explicitly. OneHome alert emails
+    carry no status at all — only 11 of 20 such listings have one — so a house
+    that already sold arrives looking every bit as available as a live one, and
+    516 Bellwood Avenue was alerted as a new Worth Touring after the sale. The
+    criteria are right that a null status is unknown rather than sold, so the
+    alert says so instead of implying the house is on the market.
+    """
     address = listing.get("address", "Unknown")
     town = listing.get("town", "")
     state = listing.get("state", "NY")
@@ -86,7 +94,8 @@ def _listing_summary(listing: dict) -> tuple[str, str, str]:
     commute = listing.get("commute_minutes")
     price_str = f"${price:,}" if price else "Price unknown"
     parts = [f"{sqft:,} sqft" if sqft else "", f"{beds} bd" if beds else "",
-             f"{commute} min commute" if commute else ""]
+             f"{commute} min commute" if commute else "",
+             "" if (listing.get("listing_status") or "").strip() else "status unknown — may be sold"]
     stats = " · ".join([p for p in parts if p])
     return f"{address}, {town} {state}", f"{price_str}  {stats}".strip(), listing.get("listing_url", "")
 
