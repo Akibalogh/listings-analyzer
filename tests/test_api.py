@@ -1859,3 +1859,82 @@ class TestHealthEmailMasking:
 
     def test_match_flag_present(self, client):
         assert "accounts_match" in client.get("/health").json()["ingest"]
+
+
+class TestPushHealth:
+    """A successful ntfy publish proves nothing about delivery — ntfy returns
+    2xx whether or not anything is subscribed, so a topic mismatch is
+    indistinguishable from success. /health reports a fingerprint of the topic
+    so it can be compared against a phone's subscription without the topic
+    itself ever appearing in a response; it is a credential on public ntfy.sh.
+    """
+
+    def test_topic_is_never_echoed(self):
+        """The one thing this must never do."""
+        import json
+        from unittest.mock import patch
+        from app.main import _push_health
+        secret = "s3cr3t-topic-abcdef123456"
+        with patch("app.main.settings") as s:
+            s.ntfy_topic = secret
+            s.ntfy_url = f"https://ntfy.sh/{secret}"
+            s.ntfy_server = "https://ntfy.sh"
+            s.pushover_token = s.pushover_user = s.slack_webhook_url = ""
+            s.notify_score_threshold = 70
+            out = _push_health()
+        assert secret not in json.dumps(out)
+
+    def test_fingerprint_matches_a_local_shasum(self):
+        """What the user computes on their phone's topic must line up."""
+        import hashlib
+        from unittest.mock import patch
+        from app.main import _push_health
+        topic = "abc123"
+        with patch("app.main.settings") as s:
+            s.ntfy_topic = topic
+            s.ntfy_url = f"https://ntfy.sh/{topic}"
+            s.ntfy_server = "https://ntfy.sh"
+            s.pushover_token = s.pushover_user = s.slack_webhook_url = ""
+            s.notify_score_threshold = 70
+            out = _push_health()
+        assert out["topic_sha256_prefix"] == hashlib.sha256(topic.encode()).hexdigest()[:12]
+        assert out["topic_length"] == 6
+
+    def test_flags_quoting_accidents(self):
+        """`fly secrets set NTFY_TOPIC="'abc'"` bakes the quotes into the topic."""
+        from unittest.mock import patch
+        from app.main import _push_health
+        for topic, ws, q in (("'abc'", False, True), (" abc ", True, False),
+                             ('"abc"', False, True), ("abc", False, False)):
+            with patch("app.main.settings") as s:
+                s.ntfy_topic = topic
+                s.ntfy_url = f"https://ntfy.sh/{topic}"
+                s.ntfy_server = "https://ntfy.sh"
+                s.pushover_token = s.pushover_user = s.slack_webhook_url = ""
+                s.notify_score_threshold = 70
+                out = _push_health()
+            assert out["topic_has_surrounding_whitespace"] is ws, topic
+            assert out["topic_has_quotes"] is q, topic
+
+    def test_reports_which_channel_wins(self):
+        from unittest.mock import patch
+        from app.main import _push_health
+        with patch("app.main.settings") as s:
+            s.ntfy_topic = ""
+            s.ntfy_url = ""
+            s.pushover_token, s.pushover_user = "tok", "usr"
+            s.slack_webhook_url = ""
+            s.notify_score_threshold = 70
+            out = _push_health()
+        assert out["channel"] == "pushover"
+        assert out["ntfy_configured"] is False
+        assert "topic_sha256_prefix" not in out
+
+    def test_no_channel_configured(self):
+        from unittest.mock import patch
+        from app.main import _push_health
+        with patch("app.main.settings") as s:
+            s.ntfy_topic = s.ntfy_url = ""
+            s.pushover_token = s.pushover_user = s.slack_webhook_url = ""
+            s.notify_score_threshold = 70
+            assert _push_health()["channel"] is None
