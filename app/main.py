@@ -1,5 +1,6 @@
 """FastAPI app for the Listings Analyzer."""
 
+import hashlib
 import json
 import logging
 import threading
@@ -382,6 +383,39 @@ def _ingest_health(poll: dict, reveal_accounts: bool = False) -> dict:
     }
 
 
+def _push_health() -> dict:
+    """Which push channel is live, and a fingerprint of the ntfy topic.
+
+    A successful ntfy publish proves nothing about delivery: ntfy returns 2xx
+    whether or not anything is subscribed, so a topic mismatch looks identical
+    to success. The topic is a credential on public ntfy.sh and must never
+    appear in a response, so this reports a SHA-256 prefix instead — compare it
+    against the topic your phone is subscribed to with
+
+        printf '%s' '<topic>' | shasum -a 256
+
+    Mismatched fingerprints mean the app and the phone are on different topics.
+    The whitespace and quote flags catch the usual culprit: a shell quoting
+    accident baking punctuation into the secret.
+    """
+    topic = settings.ntfy_topic
+    ntfy_on = bool(settings.ntfy_url)
+    push = {
+        "channel": "ntfy" if ntfy_on else ("pushover" if settings.pushover_token else None),
+        "ntfy_configured": ntfy_on,
+        "pushover_configured": bool(settings.pushover_token and settings.pushover_user),
+        "slack_configured": bool(settings.slack_webhook_url),
+        "notify_score_threshold": settings.notify_score_threshold,
+    }
+    if ntfy_on:
+        push["ntfy_server"] = settings.ntfy_server
+        push["topic_length"] = len(topic)
+        push["topic_sha256_prefix"] = hashlib.sha256(topic.encode()).hexdigest()[:12]
+        push["topic_has_surrounding_whitespace"] = topic != topic.strip()
+        push["topic_has_quotes"] = any(c in topic for c in "\"'")
+    return push
+
+
 @app.get("/health")
 def health(request: Request):
     with _poll_lock:
@@ -398,6 +432,7 @@ def health(request: Request):
         "poll": poll,
         "ingest": _ingest_health(poll, reveal_accounts=signed_in),
         "commute_gate": commute_gate,
+        "push": _push_health(),
     }
 
 
