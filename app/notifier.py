@@ -259,9 +259,19 @@ def send_high_score_alert(listing: dict, score: int, verdict: str) -> dict:
     Returns {channel: delivered} so a caller can tell a rejected publish from a
     delivered one. Discarding this is what made a failing ntfy publish look
     identical to a working one for an entire debugging session.
+
+    Pushover backs ntfy up rather than merely preceding it. Public ntfy.sh
+    rate-limits per visitor IP, and a Fly app shares its egress IP with other
+    tenants — so the daily quota can be exhausted by strangers, returning
+    HTTP 429 (code 42908) on every publish for the rest of the day. A house
+    worth touring should not go unannounced because of that, and the fallback
+    only fires when ntfy actually failed, so the normal path still buzzes once.
     """
     if settings.ntfy_url:
         results = {"ntfy": notify_ntfy(listing, score, verdict)}
+        if not results["ntfy"]:
+            logger.warning("ntfy publish failed — falling back to Pushover")
+            results["pushover"] = notify_pushover(listing, score, verdict)
     else:
         results = {"pushover": notify_pushover(listing, score, verdict)}
     notify_new_listing(listing, score, verdict, listing.get("evaluation_method", "ai"))
