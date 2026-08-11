@@ -177,14 +177,28 @@ def ntfy_probe() -> dict:
     ntfy names the reason in the response body (its own numeric code plus a
     message), which is the piece that was being swallowed. The topic is never
     echoed — it is the only access control on public ntfy.sh.
+
+    Authorization is the one header the probe DOES send. It is not cosmetic:
+    ntfy.sh meters anonymous publishes per visitor IP, and a Fly app shares its
+    egress IP with other tenants, so an unauthenticated probe inherits a quota
+    strangers can exhaust. Omitting it made the probe report a limit the real
+    alert path would never have hit, which is worse than not probing at all.
     """
     if not settings.ntfy_url:
         return {"probe": "skipped", "reason": "NTFY_TOPIC is not set"}
-    out: dict = {"probe": "ran", "server": settings.ntfy_server}
+    headers = {}
+    if settings.ntfy_token:
+        headers["Authorization"] = f"Bearer {settings.ntfy_token}"
+    out: dict = {
+        "probe": "ran",
+        "server": settings.ntfy_server,
+        "authenticated": bool(settings.ntfy_token),
+    }
     try:
         resp = httpx.post(
             settings.ntfy_url,
             content=b"probe from listings-analyzer",
+            headers=headers,
             timeout=10.0,
         )
         out["status_code"] = resp.status_code

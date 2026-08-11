@@ -409,6 +409,10 @@ def _push_health() -> dict:
     }
     if ntfy_on:
         push["ntfy_server"] = settings.ntfy_server
+        # Presence only, never the value. Anonymous publishes to ntfy.sh are
+        # metered per visitor IP, which a Fly app shares with other tenants, so
+        # whether a token is set decides whether the quota is yours or theirs.
+        push["ntfy_token_configured"] = bool(settings.ntfy_token)
         push["topic_length"] = len(topic)
         push["topic_sha256_prefix"] = hashlib.sha256(topic.encode()).hexdigest()[:12]
         push["topic_has_surrounding_whitespace"] = topic != topic.strip()

@@ -637,6 +637,7 @@ class TestNtfyProbe:
         with patch("app.notifier.settings") as s:
             s.ntfy_url = "https://ntfy.sh/topic"
             s.ntfy_server = "https://ntfy.sh"
+            s.ntfy_token = ""
             resp = MagicMock(status_code=429, text='{"code":42901,"error":"limit reached"}')
             resp.is_success = False
             with patch("app.notifier.httpx.post", return_value=resp):
@@ -645,17 +646,63 @@ class TestNtfyProbe:
         assert "42901" in out["response_body"]
         assert out["ok"] is False
 
-    def test_sends_no_extra_headers(self):
-        """The whole point — a header can't be the cause if none are sent."""
+    def test_sends_no_cosmetic_headers(self):
+        """The whole point — Title/Tags/Priority/Click can't be the cause if
+        none are sent."""
         from unittest.mock import MagicMock, patch
         from app.notifier import ntfy_probe
         with patch("app.notifier.settings") as s:
             s.ntfy_url = "https://ntfy.sh/topic"
             s.ntfy_server = "https://ntfy.sh"
+            s.ntfy_token = ""
             with patch("app.notifier.httpx.post", return_value=MagicMock(
                     status_code=200, text="", is_success=True)) as post:
                 ntfy_probe()
-        assert "headers" not in post.call_args.kwargs
+        sent = post.call_args.kwargs["headers"]
+        for h in ("Title", "Tags", "Priority", "Click"):
+            assert h not in sent
+
+    def test_does_send_authorization_when_a_token_is_set(self):
+        """Auth is not cosmetic: it decides whether the rate limit is metered
+        against your account or against a Fly IP shared with strangers. An
+        unauthenticated probe reported a limit the real path never hits."""
+        from unittest.mock import MagicMock, patch
+        from app.notifier import ntfy_probe
+        with patch("app.notifier.settings") as s:
+            s.ntfy_url = "https://ntfy.sh/topic"
+            s.ntfy_server = "https://ntfy.sh"
+            s.ntfy_token = "tk_secret"
+            with patch("app.notifier.httpx.post", return_value=MagicMock(
+                    status_code=200, text="", is_success=True)) as post:
+                out = ntfy_probe()
+        assert post.call_args.kwargs["headers"]["Authorization"] == "Bearer tk_secret"
+        assert out["authenticated"] is True
+
+    def test_reports_when_no_token_is_set(self):
+        from unittest.mock import MagicMock, patch
+        from app.notifier import ntfy_probe
+        with patch("app.notifier.settings") as s:
+            s.ntfy_url = "https://ntfy.sh/topic"
+            s.ntfy_server = "https://ntfy.sh"
+            s.ntfy_token = ""
+            with patch("app.notifier.httpx.post", return_value=MagicMock(
+                    status_code=200, text="", is_success=True)) as post:
+                out = ntfy_probe()
+        assert out["authenticated"] is False
+        assert "Authorization" not in post.call_args.kwargs["headers"]
+
+    def test_token_value_is_never_echoed(self):
+        import json as _json
+        from unittest.mock import MagicMock, patch
+        from app.notifier import ntfy_probe
+        with patch("app.notifier.settings") as s:
+            s.ntfy_url = "https://ntfy.sh/topic"
+            s.ntfy_server = "https://ntfy.sh"
+            s.ntfy_token = "tk_supersecret"
+            with patch("app.notifier.httpx.post", return_value=MagicMock(
+                    status_code=200, text="", is_success=True)):
+                out = ntfy_probe()
+        assert "tk_supersecret" not in _json.dumps(out)
 
     def test_never_echoes_the_topic(self):
         import json as _json
@@ -664,6 +711,7 @@ class TestNtfyProbe:
         with patch("app.notifier.settings") as s:
             s.ntfy_url = "https://ntfy.sh/s3cr3t-topic"
             s.ntfy_server = "https://ntfy.sh"
+            s.ntfy_token = ""
             with patch("app.notifier.httpx.post", return_value=MagicMock(
                     status_code=200, text="", is_success=True)):
                 out = ntfy_probe()
@@ -676,6 +724,7 @@ class TestNtfyProbe:
         with patch("app.notifier.settings") as s:
             s.ntfy_url = "https://ntfy.sh/topic"
             s.ntfy_server = "https://ntfy.sh"
+            s.ntfy_token = ""
             with patch("app.notifier.httpx.post", side_effect=httpx.ConnectError("no route")):
                 out = ntfy_probe()
         assert out["ok"] is False
