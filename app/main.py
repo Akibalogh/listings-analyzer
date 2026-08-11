@@ -1087,7 +1087,16 @@ def notify_test(request: Request):
     key = request.headers.get("x-manage-key", "")
     if not (settings.manage_key and key == settings.manage_key):
         _require_auth(request)
-    from app.notifier import _alert_link, send_high_score_alert
+    from app.notifier import _alert_link, ntfy_probe, send_high_score_alert
+
+    # ?probe=true publishes a bare message — body only, none of the Title/Tags/
+    # Priority/Click headers — and returns ntfy's raw status and response body.
+    # A bare publish that succeeds while the real one fails isolates the fault
+    # to a header; one that fails the same way points at the network, the topic,
+    # or a rate limit. ntfy names the reason in the body either way.
+    if request.query_params.get("probe", "").lower() == "true":
+        return ntfy_probe()
+
     ntfy = bool(settings.ntfy_url)
     channels = {
         "ntfy": ntfy,

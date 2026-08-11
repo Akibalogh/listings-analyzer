@@ -166,6 +166,37 @@ def _alert_link(listing: dict) -> str:
     return url
 
 
+def ntfy_probe() -> dict:
+    """Publish a bare message to the configured topic and report the raw result.
+
+    A diagnostic, not a notification path. notify_ntfy() sends Title, Tags,
+    Priority and Click headers; this sends none of them, so a probe that
+    succeeds while the real alert fails isolates the fault to a header, and one
+    that fails identically points at the network, the topic, or a rate limit.
+
+    ntfy names the reason in the response body (its own numeric code plus a
+    message), which is the piece that was being swallowed. The topic is never
+    echoed — it is the only access control on public ntfy.sh.
+    """
+    if not settings.ntfy_url:
+        return {"probe": "skipped", "reason": "NTFY_TOPIC is not set"}
+    out: dict = {"probe": "ran", "server": settings.ntfy_server}
+    try:
+        resp = httpx.post(
+            settings.ntfy_url,
+            content=b"probe from listings-analyzer",
+            timeout=10.0,
+        )
+        out["status_code"] = resp.status_code
+        out["response_body"] = (resp.text or "")[:400]
+        out["ok"] = resp.is_success
+    except Exception as e:
+        out["ok"] = False
+        out["exception_type"] = type(e).__name__
+        out["exception"] = str(e)[:400]
+    return out
+
+
 def notify_ntfy(listing: dict, score: int, verdict: str) -> bool:
     """Send a phone push via ntfy to the configured topic.
 
