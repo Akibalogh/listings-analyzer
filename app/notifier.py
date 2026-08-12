@@ -166,6 +166,12 @@ def _alert_link(listing: dict) -> str:
     return url
 
 
+def _redact_topic(text: str) -> str:
+    """Blank the ntfy topic out of text destined for a response or a log."""
+    topic = (settings.ntfy_topic or "").strip()
+    return text.replace(topic, "<redacted>") if topic else text
+
+
 def ntfy_probe() -> dict:
     """Publish a bare message to the configured topic and report the raw result.
 
@@ -202,7 +208,10 @@ def ntfy_probe() -> dict:
             timeout=10.0,
         )
         out["status_code"] = resp.status_code
-        out["response_body"] = (resp.text or "")[:400]
+        # ntfy echoes the topic in its success body. The topic is the only
+        # access control on public ntfy.sh, so it is redacted here for the same
+        # reason /health reports a fingerprint instead of the value.
+        out["response_body"] = _redact_topic((resp.text or "")[:400])
         out["ok"] = resp.is_success
     except Exception as e:
         out["ok"] = False
