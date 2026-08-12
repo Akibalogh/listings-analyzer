@@ -638,6 +638,7 @@ class TestNtfyProbe:
             s.ntfy_url = "https://ntfy.sh/topic"
             s.ntfy_server = "https://ntfy.sh"
             s.ntfy_token = ""
+            s.ntfy_topic = "topic"
             resp = MagicMock(status_code=429, text='{"code":42901,"error":"limit reached"}')
             resp.is_success = False
             with patch("app.notifier.httpx.post", return_value=resp):
@@ -782,3 +783,51 @@ class TestPushoverBacksNtfyUp:
                 out = send_high_score_alert(self.LISTING, 82, "Strong Match")
         assert out == {"ntfy": False, "pushover": False}
         assert not any(out.values())
+
+
+class TestProbeRedactsTheTopic:
+    """ntfy echoes the topic in its success body, so returning that body
+    verbatim leaked the topic back out — the one thing the probe was written
+    not to do. The topic is the only access control on public ntfy.sh.
+    """
+
+    NTFY_OK = ('{"id":"4Kdy9rguf02g","time":1786494177,"event":"message",'
+               '"topic":"fe2164f4d84d4a1a7e7acc9c964b23710800e0d896a863d2",'
+               '"message":"probe from listings-analyzer"}')
+
+    def _probe(self, body, status=200):
+        from unittest.mock import MagicMock, patch
+        from app.notifier import ntfy_probe
+        with patch("app.notifier.settings") as s:
+            s.ntfy_topic = "fe2164f4d84d4a1a7e7acc9c964b23710800e0d896a863d2"
+            s.ntfy_url = f"https://ntfy.sh/{s.ntfy_topic}"
+            s.ntfy_server = "https://ntfy.sh"
+            s.ntfy_token = ""
+            resp = MagicMock(status_code=status, text=body)
+            resp.is_success = status < 400
+            with patch("app.notifier.httpx.post", return_value=resp):
+                return ntfy_probe()
+
+    def test_topic_is_redacted_from_a_success_body(self):
+        out = self._probe(self.NTFY_OK)
+        assert "fe2164f4d84d4a1a7e7ac" not in out["response_body"]
+        assert "<redacted>" in out["response_body"]
+
+    def test_the_rest_of_the_body_survives(self):
+        """Redaction must not cost the diagnostic its value."""
+        out = self._probe(self.NTFY_OK)
+        assert "4Kdy9rguf02g" in out["response_body"]
+        assert out["ok"] is True
+
+    def test_error_bodies_are_still_readable(self):
+        err = '{"code":42908,"http":429,"error":"limit reached: daily message quota reached"}'
+        out = self._probe(err, status=429)
+        assert "42908" in out["response_body"]
+        assert "daily message quota" in out["response_body"]
+
+    def test_nothing_breaks_without_a_topic(self):
+        from app.notifier import _redact_topic
+        from unittest.mock import patch
+        with patch("app.notifier.settings") as s:
+            s.ntfy_topic = ""
+            assert _redact_topic("some body") == "some body"

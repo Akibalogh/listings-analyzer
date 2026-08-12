@@ -4,7 +4,49 @@ All notable changes to Listings Analyzer are documented here.
 
 ---
 
-## [Unreleased] — alerts say when the status is unknown
+## [Unreleased] — the push migration, and learning to tell delivery from silence
+
+ntfy is live and verified end to end. Getting there turned up a worse bug than
+the migration itself: nothing in the stack could tell a delivered alert from a
+rejected one.
+
+### Fixed
+- **`/manage/notify-test` reported success unconditionally.** `notify_ntfy`
+  caught every exception and returned `False`, `send_high_score_alert` discarded
+  that return value, and the endpoint answered `{"sent": true}` regardless — so
+  a publish ntfy rejected looked exactly like one that reached a phone.
+  `send_high_score_alert` now returns `{channel: delivered}` and the endpoint
+  reports it. An HTTP error logs ntfy's status and response body, where ntfy
+  names the reason.
+- **Alerts broadcast a bearer credential.** `listing_url` went straight into the
+  ntfy `Click` header and the Slack body; for OneHome listings that URL is 313
+  characters of base64 whose token decodes to the buyer's email, contact id,
+  agent id, and the saved search's id and key, with no login behind it. It can't
+  be trimmed — the listing id lives inside the token — so OneHome links are
+  replaced with the dashboard (`PUBLIC_BASE_URL`). Real listing links are kept.
+  21 of 124 listings were affected.
+- **Pushover backs ntfy up** instead of merely preceding it. Public ntfy.sh
+  meters anonymous publishes per visitor IP, which a Fly app shares with other
+  tenants, so the daily quota can be exhausted by strangers — HTTP 429, code
+  42908, on every publish for the rest of the day. That is what silenced the
+  first evening of alerts. The fallback only fires when ntfy actually failed, so
+  the healthy path still buzzes once.
+
+### Added
+- **`/health` reports a `push` block**: which channel is live, whether a token
+  is configured, and a SHA-256 prefix of the ntfy topic with flags for stray
+  whitespace or quotes. Compare the fingerprint against a phone's subscription
+  with `printf '%s' '<topic>' | shasum -a 256`. The topic is never echoed — it
+  is the only access control on public ntfy.sh — and neither is the token.
+- **`/manage/notify-test?probe=true`** publishes a bare message (no `Title`,
+  `Tags`, `Priority` or `Click`) and returns the raw status and body, isolating
+  a header fault from a network, topic or quota one. It does send
+  `Authorization`, which is not cosmetic: it decides whether the quota is metered
+  against your account or a shared IP, and omitting it made the probe report a
+  limit the real path would not hit. ntfy echoes the topic in its success body,
+  so the body is redacted before it is returned.
+
+## [Superseded] — alerts say when the status is unknown
 
 ### Added
 - **Push and Slack alerts now flag a missing listing status**: "$2,000,000 ·
