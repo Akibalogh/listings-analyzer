@@ -325,6 +325,11 @@ def _route_distance_m(route: dict) -> float | None:
 # wrong metro area, which is exactly how Harrison NY reached Harrison NJ.
 _MAX_STATION_DRIVE_MINUTES = 30
 
+# Station-to-Brookfield-Place transit. The furthest stations that matter here
+# (Katonah, Croton-Harmon, Elmsford) come in at 73-101 minutes; anything past
+# 120 means the origin resolved outside the region.
+_MAX_STATION_TRANSIT_MINUTES = 120
+
 
 def _station_coordinates(station_name: str) -> tuple[float, float] | None:
     """Coordinates for a Metro-North station by name, or None if unknown."""
@@ -431,7 +436,20 @@ def fetch_commute_time(
         )
         return None
 
-    station_transit = _routes_request(station_coords, destination, "TRANSIT", departure_time)
+    # TRANSIT starts from the station NAME, not the coordinates. The switch to
+    # latLng fixed the drive leg and regressed this one: Routes begins a
+    # transit route by walking from the given point to a stop, so a table
+    # coordinate off by a kilometre buys a fifteen-minute walk. Scarborough
+    # went 83 -> 97 minutes on the same station purely from that change, and
+    # Harrison came back 97 against New Rochelle's 67 two stops away.
+    #
+    # "Metro-North" is what makes the name safe now. The original bug was
+    # ambiguity — "Harrison train station, NY" reached the PATH station in
+    # Harrison, New Jersey — and PATH is not Metro-North. Naming the railroad
+    # and the town removes the collision without handing Routes a coordinate
+    # it will walk away from.
+    station_query = f"{station_town} Metro-North station, {station_town}, NY"
+    station_transit = _routes_request(station_query, destination, "TRANSIT", departure_time)
     if not station_transit:
         logger.warning(f"No transit route from {station_town} to {destination} for {origin}")
         return None
@@ -448,6 +466,17 @@ def fetch_commute_time(
 
     drive_secs = _parse_duration(drive_to_station)
     transit_secs = _parse_duration(station_transit)
+    # A transit leg longer than this from any Westchester station means the
+    # name resolved somewhere else. The furthest stations in this search area
+    # (Katonah, Croton-Harmon) run 73-101 minutes to Brookfield Place.
+    if transit_secs > _MAX_STATION_TRANSIT_MINUTES * 60:
+        logger.warning(
+            "Implausible %d-minute transit from %s — station name likely resolved "
+            "elsewhere; reporting no commute",
+            round(transit_secs / 60), station_town,
+        )
+        return None
+
     if drive_secs <= 0 or transit_secs <= 0:
         logger.warning(
             "Routes returned no usable duration for %s (drive=%ss transit=%ss) — "
