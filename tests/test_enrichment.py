@@ -2414,3 +2414,59 @@ class TestDurationParsing:
         from app.enrichment import _route_distance_m
         assert _route_distance_m({"distanceMeters": 40000}) == 40000.0
         assert _route_distance_m({}) is None
+
+
+class TestTransitUsesTheStationName:
+    """The latLng switch fixed the drive leg and regressed the transit leg.
+    Routes begins a transit route by walking from the given point to a stop, so
+    a table coordinate off by a kilometre buys a fifteen-minute walk:
+    Scarborough went 83 -> 97 minutes on the same station purely from that
+    change, and Harrison returned 97 against New Rochelle's 67 two stops away
+    on the same line. Drive uses coordinates; transit uses the name.
+    """
+
+    @staticmethod
+    def _capture(transit_secs="4980s", drive_secs="600s"):
+        from unittest.mock import patch
+        from app.enrichment import fetch_commute_time
+        seen = []
+        def routes(origin, dest, mode, dep=None, traffic_aware=False):
+            seen.append({"origin": origin, "mode": mode})
+            return {"duration": transit_secs if mode == "TRANSIT" else drive_secs}
+        with patch("app.enrichment.settings") as s:
+            s.google_maps_api_key = "k"
+            s.commute_destination = "Brookfield Place, New York"
+            with patch("app.enrichment._routes_request", side_effect=routes):
+                out = fetch_commute_time("6 Love Ln", "Harrison", "NY", "10528")
+        return out, seen
+
+    def test_transit_origin_is_a_name_not_coordinates(self):
+        _, seen = self._capture()
+        transit = next(c for c in seen if c["mode"] == "TRANSIT")
+        assert isinstance(transit["origin"], str)
+        assert "Harrison" in transit["origin"]
+
+    def test_transit_origin_names_the_railroad(self):
+        """PATH is not Metro-North — that word is what stops the NJ collision."""
+        _, seen = self._capture()
+        transit = next(c for c in seen if c["mode"] == "TRANSIT")
+        assert "Metro-North" in transit["origin"]
+
+    def test_drive_destination_is_still_coordinates(self):
+        """The drive leg is correct now and must stay on latLng."""
+        _, seen = self._capture()
+        drive = next(c for c in seen if c["mode"] == "DRIVE")
+        assert isinstance(drive["origin"], str)  # the house
+        # destination is the station tuple — assert via the successful result
+        out, _ = self._capture()
+        assert out["drive_minutes"] == 10
+
+    def test_implausible_transit_returns_none(self):
+        """Anything past two hours means the name resolved out of region."""
+        out, _ = self._capture(transit_secs="9000s")  # 150 min
+        assert out is None
+
+    def test_realistic_transit_is_kept(self):
+        out, _ = self._capture(transit_secs="4080s")  # 68 min, New Rochelle-ish
+        assert out["transit_minutes"] == 68
+        assert out["commute_minutes"] == 78
