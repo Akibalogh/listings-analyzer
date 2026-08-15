@@ -1046,6 +1046,22 @@ def update_score(
                  reasoning, property_summary, scored_at),
             )
 
+        # `notified` is a one-shot latch, so a listing alerted once never
+        # alerts again however its score moves. 38 Westerly Ln was alerted long
+        # ago, fell to 48 on a mis-resolved commute, came back to 72 when that
+        # was fixed, and pushed nothing — the buyer's phone had no way to learn
+        # a written-off house was live again.
+        #
+        # Clearing the latch on the way DOWN is what re-arms it. A listing must
+        # first fall below the threshold and then climb back, so an ordinary
+        # rescore that nudges scores around cannot produce a storm, and the
+        # existing claim_unnotified_high_scores() path does the rest.
+        if score.score < settings.notify_score_threshold:
+            cur.execute(
+                f"UPDATE listings SET notified = FALSE WHERE id = {ph} AND notified = TRUE",
+                (listing_id,),
+            )
+
 
 # --- Image management ---
 
