@@ -383,6 +383,32 @@ def _ingest_health(poll: dict, reveal_accounts: bool = False) -> dict:
     }
 
 
+def _hard_gate_health() -> dict | None:
+    """Every gated threshold, and whether the criteria prose still agrees.
+
+    deterministic_gate() skips the AI and emits confidence="high", so a
+    criteria edit that relaxes a requirement while the config keeps enforcing
+    the old one produces confidently wrong rejections. This is the alarm.
+    """
+    from app.scorer import hard_gate_drift
+
+    try:
+        criteria = db.get_active_criteria()
+        if not criteria:
+            return None
+        drift = hard_gate_drift(criteria["instructions"])
+    except Exception:
+        return None
+    if drift["drifted"]:
+        for name in drift["drifted"]:
+            c = drift["checks"][name]
+            logger.warning(
+                "HARD GATE DRIFT (%s): criteria say %s but config enforces %s — "
+                "the gate uses the config value", name, c["criteria"], c["config"],
+            )
+    return drift
+
+
 def _push_health() -> dict:
     """Which push channel is live, and a fingerprint of the ntfy topic.
 
@@ -436,6 +462,7 @@ def health(request: Request):
         "poll": poll,
         "ingest": _ingest_health(poll, reveal_accounts=signed_in),
         "commute_gate": commute_gate,
+        "hard_gates": _hard_gate_health(),
         "push": _push_health(),
     }
 

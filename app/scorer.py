@@ -61,6 +61,60 @@ def commute_gate_drift(instructions: str) -> dict:
     }
 
 
+# The rest of the gated thresholds, parsed out of the criteria prose the same
+# way. deterministic_gate() enforces the config values and skips the AI
+# entirely, emitting confidence="high" — so a criteria edit that relaxes a
+# requirement while the config still enforces the old one produces confidently
+# wrong rejections with nothing to notice them. These parsers exist only to
+# raise that alarm; enforcement always reads settings, never prose.
+_CRITERIA_PRICE_BAND_RE = re.compile(
+    r"price\s+between\s+\$?([\d,]+)\s*(?:and|-|–|to)\s*\$?([\d,]+)", re.IGNORECASE)
+_CRITERIA_MIN_SQFT_RE = re.compile(r"minimum\s+([\d,]{3,})\s*sq\.?\s?ft", re.IGNORECASE)
+_CRITERIA_MIN_BEDS_RE = re.compile(r"minimum\s+(\d{1,2})\s+bedrooms?", re.IGNORECASE)
+_CRITERIA_SCHOOL_FLOOR_RE = re.compile(
+    r"below\s+(\d{1,2})(?:st|nd|rd|th)\s+percentile", re.IGNORECASE)
+
+
+def _first_int(pattern: re.Pattern, text: str, group: int = 1) -> int | None:
+    m = pattern.search(text or "")
+    if not m:
+        return None
+    try:
+        return int(m.group(group).replace(",", ""))
+    except (ValueError, AttributeError):
+        return None
+
+
+def hard_gate_drift(instructions: str) -> dict:
+    """Report every gated threshold where the criteria prose and config disagree.
+
+    A threshold the prose does not state is reported as None and counts as in
+    sync: a criteria rewrite that drops the wording should raise a parser
+    warning, not silently flip enforcement.
+    """
+    text = instructions or ""
+    price_lo = _first_int(_CRITERIA_PRICE_BAND_RE, text, 1)
+    price_hi = _first_int(_CRITERIA_PRICE_BAND_RE, text, 2)
+    checks = {
+        "commute_minutes": (criteria_commute_limit(text), settings.commute_hard_limit_minutes),
+        "price_min": (price_lo, settings.price_min_dollars),
+        "price_max": (price_hi, settings.price_max_dollars),
+        "min_sqft": (_first_int(_CRITERIA_MIN_SQFT_RE, text), settings.min_sqft),
+        "min_bedrooms": (_first_int(_CRITERIA_MIN_BEDS_RE, text), settings.min_bedrooms),
+        "min_school_percentile": (
+            _first_int(_CRITERIA_SCHOOL_FLOOR_RE, text), settings.min_school_percentile),
+    }
+    out, drifted = {}, []
+    for name, (criteria_value, config_value) in checks.items():
+        in_sync = criteria_value is None or criteria_value == config_value
+        out[name] = {
+            "criteria": criteria_value, "config": config_value, "in_sync": in_sync,
+        }
+        if not in_sync:
+            drifted.append(name)
+    return {"checks": out, "drifted": drifted, "in_sync": not drifted}
+
+
 def _verdict_for_score(score: int) -> str:
     """The verdict a score implies, mirroring _validate_ai_response's ladder."""
     if score >= 80:
