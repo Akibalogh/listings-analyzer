@@ -3483,6 +3483,73 @@ def manage_prune_sold(request: Request):
     return _prune_sold_listings(fix=fix)
 
 
+@app.get("/manage/scoring-integrity")
+def manage_scoring_integrity(request: Request):
+    """Count hard failures whose own reason admits they are not failures.
+
+    The telemetry existed and went nowhere: log_self_contradicting_failures()
+    wrote a warning and returned a number nobody read, so the early-warning
+    signal for the next relocation of this pattern was write-only.
+
+    Scanning stored scores instead of counting at write time makes this work
+    retroactively, over history the write path never saw, and costs nothing
+    until asked. It is deliberately NOT on /health, which the dashboard polls.
+
+    Two sections:
+      - contradictions: a failure whose reason concedes the point
+        ("triggering a -20 point penalty", "this is not a failure on the
+        minimum", "technically passes")
+      - unconfirmable_rejects: a live Reject that invalid_reject() would
+        withdraw today. Should be zero; anything here means a listing is
+        sitting at zero on grounds code cannot confirm.
+    """
+    key = request.headers.get("x-manage-key", "")
+    if not (settings.manage_key and key == settings.manage_key):
+        raise HTTPException(status_code=403, detail="Invalid or missing management key")
+
+    from app.models import HardResult, ScoringResult
+    from app.scorer import _SELF_CONTRADICTING_REASON, deterministic_gate, invalid_reject
+
+    contradictions, unconfirmable = [], []
+    scored = 0
+    for l in db.get_all_listings():
+        try:
+            hard = json.loads(l.get("hard_results_json") or "[]")
+        except (json.JSONDecodeError, TypeError):
+            continue
+        scored += 1
+        for h in hard:
+            if h.get("passed") is False and _SELF_CONTRADICTING_REASON.search(h.get("reason") or ""):
+                contradictions.append({
+                    "id": l["id"], "address": l.get("address"), "score": l.get("score"),
+                    "criterion": h.get("criterion"), "reason": (h.get("reason") or "")[:220],
+                })
+        if l.get("verdict") == "Reject":
+            data = _build_listing_data(l)
+            if deterministic_gate(data) is None:
+                result = ScoringResult(
+                    score=0, verdict="Reject",
+                    hard_results=[HardResult(
+                        criterion=str(h.get("criterion") or ""), passed=h.get("passed"),
+                    ) for h in hard],
+                )
+                if invalid_reject(result, data):
+                    unconfirmable.append({
+                        "id": l["id"], "address": l.get("address"),
+                        "grounds": [h.get("criterion") for h in hard if h.get("passed") is False]
+                                   or ["no stated failure"],
+                    })
+
+    return {
+        "listings_scored": scored,
+        "contradiction_count": len(contradictions),
+        "contradiction_rate": round(len(contradictions) / scored, 4) if scored else 0,
+        "contradictions": contradictions[:25],
+        "unconfirmable_reject_count": len(unconfirmable),
+        "unconfirmable_rejects": unconfirmable[:25],
+    }
+
+
 @app.post("/manage/data-quality")
 def manage_data_quality(request: Request):
     """Audit and optionally fix listings with missing address or URL.

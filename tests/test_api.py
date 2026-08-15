@@ -1,5 +1,6 @@
 """Tests for API endpoints: scrape, reprocess, criteria, images."""
 
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -2189,3 +2190,87 @@ class TestBackfillPrefersTheSubject:
         assert upd.call_count == 2
         assert {c.kwargs["listing_status"] for c in upd.call_args_list} == {"Sold", "Pending"}
         assert body["applied"] is True
+
+
+class TestScoringIntegrityEndpoint:
+    """log_self_contradicting_failures() wrote a warning and returned a number
+    nobody read — the early-warning signal for the next relocation of the
+    fabrication pattern was write-only. This reads stored scores instead, so it
+    works retroactively over history the write path never saw.
+    """
+
+    ROWS = [
+        {  # the 29 Appleby confession, verbatim
+            "id": 1, "address": "29 Appleby Dr", "score": 0, "verdict": "Reject",
+            "commute_minutes": 108, "state": "NY",
+            "hard_results_json": json.dumps([{
+                "criterion": "School District Quality (Primary Driver)", "passed": False,
+                "reason": "Middle School at 75th percentile falls into the 50-79th range "
+                          "(mediocre), triggering a -20 point penalty."}]),
+        },
+        {  # sound reject: schools genuinely below the floor
+            "id": 2, "address": "54 Hillside Avenue", "score": 0, "verdict": "Reject",
+            "commute_minutes": 103, "state": "NY",
+            "school_data_json": json.dumps({"elementary": [
+                {"name": "Mount Kisco", "rank_percentile": 22.0}]}),
+            "hard_results_json": json.dumps([{
+                "criterion": "School District Quality", "passed": False,
+                "reason": "22nd percentile is below the 50th — weak district, near-dealbreaker."}]),
+        },
+        {  # healthy listing
+            "id": 3, "address": "107 Stephenson Terrace", "score": 78,
+            "verdict": "Worth Touring", "commute_minutes": 85, "state": "NY",
+            "hard_results_json": json.dumps([{
+                "criterion": "Minimum 2,200 sqft", "passed": True, "reason": "3,375 sqft."}]),
+        },
+    ]
+
+    def _run(self, rows=None):
+        from unittest.mock import patch
+        rows = self.ROWS if rows is None else rows  # [] is a real input here
+        with patch("app.main.db.get_all_listings", return_value=rows), \
+             patch("app.main.settings") as s:
+            s.manage_key = "k"
+            s.commute_hard_limit_minutes = 110
+            s.price_min_dollars, s.price_max_dollars = 850_000, 2_250_000
+            s.min_sqft, s.min_bedrooms, s.min_school_percentile = 2200, 3, 50
+            r = TestClient(app).get("/manage/scoring-integrity", headers={"x-manage-key": "k"})
+        return r.json()
+
+    def test_counts_the_confession(self):
+        body = self._run()
+        assert body["contradiction_count"] == 1
+        assert body["contradictions"][0]["address"] == "29 Appleby Dr"
+
+    def test_does_not_flag_a_sound_reject(self):
+        """"22nd percentile is below the 50th" is a real failure, not a confession."""
+        addresses = {c["address"] for c in self._run()["contradictions"]}
+        assert "54 Hillside Avenue" not in addresses
+
+    def test_ignores_passing_criteria(self):
+        assert "107 Stephenson Terrace" not in {
+            c["address"] for c in self._run()["contradictions"]}
+
+    def test_reports_a_rate_against_listings_scored(self):
+        body = self._run()
+        assert body["listings_scored"] == 3
+        assert body["contradiction_rate"] == round(1 / 3, 4)
+
+    def test_flags_a_reject_code_cannot_confirm(self):
+        """29 Appleby's only ground is a school failure above the floor — with
+        no school data to confirm it, the reject would be withdrawn today."""
+        assert self._run()["unconfirmable_reject_count"] >= 1
+
+    def test_a_confirmed_reject_is_not_flagged(self):
+        addresses = {u["address"] for u in self._run()["unconfirmable_rejects"]}
+        assert "54 Hillside Avenue" not in addresses
+
+    def test_empty_database_does_not_divide_by_zero(self):
+        body = self._run(rows=[])
+        assert body["listings_scored"] == 0 and body["contradiction_rate"] == 0
+
+    def test_requires_the_manage_key(self):
+        from unittest.mock import patch
+        with patch("app.main.settings") as s:
+            s.manage_key = "k"
+            assert TestClient(app).get("/manage/scoring-integrity").status_code == 403
