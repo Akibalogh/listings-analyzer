@@ -3743,10 +3743,13 @@ def manage_invalidate_bad_commutes(request: Request):
     number freezes permanently. Two signals, either of which condemns a row:
 
     1. drive_minutes over the plausible cap — no local station is that far.
-    2. commute_data.station disagreeing with station_json.station — the cheap
-       cross-check, and the one that finds mis-resolutions whose totals happen
-       to look sane. That is exactly how these hid: a 62-minute "drive" plus a
-       14-minute "transit" sums to a believable 76.
+    A station-name cross-check was tried and abandoned: station_json holds the
+    nearest station by straight-line distance while the commute uses the town's
+    own station via _STATION_OVERRIDES, so they legitimately differ. It flagged
+    51 rows, nearly all sound — "Croton-On-Hudson" against nearest
+    "Croton-Harmon" is the same station under two names, and Chappaqua against
+    nearest Mount Kisco is simply the buyer using their own town's stop. The
+    mismatches are still reported, as information, but they do not condemn.
 
     Dry run by default. Cleared rows are re-enriched on the next pass, which
     starts a rescore of what changed.
@@ -3758,7 +3761,8 @@ def manage_invalidate_bad_commutes(request: Request):
     from app.enrichment import _MAX_STATION_DRIVE_MINUTES
 
     apply = request.query_params.get("apply", "").lower() == "true"
-    suspect = []
+    suspect: list[dict] = []
+    mismatches: list[dict] = []
     for l in db.get_all_listings():
         if l.get("commute_minutes") is None:
             continue
@@ -3768,16 +3772,17 @@ def manage_invalidate_bad_commutes(request: Request):
         except (json.JSONDecodeError, TypeError):
             continue
         drive = commute.get("drive_minutes")
+        named = (commute.get("station") or "").lower()
+        nearest = (proximity.get("station") or "").lower()
+        if named and nearest and nearest not in named:
+            mismatches.append({
+                "id": l["id"], "address": l.get("address"),
+                "commute_station": commute.get("station"),
+                "nearest_station": proximity.get("station"),
+            })
         reason = None
         if drive is not None and drive > _MAX_STATION_DRIVE_MINUTES:
             reason = f"drive {drive} min exceeds the {_MAX_STATION_DRIVE_MINUTES} min cap"
-        else:
-            named = (commute.get("station") or "").lower()
-            nearest = (proximity.get("station") or "").lower()
-            # The old code stored "Harrison train station, NY" where proximity
-            # stored "Harrison", so compare by containment rather than equality.
-            if named and nearest and nearest not in named:
-                reason = f"station {commute.get('station')!r} != nearest {proximity.get('station')!r}"
         if reason:
             suspect.append({
                 "id": l["id"], "address": l.get("address"), "town": l.get("town"),
@@ -3792,7 +3797,13 @@ def manage_invalidate_bad_commutes(request: Request):
             )
         logger.info("Invalidated %d mis-resolved commutes", len(suspect))
 
-    return {"suspect": len(suspect), "applied": apply, "listings": suspect}
+    return {
+        "suspect": len(suspect),
+        "applied": apply,
+        "listings": suspect,
+        "station_name_mismatches": len(mismatches),
+        "mismatch_sample": mismatches[:10],
+    }
 
 
 @app.post("/manage/backfill-status")
