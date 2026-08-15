@@ -2290,3 +2290,127 @@ class TestLotCharacteristicsDetection:
         assert result["lot_size_indicator"] is None
         assert result["lot_count"] is None
         assert result["corner_lot"] is False
+
+
+class TestStationResolvedByCoordinates:
+    """Station names travelled to Google Routes as free text, and Routes
+    resolved them wherever it liked. "Harrison train station, NY" reached the
+    PATH station in Harrison, NEW JERSEY: a 51-minute drive to a station the
+    listing's own OSM data put 2,289 m away, plus a 32-minute PATH leg.
+    Briarcliff Manor's "Scarborough train station, New York" did the same —
+    62 min drive, 14 min transit. Both totals looked plausible because the two
+    errors cancelled, which is why it survived for months.
+    """
+
+    def test_every_override_resolves_to_coordinates(self):
+        """A referenced station missing from the table falls back silently.
+        Purdy's was in _STATION_OVERRIDES and absent from the table."""
+        from app.enrichment import _STATION_OVERRIDES, _station_coordinates
+        missing = [t for t, st in _STATION_OVERRIDES.items() if not _station_coordinates(st)]
+        assert missing == [], f"overrides with no coordinates: {missing}"
+
+    def test_known_stations_resolve(self):
+        from app.enrichment import _station_coordinates
+        lat, lon = _station_coordinates("Scarborough")
+        assert 41.0 < lat < 41.2 and -74.0 < lon < -73.7
+        assert _station_coordinates("Nowhere Junction") is None
+        assert _station_coordinates("") is None
+
+    def test_coordinates_travel_as_latlng_not_text(self):
+        from app.enrichment import _waypoint
+        wp = _waypoint((41.0992, -73.8634))
+        assert wp["location"]["latLng"] == {"latitude": 41.0992, "longitude": -73.8634}
+        assert "address" not in wp
+
+    def test_addresses_still_travel_as_text(self):
+        from app.enrichment import _waypoint
+        assert _waypoint("107 Stephenson Terrace, Briarcliff Manor")["address"].startswith("107")
+
+
+class TestCommuteGuards:
+    """A wrong-and-low commute is the dangerous direction: it makes a distant
+    house look near, and commute is the buyer's top criterion. Every guard
+    returns None — unknown never gates, and None stays eligible for re-enrich,
+    while a fabricated number freezes into the database.
+    """
+
+    @staticmethod
+    def _fetch(monkey):
+        from unittest.mock import patch
+        from app.enrichment import fetch_commute_time
+        with patch("app.enrichment.settings") as s:
+            s.google_maps_api_key = "k"
+            s.commute_destination = "Brookfield Place, New York"
+            with patch("app.enrichment._routes_request", side_effect=monkey):
+                return fetch_commute_time("6 Love Ln", "Harrison", "NY", "10528")
+
+    def test_implausible_drive_returns_none(self):
+        """The Harrison NJ signature: 51 minutes to a station 2.3 km away."""
+        def routes(origin, dest, mode, dep=None, traffic_aware=False):
+            return {"duration": "1920s"} if mode == "TRANSIT" else {"duration": "3060s"}
+        assert self._fetch(routes) is None
+
+    def test_plausible_drive_is_kept(self):
+        def routes(origin, dest, mode, dep=None, traffic_aware=False):
+            return {"duration": "3600s"} if mode == "TRANSIT" else {"duration": "300s"}
+        out = self._fetch(routes)
+        assert out["drive_minutes"] == 5 and out["transit_minutes"] == 60
+        assert out["commute_minutes"] == 65
+        assert out["station"] == "Harrison"
+
+    def test_zero_duration_is_failure_not_a_zero_minute_leg(self):
+        """int("0s".rstrip("s")) == 0 used to read as a real zero-minute drive."""
+        def routes(origin, dest, mode, dep=None, traffic_aware=False):
+            return {"duration": "3600s"} if mode == "TRANSIT" else {}
+        assert self._fetch(routes) is None
+
+    def test_road_distance_far_exceeding_straight_line_returns_none(self):
+        from unittest.mock import patch
+        def routes(origin, dest, mode, dep=None, traffic_aware=False):
+            if mode == "TRANSIT":
+                return {"duration": "1920s"}
+            return {"duration": "900s", "distanceMeters": 40000}  # 40 km road
+        with patch("app.enrichment._geocode_address",
+                   return_value={"lat": 40.9695, "lon": -73.7129}):  # ~1 km away
+            assert self._fetch(routes) is None
+
+    def test_unknown_station_returns_none(self):
+        from unittest.mock import patch
+        from app.enrichment import fetch_commute_time
+        with patch("app.enrichment.settings") as s:
+            s.google_maps_api_key = "k"
+            s.commute_destination = "Brookfield Place, New York"
+            with patch("app.enrichment._station_coordinates", return_value=None):
+                assert fetch_commute_time("1 A St", "Atlantis", "NY", "10000") is None
+
+    def test_drive_leg_is_traffic_aware(self):
+        """v74 keys its penalty to 9/13/18-minute boundaries, so free-flow
+        timings bias drive_minutes low — across tiers, flatteringly."""
+        seen = {}
+        def routes(origin, dest, mode, dep=None, traffic_aware=False):
+            seen[mode] = {"departure": dep, "traffic_aware": traffic_aware}
+            return {"duration": "3600s"} if mode == "TRANSIT" else {"duration": "300s"}
+        self._fetch(routes)
+        assert seen["DRIVE"]["traffic_aware"] is True
+        assert seen["DRIVE"]["departure"] is not None
+
+
+class TestDurationParsing:
+    def test_missing_duration_is_zero_not_a_crash(self):
+        from app.enrichment import _parse_duration
+        assert _parse_duration({}) == 0
+        assert _parse_duration({"duration": None}) == 0
+
+    def test_fractional_seconds_parse(self):
+        """int("123.5s".rstrip("s")) raised ValueError."""
+        from app.enrichment import _parse_duration
+        assert _parse_duration({"duration": "123.5s"}) == 124
+
+    def test_garbage_is_zero_not_a_crash(self):
+        from app.enrichment import _parse_duration
+        assert _parse_duration({"duration": "soon"}) == 0
+
+    def test_distance_is_read_when_present(self):
+        from app.enrichment import _route_distance_m
+        assert _route_distance_m({"distanceMeters": 40000}) == 40000.0
+        assert _route_distance_m({}) is None
