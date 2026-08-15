@@ -1599,10 +1599,17 @@ class TestEvidenceDecidesTheUnknownBand:
         assert "NOT BY YOUR JUDGEMENT" in prompt
 
     def test_prompt_exempts_evidenceless_listings(self):
-        """A thin alert email is not evidence against a house."""
+        """A thin alert email is not evidence against a house.
+
+        The rule used to say "score 60-75 regardless", which was a triage claim
+        wearing merit clothing — and it lost anyway, because the model routed
+        the uncertainty through soft_points instead. It now says absence of
+        evidence is worth zero POINTS, which binds in either channel.
+        """
         prompt = _build_system_prompt()[0]["text"]
-        assert "NO MATTER HOW MANY criteria are" in prompt
-        assert "The 30-50 band does NOT apply here" in prompt
+        assert "ABSENCE OF EVIDENCE IS WORTH ZERO POINTS" in prompt
+        assert "NOT in soft_points either" in prompt
+        assert "evidence of absence is merit" in prompt
 
     def test_prompt_keeps_the_harsh_band_for_seen_but_unconfirmed(self):
         prompt = _build_system_prompt()[0]["text"]
@@ -1710,3 +1717,71 @@ class TestPenaltyFlagsAreDemoted:
         section = prompt[i:i + 1800]
         assert "Confirmed small basement: passed: true" in section
         assert "passed: false, reason: \"Basement present but small/cramped\"" not in section
+
+
+class TestUncertaintyPenaltyTelemetry:
+    """The relocation watch. The fabrication has moved four times — commute,
+    then price and sqft, then schools, then soft_points — and each time it
+    surfaced as a number nobody was measuring. 00 Worth Pl carried -41 points
+    of uncertainty deductions against -16 of real factors, on a listing with
+    no images and no description.
+
+    Key matching is a string heuristic on model-authored names, so this never
+    changes a score — a tripwire, not a rule.
+    """
+
+    @staticmethod
+    def _count(soft_points, images=0, description=False):
+        from app.models import ScoringResult
+        from app.scorer import log_uncertainty_penalties
+        return log_uncertainty_penalties(
+            ScoringResult(score=42, verdict="Low Priority", soft_points=soft_points),
+            {"evidence_available": {"images": images, "description": description}},
+        )
+
+    def test_counts_the_worth_pl_ledger(self):
+        assert self._count({
+            "school_district_unknown": -15, "commute_85_90_min": -12,
+            "lot_size_unknown": -5, "basement_unknown": -5,
+            "ground_floor_bedroom_unknown": -5, "overall_layout_unconfirmed": -8,
+        }) == -38  # the uncertainty entries only; the real commute penalty is left alone
+
+    def test_real_penalties_are_not_counted(self):
+        assert self._count({"commute_95_100_min": -28, "power_line_proximity": -10}) == 0
+
+    def test_silent_when_evidence_exists(self):
+        """With images, an unconfirmed feature is a real deduction — band A."""
+        assert self._count({"basement_unknown": -15}, images=12) == 0
+        assert self._count({"basement_unknown": -15}, description=True) == 0
+
+    def test_positive_points_are_not_counted(self):
+        assert self._count({"unknown_bonus": 5}) == 0
+
+    def test_it_never_changes_the_result(self):
+        from app.models import ScoringResult
+        from app.scorer import log_uncertainty_penalties
+        r = ScoringResult(score=42, verdict="Low Priority",
+                          soft_points={"lot_size_unknown": -5})
+        before = r.model_dump()
+        log_uncertainty_penalties(r, {"evidence_available": {"images": 0, "description": False}})
+        assert r.model_dump() == before
+
+
+class TestUnrankedSchoolsAreMissingData:
+    """00 Worth Pl listed Hawthorne Elementary and Linden Hill High with
+    rank_percentile null for both, and was docked 15 points for
+    "school_district_unknown" — the model arguing, not unreasonably, that
+    school data was not strictly missing. Names without rankings are nothing
+    to judge.
+    """
+
+    def test_prompt_treats_unranked_as_missing(self):
+        prompt = _build_system_prompt()[0]["text"]
+        assert "no usable\n  rank_percentile" in prompt
+        assert "Names without rankings are nothing to judge" in prompt
+
+    def test_percentile_helper_already_agrees(self):
+        """best_elementary_percentile() has always returned None for unranked."""
+        from app.scorer import best_elementary_percentile
+        assert best_elementary_percentile({"school_data": {"elementary": [
+            {"name": "Hawthorne Elementary School", "rank_percentile": None}]}}) is None
