@@ -243,11 +243,25 @@ def _next_weekday_8am() -> datetime:
     return target.astimezone(timezone.utc)
 
 
+def _waypoint(place: str | tuple[float, float]) -> dict:
+    """A Routes waypoint: exact coordinates when we have them, else an address.
+
+    Station names must never travel as free text. "Harrison train station, NY"
+    resolved to the PATH station in Harrison, NEW JERSEY — a 51-minute drive
+    from a house whose own data put the real station 2.3 km away.
+    """
+    if isinstance(place, tuple):
+        lat, lon = place
+        return {"location": {"latLng": {"latitude": lat, "longitude": lon}}}
+    return {"address": place}
+
+
 def _routes_request(
-    origin: str,
-    destination: str,
+    origin: str | tuple[float, float],
+    destination: str | tuple[float, float],
     travel_mode: str,
     departure_time: datetime | None = None,
+    traffic_aware: bool = False,
 ) -> dict | None:
     """Make a single Google Routes API request. Returns parsed JSON or None."""
     headers = {
@@ -256,11 +270,13 @@ def _routes_request(
         "X-Goog-FieldMask": "routes.duration,routes.distanceMeters",
     }
     body: dict = {
-        "origin": {"address": origin},
-        "destination": {"address": destination},
+        "origin": _waypoint(origin),
+        "destination": _waypoint(destination),
         "travelMode": travel_mode,
         "computeAlternativeRoutes": False,
     }
+    if traffic_aware and travel_mode == "DRIVE":
+        body["routingPreference"] = "TRAFFIC_AWARE"
     if departure_time:
         body["departureTime"] = departure_time.strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -279,8 +295,46 @@ def _routes_request(
 
 
 def _parse_duration(route: dict) -> int:
-    """Extract duration in seconds from a Routes API route dict."""
-    return int(route.get("duration", "0s").rstrip("s"))
+    """Duration in seconds from a Routes route dict; 0 when absent or unparseable.
+
+    A missing duration used to yield int("0s".rstrip("s")) == 0, which reads
+    downstream as a genuine zero-minute leg — a wrong-and-LOW value, the
+    dangerous direction, since it makes a distant house look close. Callers
+    must treat 0 as failure. Fractional seconds ("123.5s") raised on int().
+    """
+    raw = str(route.get("duration", "") or "").rstrip("s")
+    if not raw:
+        return 0
+    try:
+        return round(float(raw))
+    except ValueError:
+        return 0
+
+
+def _route_distance_m(route: dict) -> float | None:
+    """Road distance in metres, when the API returned it."""
+    try:
+        return float(route["distanceMeters"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+# A drive to a local Metro-North station. Mahopac→Katonah and North Salem→
+# Purdy's are the longest legitimate hops in this search area at ~15-20 min;
+# nothing real exceeds ~25. Anything past 30 means the station resolved to the
+# wrong metro area, which is exactly how Harrison NY reached Harrison NJ.
+_MAX_STATION_DRIVE_MINUTES = 30
+
+
+def _station_coordinates(station_name: str) -> tuple[float, float] | None:
+    """Coordinates for a Metro-North station by name, or None if unknown."""
+    target = (station_name or "").strip().lower()
+    if not target:
+        return None
+    for st in _METRO_NORTH_STATIONS:
+        if st["name"].lower() == target:
+            return (st["lat"], st["lon"])
+    return None
 
 
 # Towns whose nearest Metro-North station has a different name
@@ -328,13 +382,22 @@ def fetch_commute_time(
 ) -> dict | None:
     """Fetch commute time to configured destination via Google Routes API.
 
-    Tries both strategies and returns the shorter commute:
-    1. TRANSIT from address (walking access to station)
-    2. Drive-to-station hybrid: DRIVE to nearest train station + TRANSIT
-       from station to destination (typical for suburban Westchester)
+    Drive to the nearest Metro-North station, then transit to the destination.
+    The buyer drives and parks; criteria v74 is explicit that walking distance
+    to the station is irrelevant, so a plain TRANSIT route from the address
+    would inject access legs they will never use and inflate every commute.
 
-    Returns dict with keys: commute_minutes, commute_mode ("transit"|"drive+transit"),
-    departure_time, route_duration_seconds — or None on failure/missing config.
+    (An earlier docstring claimed this tried a direct-TRANSIT strategy too and
+    took the shorter of the two. It never did — there was only ever one pair of
+    requests. Min-of-two would also reintroduce a wrong-and-low channel via
+    optimistic walk-to-station routings, so the claim is removed rather than
+    implemented.)
+
+    Returns dict with keys: commute_minutes, commute_mode, departure_time,
+    route_duration_seconds, drive_minutes, transit_minutes, station — or None
+    on failure, on missing config, or when the station cannot be resolved
+    plausibly. None is deliberate: unknown never gates, while a wrong-and-low
+    number makes a distant house look near.
     """
     if not settings.google_maps_api_key:
         logger.debug("Google Maps API key not configured, skipping commute")
@@ -352,25 +415,76 @@ def fetch_commute_time(
     origin = f"{address}, {town}, {state or ''} {zip_code or ''}".strip()
     departure_time = _next_weekday_8am()
 
-    # Drive to nearest Metro-North station + transit to destination
+    # Resolve the station to COORDINATES. Passing its name as free text is
+    # what broke this: "Harrison train station, NY" resolved to the PATH
+    # station in Harrison, NEW JERSEY, producing a 51-minute drive to a
+    # station 2.3 km away, and a 32-minute "transit" leg from New Jersey.
+    # Briarcliff Manor's "Scarborough train station, New York" went the same
+    # way — 62 min drive, 14 min transit. Both totals looked plausible because
+    # the two errors cancelled, which is why nothing caught them for months.
     station_town = _STATION_OVERRIDES.get(town.lower(), town)
-    station = f"{station_town} train station, {state or 'NY'}"
-    station_transit = _routes_request(station, destination, "TRANSIT", departure_time)
-    if not station_transit:
-        logger.warning(f"No transit route from {station} to {destination} for {origin}")
+    station_coords = _station_coordinates(station_town)
+    if not station_coords:
+        logger.warning(
+            "No coordinates for station %r (town %r) — skipping commute rather "
+            "than guessing", station_town, town,
+        )
         return None
 
-    drive_to_station = _routes_request(origin, station, "DRIVE")
+    station_transit = _routes_request(station_coords, destination, "TRANSIT", departure_time)
+    if not station_transit:
+        logger.warning(f"No transit route from {station_town} to {destination} for {origin}")
+        return None
+
+    # Rush-hour, not free-flow: the buyer drives at 8am, and v74 keys its
+    # station penalty to 9/13/18-minute boundaries, so free-flow timings bias
+    # drive_minutes LOW — across tiers, in the flattering direction.
+    drive_to_station = _routes_request(
+        origin, station_coords, "DRIVE", departure_time, traffic_aware=True,
+    )
     if not drive_to_station:
-        logger.warning(f"No drive route from {origin} to {station}")
+        logger.warning(f"No drive route from {origin} to {station_town}")
         return None
 
     drive_secs = _parse_duration(drive_to_station)
     transit_secs = _parse_duration(station_transit)
+    if drive_secs <= 0 or transit_secs <= 0:
+        logger.warning(
+            "Routes returned no usable duration for %s (drive=%ss transit=%ss) — "
+            "reporting no commute rather than a zero leg", origin, drive_secs, transit_secs,
+        )
+        return None
+
+    drive_minutes = round(drive_secs / 60)
+    if drive_minutes > _MAX_STATION_DRIVE_MINUTES:
+        logger.warning(
+            "Implausible %d-minute drive from %s to %s — station almost certainly "
+            "resolved to the wrong place; reporting no commute",
+            drive_minutes, origin, station_town,
+        )
+        return None
+
+    # Road distance far exceeding the straight line is the strong signal: no
+    # legitimate route is 3x the crow flies at these scales, and it is immune
+    # to traffic noise in a way a time threshold is not.
+    road_m = _route_distance_m(drive_to_station)
+    home = _geocode_address(address, town, state)
+    if road_m and home:
+        straight_m = _haversine_m(
+            home["lat"], home["lon"], station_coords[0], station_coords[1],
+        )
+        if straight_m > 0 and road_m > max(3 * straight_m, 5000):
+            logger.warning(
+                "Drive to %s is %.1f km by road but %.1f km straight-line from %s — "
+                "station mis-resolved; reporting no commute",
+                station_town, road_m / 1000, straight_m / 1000, origin,
+            )
+            return None
+
     total_seconds = drive_secs + transit_secs
     commute_minutes = round(total_seconds / 60)
     logger.info(
-        f"Commute (drive+transit): {origin} → {station} ({round(drive_secs/60)} min drive) "
+        f"Commute (drive+transit): {origin} → {station_town} ({drive_minutes} min drive) "
         f"→ {destination} ({round(transit_secs/60)} min transit) = {commute_minutes} min total"
     )
     return {
@@ -378,9 +492,11 @@ def fetch_commute_time(
         "commute_mode": "drive+transit",
         "departure_time": departure_time.isoformat(),
         "route_duration_seconds": total_seconds,
-        "drive_minutes": round(drive_secs / 60),
+        "drive_minutes": drive_minutes,
         "transit_minutes": round(transit_secs / 60),
-        "station": station,
+        # The canonical station name, so this and station_json finally speak the
+        # same vocabulary and a mismatch between them is detectable.
+        "station": station_town,
     }
 
 
@@ -615,6 +731,10 @@ def get_price_per_sqft_signal(
 _METRO_NORTH_STATIONS: list[dict] = [
     {"name": "Ardsley-on-Hudson", "lat": 41.0270084, "lon": -73.876681},
     {"name": "Bedford Hills", "lat": 41.2371203, "lon": -73.6969658},
+    # Referenced by _STATION_OVERRIDES["north salem"] but missing from this
+    # table, so North Salem silently lost its station lookup.
+    {"name": "Purdy's", "lat": 41.3269, "lon": -73.6669},
+    {"name": "Croton Falls", "lat": 41.3487, "lon": -73.6690},
     {"name": "Branchville", "lat": 41.1009, "lon": -73.4886},
     {"name": "Bronxville", "lat": 40.9388, "lon": -73.8333},
     {"name": "Cannondale", "lat": 41.1919, "lon": -73.4197},

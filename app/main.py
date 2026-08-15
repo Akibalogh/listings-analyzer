@@ -3735,6 +3735,66 @@ def manage_image_audit(request: Request):
     }
 
 
+@app.post("/manage/invalidate-bad-commutes")
+def manage_invalidate_bad_commutes(request: Request):
+    """Clear commute data that a mis-resolved station produced.
+
+    Both enrich paths only fetch when commute_minutes IS NULL, so a wrong
+    number freezes permanently. Two signals, either of which condemns a row:
+
+    1. drive_minutes over the plausible cap — no local station is that far.
+    2. commute_data.station disagreeing with station_json.station — the cheap
+       cross-check, and the one that finds mis-resolutions whose totals happen
+       to look sane. That is exactly how these hid: a 62-minute "drive" plus a
+       14-minute "transit" sums to a believable 76.
+
+    Dry run by default. Cleared rows are re-enriched on the next pass, which
+    starts a rescore of what changed.
+    """
+    key = request.headers.get("x-manage-key", "")
+    if not (settings.manage_key and key == settings.manage_key):
+        raise HTTPException(status_code=403, detail="Invalid or missing management key")
+
+    from app.enrichment import _MAX_STATION_DRIVE_MINUTES
+
+    apply = request.query_params.get("apply", "").lower() == "true"
+    suspect = []
+    for l in db.get_all_listings():
+        if l.get("commute_minutes") is None:
+            continue
+        try:
+            commute = json.loads(l.get("commute_data_json") or "{}")
+            proximity = json.loads(l.get("station_json") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            continue
+        drive = commute.get("drive_minutes")
+        reason = None
+        if drive is not None and drive > _MAX_STATION_DRIVE_MINUTES:
+            reason = f"drive {drive} min exceeds the {_MAX_STATION_DRIVE_MINUTES} min cap"
+        else:
+            named = (commute.get("station") or "").lower()
+            nearest = (proximity.get("station") or "").lower()
+            # The old code stored "Harrison train station, NY" where proximity
+            # stored "Harrison", so compare by containment rather than equality.
+            if named and nearest and nearest not in named:
+                reason = f"station {commute.get('station')!r} != nearest {proximity.get('station')!r}"
+        if reason:
+            suspect.append({
+                "id": l["id"], "address": l.get("address"), "town": l.get("town"),
+                "commute_minutes": l.get("commute_minutes"),
+                "drive_minutes": drive, "reason": reason,
+            })
+
+    if apply:
+        for row in suspect:
+            db.update_listing_enrichment(
+                row["id"], {"commute_minutes": None, "commute_data_json": None},
+            )
+        logger.info("Invalidated %d mis-resolved commutes", len(suspect))
+
+    return {"suspect": len(suspect), "applied": apply, "listings": suspect}
+
+
 @app.post("/manage/backfill-status")
 def manage_backfill_status(request: Request):
     """Look up listing_status from OneKey MLS for listings that have none.
