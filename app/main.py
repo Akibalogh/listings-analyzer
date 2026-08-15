@@ -3708,6 +3708,78 @@ def manage_image_audit(request: Request):
     }
 
 
+@app.post("/manage/backfill-status")
+def manage_backfill_status(request: Request):
+    """Look up listing_status from OneKey MLS for listings that have none.
+
+    OneHome alert emails carry no status, and nothing downstream can supply it:
+    the portal is an Angular shell with no server-rendered content, the MLS
+    lookup by constructed URL returns nothing, and Redfin bot-blocks cloud IPs.
+    So 516 Bellwood Avenue was pushed as a new Worth Touring after it had sold,
+    and 8 of the current top 12 listings have unknown status.
+
+    check_listing_status() already existed and was never wired to anything. It
+    finds the OneKey MLS page by search rather than by constructing a URL — a
+    different path from the one /manage/rescrape-unknowns exhausts — and reads
+    SaleStatus/MlsStatus out of the page.
+
+    Dry run by default so the hit rate can be judged before anything is written;
+    `?apply=true` records what it found. Only fills blanks — a status already in
+    the database is never overwritten by a search result.
+
+    Protected by MANAGE_KEY.
+    """
+    key = request.headers.get("x-manage-key", "")
+    if not (settings.manage_key and key == settings.manage_key):
+        raise HTTPException(status_code=403, detail="Invalid or missing management key")
+
+    from app.parsers.onehome import check_listing_status
+
+    apply = request.query_params.get("apply", "").lower() == "true"
+    limit = int(request.query_params.get("limit", "25"))
+
+    targets = [
+        l for l in db.get_all_listings()
+        if not (l.get("listing_status") or "").strip()
+    ]
+    # Highest-scoring first: those are the ones that trigger a push, so they are
+    # the ones where a stale "available" costs something.
+    targets.sort(key=lambda l: -(l.get("score") or 0))
+    targets = targets[:limit]
+
+    found, missed, results = 0, 0, []
+    for l in targets:
+        try:
+            status = check_listing_status(
+                l.get("address") or "", l.get("town") or "",
+                l.get("state"), l.get("zip_code"),
+            )
+        except Exception as e:
+            logger.warning("status lookup failed for #%s: %s", l.get("id"), e)
+            status = None
+        if status:
+            found += 1
+            if apply:
+                db.update_listing_fields_by_id(l["id"], listing_status=status)
+        else:
+            missed += 1
+        results.append({
+            "id": l.get("id"), "address": l.get("address"),
+            "score": l.get("score"), "status": status,
+        })
+
+    return {
+        "checked": len(targets),
+        "found": found,
+        "not_found": missed,
+        "applied": apply,
+        "unknown_status_total": sum(
+            1 for l in db.get_all_listings() if not (l.get("listing_status") or "").strip()
+        ),
+        "results": results,
+    }
+
+
 @app.post("/manage/rescrape-unknowns")
 def manage_rescrape_unknowns(request: Request):
     """Force re-scrape images for listings with unknowns in scoring.

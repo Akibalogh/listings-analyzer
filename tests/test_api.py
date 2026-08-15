@@ -1983,3 +1983,84 @@ class TestNtfyTokenPresenceIsReported:
             s.pushover_token = s.pushover_user = s.slack_webhook_url = ""
             s.notify_score_threshold = 70
             assert "tk_supersecret" not in json.dumps(_push_health())
+
+
+class TestBackfillStatus:
+    """OneHome alert emails carry no listing_status and nothing downstream can
+    supply it, so 516 Bellwood Avenue was pushed as a new Worth Touring after it
+    had already sold. check_listing_status() existed and was wired to nothing.
+    """
+
+    @staticmethod
+    def _listings():
+        return [
+            {"id": 1, "address": "53 Hillside Terrace", "town": "Irvington",
+             "state": "NY", "zip_code": "10533", "score": 82, "listing_status": None},
+            {"id": 2, "address": "25 Hudson Avenue", "town": "Irvington",
+             "state": "NY", "zip_code": "10533", "score": 81, "listing_status": ""},
+            {"id": 3, "address": "4 Old House Ln", "town": "Chappaqua",
+             "state": "NY", "zip_code": "10514", "score": 72, "listing_status": "Active"},
+        ]
+
+    def _run(self, lookup, apply=False, monkey=None):
+        from unittest.mock import patch
+        with patch("app.main.db.get_all_listings", return_value=self._listings()), \
+             patch("app.parsers.onehome.check_listing_status", side_effect=lookup), \
+             patch("app.main.db.update_listing_fields_by_id") as upd, \
+             patch("app.main.settings") as s:
+            s.manage_key = "k"
+            client = TestClient(app)
+            r = client.post(f"/manage/backfill-status?apply={'true' if apply else 'false'}",
+                            headers={"x-manage-key": "k"})
+        return r.json(), upd
+
+    def test_only_targets_listings_without_a_status(self):
+        """4 Old House Ln is already Active — never re-checked, never overwritten."""
+        body, _ = self._run(lambda *a, **k: "Sold")
+        assert body["checked"] == 2
+        assert {r["address"] for r in body["results"]} == {
+            "53 Hillside Terrace", "25 Hudson Avenue"}
+
+    def test_blank_status_counts_as_missing(self):
+        body, _ = self._run(lambda *a, **k: "Sold")
+        assert any(r["address"] == "25 Hudson Avenue" for r in body["results"])
+
+    def test_dry_run_writes_nothing(self):
+        """The hit rate has to be judgeable before anything is recorded."""
+        body, upd = self._run(lambda *a, **k: "Sold", apply=False)
+        assert body["found"] == 2 and body["applied"] is False
+        upd.assert_not_called()
+
+    def test_apply_records_what_it_found(self):
+        body, upd = self._run(lambda *a, **k: "Sold", apply=True)
+        assert body["applied"] is True
+        assert upd.call_count == 2
+        assert upd.call_args.kwargs["listing_status"] == "Sold"
+
+    def test_misses_are_counted_not_written(self):
+        body, upd = self._run(lambda *a, **k: None, apply=True)
+        assert body["found"] == 0 and body["not_found"] == 2
+        upd.assert_not_called()
+
+    def test_a_lookup_failure_does_not_abort_the_run(self):
+        """One bad address must not cost the rest of the batch."""
+        calls = iter([RuntimeError("boom"), "Active"])
+        def flaky(*a, **k):
+            v = next(calls)
+            if isinstance(v, Exception):
+                raise v
+            return v
+        body, _ = self._run(flaky)
+        assert body["checked"] == 2
+        assert body["found"] == 1 and body["not_found"] == 1
+
+    def test_highest_scoring_first(self):
+        """Those are the ones that trigger a push, so a stale status costs most."""
+        body, _ = self._run(lambda *a, **k: "Active")
+        assert [r["score"] for r in body["results"]] == [82, 81]
+
+    def test_requires_the_manage_key(self):
+        from unittest.mock import patch
+        with patch("app.main.settings") as s:
+            s.manage_key = "k"
+            assert TestClient(app).post("/manage/backfill-status").status_code == 403
