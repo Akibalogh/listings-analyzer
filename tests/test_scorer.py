@@ -1511,3 +1511,70 @@ class TestBuyerVerifiedNotes:
         )
         text = blocks[0]["text"]
         assert "1 A St" in text and "1000000" in text
+
+
+class TestHardGateDrift:
+    """deterministic_gate() enforces state, price, sqft, bedrooms and commute
+    from config, skipping the AI and emitting confidence="high". A criteria
+    edit that relaxes one while the config keeps the old value produces
+    confidently wrong rejections, and only the commute limit had an alarm.
+    """
+
+    CRITERIA = """
+    Minimum 2,200 sqft
+    Minimum 3 bedrooms
+    Price between $850,000 and $2,250,000
+    Commute of 110 minutes or more door-to-door = Reject (hard fail)
+    -35 weak school district (below 50th percentile — near-dealbreaker)
+    """
+
+    def test_the_live_criteria_are_in_sync(self):
+        from app.scorer import hard_gate_drift
+        d = hard_gate_drift(self.CRITERIA)
+        assert d["in_sync"] is True, d["drifted"]
+
+    def test_every_threshold_is_parsed(self):
+        from app.scorer import hard_gate_drift
+        c = hard_gate_drift(self.CRITERIA)["checks"]
+        assert c["min_sqft"]["criteria"] == 2200
+        assert c["min_bedrooms"]["criteria"] == 3
+        assert c["price_min"]["criteria"] == 850000
+        assert c["price_max"]["criteria"] == 2250000
+        assert c["commute_minutes"]["criteria"] == 110
+        assert c["min_school_percentile"]["criteria"] == 50
+
+    def test_a_relaxed_price_cap_is_flagged(self):
+        """The dangerous direction: prose loosens, code keeps rejecting."""
+        from app.scorer import hard_gate_drift
+        d = hard_gate_drift(self.CRITERIA.replace("$2,250,000", "$3,000,000"))
+        assert d["in_sync"] is False
+        assert "price_max" in d["drifted"]
+        assert d["checks"]["price_max"]["criteria"] == 3000000
+
+    def test_a_tightened_sqft_minimum_is_flagged(self):
+        from app.scorer import hard_gate_drift
+        d = hard_gate_drift(self.CRITERIA.replace("2,200 sqft", "2,800 sqft"))
+        assert "min_sqft" in d["drifted"]
+
+    def test_a_moved_school_floor_is_flagged(self):
+        from app.scorer import hard_gate_drift
+        d = hard_gate_drift(self.CRITERIA.replace("below 50th percentile", "below 40th percentile"))
+        assert "min_school_percentile" in d["drifted"]
+
+    def test_unstated_thresholds_count_as_in_sync(self):
+        """A rewrite that drops the wording should warn via the parser, not
+        silently flip enforcement."""
+        from app.scorer import hard_gate_drift
+        d = hard_gate_drift("Buy a nice house near good schools.")
+        assert d["in_sync"] is True
+        assert all(c["criteria"] is None for c in d["checks"].values())
+
+    def test_empty_criteria_do_not_explode(self):
+        from app.scorer import hard_gate_drift
+        assert hard_gate_drift("")["in_sync"] is True
+
+    def test_multiple_drifts_are_all_reported(self):
+        from app.scorer import hard_gate_drift
+        bad = self.CRITERIA.replace("$2,250,000", "$3,000,000").replace("Minimum 3 bedrooms", "Minimum 4 bedrooms")
+        d = hard_gate_drift(bad)
+        assert set(d["drifted"]) >= {"price_max", "min_bedrooms"}
