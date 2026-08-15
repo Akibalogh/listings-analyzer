@@ -484,6 +484,18 @@ HANDLING UNKNOWNS - CRITICAL SCORING RULES:
   worth less certainty, not less merit.
 - Always state in concerns whether unknowns are due to missing images/floor plans vs confirmed absence.
 
+WHAT hard_results IS FOR — READ THIS BEFORE USING passed: false:
+`passed: false` means ONE thing: a HARD REQUIREMENT genuinely failed, and the
+verdict must therefore be "Reject". It is not a way to express a penalty.
+- A factor that costs points but does not disqualify is passed: true, and the
+  deduction goes in soft_points. A small basement, an oversized house, a long
+  but legal commute, a mediocre school district — all passed: true.
+- If you find yourself writing "technically passes", "does NOT trigger hard
+  reject", "applies a -N point penalty", or "is below the hard limit" next to
+  passed: false, the flag is wrong. Say passed: true and take the points off.
+- passed: false on anything other than a Reject is a contradiction, and it is
+  discarded on arrival.
+
 OUTPUT FORMAT — return ONLY a JSON object with exactly these keys:
 {
   "score": <integer 0-100>,
@@ -533,14 +545,18 @@ The buyer wants a basement — finished or unfinished. This is a major priority.
 2. FINISH LEVEL: Finished is better (can use immediately), unfinished is acceptable (can be finished later).
 3. SIZE & USABILITY: Look for "spacious", "large", "500+ sqft", "rec room", "high ceiling", etc.
    - Spacious (finished or unfinished) = bonus (passed: true)
-   - Tiny/cramped basement = penalty (passed: false, but still has a basement)
+   - Tiny/cramped basement = penalty in soft_points (passed: true — it HAS a basement)
 4. GYM POTENTIAL: Finished basements with gym keywords ("gym", "fitness", "workout", "rubber flooring") = strong bonus.
    Unfinished basements with ample space = moderate bonus (room to finish for gym).
 
-Scoring:
+Scoring — note that NONE of these is a hard failure. A basement is a strong
+preference, not a hard requirement, so passed: false never applies here; the
+disappointment is carried by soft_points, which is what "-25 to -40 pts" above
+means. This section used to say passed: false for a small basement, and that
+is where the habit of flagging penalties as failures was learned.
 ✅ Confirmed spacious basement (finished or unfinished): passed: true, reason: "Spacious basement, suitable for gym"
-⚠️ Confirmed small basement: passed: false, reason: "Basement present but small/cramped"
-❌ No basement: passed: false, reason: "No basement"
+⚠️ Confirmed small basement: passed: true, soft_points: {"basement_small": -15}, reason: "Basement present but small/cramped"
+❌ No basement: passed: true, soft_points: {"no_basement": -30}, reason: "No basement"
 ❓ Unknown (mention of basement but size unclear): passed: null, reason: "Basement presence/size unclear"
 
 If you see a basement photo showing ample space and good headroom = CONFIRMED suitable.
@@ -762,16 +778,35 @@ def _validate_ai_response(data: dict) -> ScoringResult:
 
     # Build hard results
     hard_results = []
+    demoted = []
     for hr_data in data.get("hard_results", []):
         try:
-            hard_results.append(HardResult(
+            result = HardResult(
                 criterion=str(hr_data.get("criterion", "unknown")),
                 passed=hr_data.get("passed"),
                 value=str(hr_data.get("value", "")),
                 reason=str(hr_data.get("reason", "")),
-            ))
+            )
         except Exception:
             continue
+        # A failed hard requirement means Reject, by definition. So a
+        # passed: false riding a non-Reject verdict is self-inconsistent, and
+        # the verdict is the half the model committed to — 5 listings carried
+        # exactly this, every one saying so in its own reason: "technically
+        # passes the hard gate", "does NOT trigger hard reject", "exceeds
+        # minimum but is significantly oversized — applies -12 point penalty".
+        # The flag was standing in for a penalty. Demote it to unknown and keep
+        # the text as a concern, so the judgement survives where it belongs.
+        # Structural, not a string match: no reading of the prose decides this.
+        if result.passed is False and verdict != "Reject":
+            demoted.append(result)
+            result = result.model_copy(update={"passed": None})
+        hard_results.append(result)
+    if demoted:
+        logger.info(
+            "Demoted %d hard-failure flag(s) on a %s verdict: %s",
+            len(demoted), verdict, ", ".join(d.criterion for d in demoted),
+        )
 
     # Validate confidence
     confidence = data.get("confidence", "medium")
@@ -793,6 +828,13 @@ def _validate_ai_response(data: dict) -> ScoringResult:
     raw_concerns = data.get("concerns", [])
     if isinstance(raw_concerns, list):
         concerns = [str(c) for c in raw_concerns if c]
+
+    # A demoted flag was still a real observation — keep the judgement, drop
+    # only the claim that it disqualifies the house.
+    for d in demoted:
+        note = f"{d.criterion}: {d.reason}".strip(": ").strip()
+        if note and note not in concerns:
+            concerns.append(note)
 
     # Reasoning
     reasoning = str(data.get("reasoning", "")) or None
