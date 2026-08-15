@@ -2479,3 +2479,63 @@ class TestTransitUsesTheStationName:
         out, _ = self._capture(transit_secs="4080s")  # 68 min, New Rochelle-ish
         assert out["transit_minutes"] == 68
         assert out["commute_minutes"] == 78
+
+
+class TestEveryTownResolvesToAStation:
+    """Under coordinate lookup, a town that resolves to no station gets NO
+    commute at all — the guards return None rather than a wrong number, which
+    is right, but silently dropping the buyer's top criterion is not. Seven
+    Croton-on-Hudson listings lost theirs this way, including one already
+    marked tour_requested, and Elmsford, Sleepy Hollow and Thornwood were
+    latent: still carrying figures from the old text-based code and due to
+    fail the moment they were re-enriched.
+    """
+
+    # Every town seen in production, including the spelling variants.
+    PRODUCTION_TOWNS = [
+        "Briarcliff Manor", "Chappaqua", "Cortlandt Manor", "Croton-On-Hudson",
+        "Croton-on-Hudson", "Croton-on-hudson", "Croton On Hudson", "Ardsley",
+        "Elmsford", "Sleepy Hollow", "Thornwood", "Harrison", "Yorktown Heights",
+        "White Plains", "Katonah", "Mount Kisco", "Somers", "Bedford",
+        "Cross River", "Valhalla", "Hawthorne", "Dobbs Ferry", "Irvington",
+        "Pleasantville", "Scarsdale", "New Rochelle", "Hartsdale", "Purchase",
+        "West Harrison", "Bedford Corners", "Mahopac", "Baldwin Place", "Montrose",
+    ]
+
+    def test_every_production_town_resolves(self):
+        from app.enrichment import _STATION_OVERRIDES, _station_coordinates
+        bad = [t for t in self.PRODUCTION_TOWNS
+               if not _station_coordinates(_STATION_OVERRIDES.get(t.lower(), t))]
+        assert bad == [], f"towns with no station: {bad}"
+
+    def test_every_override_target_resolves(self):
+        from app.enrichment import _STATION_OVERRIDES, _station_coordinates
+        bad = [f"{t}->{st}" for t, st in _STATION_OVERRIDES.items()
+               if not _station_coordinates(st)]
+        assert bad == [], f"overrides pointing nowhere: {bad}"
+
+    def test_spelling_variants_collapse(self):
+        """One town arrived spelled four ways; punctuation must not decide
+        whether a commute resolves."""
+        from app.enrichment import _STATION_OVERRIDES, _station_coordinates
+        coords = {
+            _station_coordinates(_STATION_OVERRIDES.get(v.lower(), v))
+            for v in ("Croton-On-Hudson", "Croton-on-Hudson",
+                      "Croton-on-hudson", "Croton On Hudson")
+        }
+        assert len(coords) == 1 and None not in coords
+
+    def test_normalization_folds_punctuation_and_case(self):
+        from app.enrichment import _normalize_place
+        assert _normalize_place("Croton-on-Hudson") == _normalize_place("CROTON ON HUDSON")
+        assert _normalize_place("Purdy's") == _normalize_place("purdys")
+        assert _normalize_place("") == ""
+
+    def test_towns_without_their_own_station_borrow_a_neighbour(self):
+        from app.enrichment import _STATION_OVERRIDES
+        for town, station in (("croton-on-hudson", "Croton-Harmon"),
+                              ("ardsley", "Ardsley-on-Hudson"),
+                              ("sleepy hollow", "Tarrytown"),
+                              ("thornwood", "Hawthorne"),
+                              ("elmsford", "White Plains")):
+            assert _STATION_OVERRIDES[town] == station
