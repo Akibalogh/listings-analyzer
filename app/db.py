@@ -611,6 +611,39 @@ def save_listing(listing: ParsedListing, score: ScoringResult, email_id: int, en
         return listing_id
 
 
+def get_listings_missing_status_with_subject() -> list[dict]:
+    """Listings with no status, paired with the subject of the email they came from.
+
+    The Matrix MLS alerts state the status in the subject ("Only sold", "Only
+    pending"), and that is the only place it appears for that sender. Ingest
+    dropped it, so it is recovered from processed_emails after the fact.
+    """
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT l.id, l.address, l.town, pe.subject, s.score
+            FROM listings l
+            JOIN processed_emails pe ON pe.id = l.source_email_id
+            LEFT JOIN scores s ON s.listing_id = l.id
+            WHERE (l.listing_status IS NULL OR TRIM(l.listing_status) = '')
+              AND pe.subject IS NOT NULL
+            ORDER BY s.score DESC NULLS LAST
+        """ if settings.is_postgres else """
+            SELECT l.id, l.address, l.town, pe.subject, s.score
+            FROM listings l
+            JOIN processed_emails pe ON pe.id = l.source_email_id
+            LEFT JOIN scores s ON s.listing_id = l.id
+            WHERE (l.listing_status IS NULL OR TRIM(l.listing_status) = '')
+              AND pe.subject IS NOT NULL
+            ORDER BY s.score DESC
+        """)
+        rows = cur.fetchall()
+        if settings.is_postgres:
+            columns = [desc[0] for desc in cur.description]
+            return [dict(zip(columns, row)) for row in rows]
+        return [dict(r) for r in rows]
+
+
 def get_all_listings() -> list[dict]:
     """Get all listings with their scores and full scoring detail."""
     with get_connection() as conn:
