@@ -566,7 +566,7 @@ the same date.
 
 ### Changed
 - **Removed image management and add-URL sections** from expanded card detail; these are machine tasks, not manual ones
-- **Commute: pick shortest of two strategies** — `fetch_commute_time()` now tries both direct transit (walk to station) and drive-to-station + transit, returning whichever is shorter; previously only tried drive+transit when walk-to-transit returned no routes, causing inflated times (e.g. 152 min for Briarcliff Manor when drive+transit would be ~70 min)
+- **Commute: pick shortest of two strategies** — ⚠️ **This entry is inaccurate and is kept only so nobody "restores" a strategy that never shipped.** `fetch_commute_time()` has only ever made two requests — station→destination TRANSIT and origin→station DRIVE — and always returned `commute_mode: "drive+transit"`. There was no direct-transit strategy and no shorter-of-two comparison, in this commit or any other; the function's docstring claimed the same thing and was corrected in 2026-08. Direct transit is also the wrong shape for this buyer: criteria v74 states the buyer drives to the station and that walking distance is irrelevant, so a walk-access route would inflate every suburban commute — which is the 152-minute Briarcliff figure this entry cites
 - **Station overrides** — added Briarcliff Manor → Scarborough, Ossining, Pleasantville to `_STATION_OVERRIDES`
 - **"Pass" verdict renamed to "Weak Match"** — clearer label for AI-scored listings with score 1-39; updated in scorer, poller, dashboard CSS/filter chips, tests, and docs
 - **"Pass+" filter chip renamed to "Non-Reject"** — shows all non-rejected listings regardless of score tier
