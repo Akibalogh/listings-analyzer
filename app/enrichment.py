@@ -331,13 +331,23 @@ _MAX_STATION_DRIVE_MINUTES = 30
 _MAX_STATION_TRANSIT_MINUTES = 120
 
 
+def _normalize_place(name: str) -> str:
+    """Fold a town or station name for matching.
+
+    The same town arrives spelled four ways — "Croton-On-Hudson",
+    "Croton-on-Hudson", "Croton-on-hudson", "Croton On Hudson" — so hyphens,
+    spaces, apostrophes and case must not decide whether a commute resolves.
+    """
+    return re.sub(r"[^a-z0-9]", "", (name or "").lower())
+
+
 def _station_coordinates(station_name: str) -> tuple[float, float] | None:
     """Coordinates for a Metro-North station by name, or None if unknown."""
-    target = (station_name or "").strip().lower()
+    target = _normalize_place(station_name)
     if not target:
         return None
     for st in _METRO_NORTH_STATIONS:
-        if st["name"].lower() == target:
+        if _normalize_place(st["name"]) == target:
             return (st["lat"], st["lon"])
     return None
 
@@ -368,6 +378,17 @@ _STATION_OVERRIDES: dict[str, str] = {
     "west harrison": "White Plains",
     "bedford corners": "Mount Kisco",
     "purchase": "White Plains",
+    # Towns with no station of their own. Each of these resolved to nothing,
+    # which under the coordinate lookup means no commute at all: Croton and
+    # Ardsley lost theirs outright, and Elmsford, Sleepy Hollow and Thornwood
+    # were latent — still carrying figures from the old text-based code and
+    # due to fail the moment they were re-enriched.
+    "croton-on-hudson": "Croton-Harmon",
+    "croton on hudson": "Croton-Harmon",
+    "ardsley": "Ardsley-on-Hudson",
+    "elmsford": "White Plains",
+    "sleepy hollow": "Tarrytown",
+    "thornwood": "Hawthorne",
     "briarcliff manor": "Scarborough",
     "ossining": "Ossining",
     "pleasantville": "Pleasantville",
