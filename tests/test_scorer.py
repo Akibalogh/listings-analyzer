@@ -1635,3 +1635,78 @@ class TestEvidenceDecidesTheUnknownBand:
         for raw in ("not json", "null", ""):
             d = _build_listing_data({"address": "x", "image_urls_json": raw})
             assert d["evidence_available"]["images"] == 0, raw
+
+
+class TestPenaltyFlagsAreDemoted:
+    """`passed: false` means a hard requirement failed, which means Reject. So
+    a false flag on a non-Reject verdict is self-inconsistent — and 5 listings
+    carried exactly that, each admitting it in its own reason:
+
+        "106 minutes is 4 minutes below the hard limit... Technically passes"
+        "exceeds minimum but is significantly oversized — applies -12 point penalty"
+        "Does NOT trigger hard reject"
+
+    The flag was standing in for a penalty. The verdict is the half the model
+    committed to, so the flag is what gives way. Structural: nothing reads the
+    prose to decide this.
+    """
+
+    def test_a_false_flag_on_a_non_reject_is_demoted(self):
+        r = _validate_ai_response({
+            "score": 52, "verdict": "Low Priority",
+            "hard_results": [{"criterion": "Commute ≤110 min", "passed": False,
+                              "reason": "106 minutes. Technically passes the hard gate."}],
+        })
+        assert r.verdict == "Low Priority"
+        assert r.hard_results[0].passed is None
+
+    def test_the_observation_survives_as_a_concern(self):
+        """Demoting the flag must not lose the judgement behind it."""
+        r = _validate_ai_response({
+            "score": 42, "verdict": "Low Priority",
+            "hard_results": [{"criterion": "Minimum 2,200 sqft", "passed": False,
+                              "reason": "significantly oversized (4,266 sqft) — -12 points"}],
+        })
+        assert any("oversized" in c for c in r.concerns)
+        assert any("Minimum 2,200 sqft" in c for c in r.concerns)
+
+    def test_a_reject_keeps_its_failures(self):
+        """The whole point of the flag, untouched."""
+        r = _validate_ai_response({
+            "score": 0, "verdict": "Reject",
+            "hard_results": [{"criterion": "School District Quality", "passed": False,
+                              "reason": "22nd percentile, below the 50th floor."}],
+        })
+        assert r.hard_results[0].passed is False
+
+    def test_passing_and_unknown_flags_are_untouched(self):
+        r = _validate_ai_response({
+            "score": 70, "verdict": "Worth Touring",
+            "hard_results": [
+                {"criterion": "Minimum 3 bedrooms", "passed": True, "value": "4"},
+                {"criterion": "Ground-floor bedroom", "passed": None},
+            ],
+        })
+        assert [h.passed for h in r.hard_results] == [True, None]
+
+    def test_concerns_are_not_duplicated(self):
+        r = _validate_ai_response({
+            "score": 52, "verdict": "Low Priority",
+            "concerns": ["Commute: long"],
+            "hard_results": [{"criterion": "Commute", "passed": False, "reason": "long"}],
+        })
+        assert r.concerns.count("Commute: long") == 1
+
+    def test_the_prompt_states_the_contract(self):
+        prompt = _build_system_prompt()[0]["text"]
+        assert "passed: false` means ONE thing" in prompt
+        assert "it is\n  discarded on arrival" in prompt
+
+    def test_the_basement_section_no_longer_teaches_the_habit(self):
+        """This section prescribed passed: false for what it called a penalty —
+        where the habit was learned."""
+        prompt = _build_system_prompt()[0]["text"]
+        i = prompt.index("BASEMENT — STRONG REQUIREMENT")
+        section = prompt[i:i + 1800]
+        assert "Confirmed small basement: passed: true" in section
+        assert "passed: false, reason: \"Basement present but small/cramped\"" not in section
