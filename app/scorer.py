@@ -312,6 +312,36 @@ _SELF_CONTRADICTING_REASON = re.compile(
 )
 
 
+_UNCERTAINTY_KEY = re.compile(r"unknown|unconfirm|missing|unverified|unclear", re.IGNORECASE)
+
+
+def log_uncertainty_penalties(result: ScoringResult, listing_data: dict, address: str = "") -> int:
+    """Count points deducted for things nobody was shown. Telemetry only.
+
+    The relocation watch. The fabrication has moved four times — commute, then
+    price and sqft, then schools, then soft_points — and each time it surfaced
+    as a number nobody was measuring. 00 Worth Pl carried -41 of these against
+    -16 of real factors, on a listing with no images and no description.
+
+    Key matching is a string heuristic on model-authored names, so this never
+    changes a score: it is a tripwire, not a rule. If the count stays high
+    after the prompt change, the next channel is already open.
+    """
+    evidence = listing_data.get("evidence_available") or {}
+    if evidence.get("images") or evidence.get("description"):
+        return 0
+    charged = {
+        k: v for k, v in (result.soft_points or {}).items()
+        if isinstance(v, (int, float)) and v < 0 and _UNCERTAINTY_KEY.search(k)
+    }
+    if charged:
+        logger.warning(
+            "Uncertainty penalties on a zero-evidence listing%s: %d points across %s",
+            f" ({address})" if address else "", sum(charged.values()), sorted(charged),
+        )
+    return sum(charged.values())
+
+
 def log_self_contradicting_failures(result: ScoringResult, address: str = "") -> int:
     """Count and log hard failures whose reason admits they aren't failures.
 
@@ -470,16 +500,22 @@ HANDLING UNKNOWNS - CRITICAL SCORING RULES:
 - If you cannot determine a criterion from the provided data AND images, mark it as Unknown (passed: null).
 - Distinguish between two types of unknowns and penalize accordingly:
   A) "Verifiable unknown" — images were provided but the feature still can't be confirmed (e.g., basement photos show unfinished space). These are HIGH RISK. Deduct 10-15 points per criterion, 15-20 for basement.
-  B) "Missing data unknown" — no images provided, or images provided but no floor plans (layout unknowable from photos alone). These are LOWER RISK — the feature may well exist, we just can't verify it. Deduct only 3-5 points per criterion as a mild uncertainty penalty.
+  B) "Missing data unknown" — no images provided, or images provided but no floor plans (layout unknowable from photos alone). DEDUCT NOTHING. Not 3-5 points, not 1 point, in hard_results or soft_points. A feature you were never shown may well exist; not being shown it tells you about the LISTING, not the house. Mark it passed: null, say so in concerns, and lower confidence.
 - WHICH BAND APPLIES IS DECIDED BY <listing_data>.evidence_available, NOT BY YOUR JUDGEMENT:
   * evidence_available.images == 0 AND evidence_available.description == false:
-    every unknown is a "missing data" unknown BY DEFINITION. You were shown
-    nothing, so nothing could be confirmed, and that is not the listing's
-    fault. Score 60-75 pending verification NO MATTER HOW MANY criteria are
-    unknown. The 30-50 band does NOT apply here — a thin alert email is not
-    evidence against a house.
+    ABSENCE OF EVIDENCE IS WORTH ZERO POINTS. You were shown nothing, so you
+    learned nothing, and nothing you did not learn may cost the house a single
+    point — not in hard_results, and NOT in soft_points either. Do not emit
+    deductions like "lot_size_unknown", "basement_unknown",
+    "layout_unconfirmed" or "school_district_unknown". Score the house on what
+    IS known (commute, price, school rankings where ranked, lot acres where
+    given) and set confidence: "low". A thin alert email is not evidence
+    against a house; it is the absence of evidence about one.
   * images > 0: unknowns that survive the images ARE "verifiable unknowns" —
-    you looked and could not confirm. 3+ of those belongs in the 30-50 range.
+    you looked and could not confirm. Those are evidence of absence and MAY
+    deduct. 3+ of them belongs in the 30-50 range.
+- The distinction in one line: evidence of absence is merit, absence of
+  evidence is confidence.
 - Never let an unknown outrank a confirmed failure: a house you cannot see is
   worth less certainty, not less merit.
 - Always state in concerns whether unknowns are due to missing images/floor plans vs confirmed absence.
@@ -586,7 +622,12 @@ These should carry the most weight in your scoring.
   HARD REJECT if below 50th percentile (score 0, verdict "Reject").
   95th+ percentile = excellent (+25). 80–94th = good (+15). 50–79th = weak/caution (+5, flag as concern).
   Weight elementary schools most heavily. Mention specific school names and percentiles.
-  Note: Missing school data is EXCLUDED from scoring (not penalized as unknown).
+  Note: School data is EXCLUDED from scoring — zero points, never a penalty —
+  when it is missing OR when it is present but carries no usable
+  rank_percentile. 00 Worth Pl listed Hawthorne Elementary and Linden Hill
+  High with rank_percentile null for both, and was docked 15 points for
+  "school_district_unknown" on the grounds that school data was not, strictly,
+  missing. Names without rankings are nothing to judge. Score them as zero.
 - PRICE: The target range is $1.5M–$2M and carries NO penalty anywhere inside it.
   Under $1.5M = mildly positive (+5 for a genuine deal). $1.5M–$2M = neutral (0).
   $2M–$2.25M = less desirable (−8). $2.25M is the buyer's hard cap.
@@ -955,6 +996,7 @@ def ai_score_listing(
         # The gate already ruled on commute; the model doesn't get a second
         # vote. Ask once with a correction, then override if it insists.
         log_self_contradicting_failures(result, listing_data.get("address", ""))
+        log_uncertainty_penalties(result, listing_data, listing_data.get("address", ""))
         if invalid_reject(result, listing_data):
             unconfirmed = ", ".join(
                 _describe_unvalidated(h) for h in result.hard_results if h.passed is False
