@@ -1578,3 +1578,60 @@ class TestHardGateDrift:
         bad = self.CRITERIA.replace("$2,250,000", "$3,000,000").replace("Minimum 3 bedrooms", "Minimum 4 bedrooms")
         d = hard_gate_drift(bad)
         assert set(d["drifted"]) >= {"price_max", "min_bedrooms"}
+
+
+class TestEvidenceDecidesTheUnknownBand:
+    """The prompt has two bands for unknowns — 30-50 when images were supplied
+    and a feature still can't be confirmed, 60-75 when the data simply isn't
+    there — and the model applied the harsh one regardless. Five listings with
+    ZERO images and NO description landed at 35-52 while their own reasons read
+    "Missing data unknown", the case the prompt scores 60-75.
+
+    Measured across all AI-scored non-Reject listings: median 62 at 0 unknowns,
+    58 at 1, 63 at 2 — then 42 at 3 and 40 at 4. A cliff, not a curve, and 6 of
+    6 listings with 3+ unknowns fell below 60. So the band is now decided by
+    data the code supplies, not by the model's own read of its evidence.
+    """
+
+    def test_prompt_defers_to_the_evidence_field(self):
+        prompt = _build_system_prompt()[0]["text"]
+        assert "evidence_available" in prompt
+        assert "NOT BY YOUR JUDGEMENT" in prompt
+
+    def test_prompt_exempts_evidenceless_listings(self):
+        """A thin alert email is not evidence against a house."""
+        prompt = _build_system_prompt()[0]["text"]
+        assert "NO MATTER HOW MANY criteria are" in prompt
+        assert "The 30-50 band does NOT apply here" in prompt
+
+    def test_prompt_keeps_the_harsh_band_for_seen_but_unconfirmed(self):
+        prompt = _build_system_prompt()[0]["text"]
+        assert "images > 0" in prompt
+        assert "30-50" in prompt
+
+    def test_listing_data_reports_the_evidence(self):
+        from app.main import _build_listing_data
+        d = _build_listing_data({
+            "address": "00 Worth Pl", "image_urls_json": None, "description": None,
+        })
+        assert d["evidence_available"] == {"images": 0, "description": False}
+
+    def test_evidence_counts_images_and_description(self):
+        from app.main import _build_listing_data
+        d = _build_listing_data({
+            "address": "35 Shady Brook Ln",
+            "image_urls_json": json.dumps([f"i{n}.jpg" for n in range(21)]),
+            "description": "Lovely colonial.",
+        })
+        assert d["evidence_available"] == {"images": 21, "description": True}
+
+    def test_blank_description_is_not_evidence(self):
+        from app.main import _build_listing_data
+        d = _build_listing_data({"address": "x", "description": "   "})
+        assert d["evidence_available"]["description"] is False
+
+    def test_malformed_image_json_counts_as_none(self):
+        from app.main import _build_listing_data
+        for raw in ("not json", "null", ""):
+            d = _build_listing_data({"address": "x", "image_urls_json": raw})
+            assert d["evidence_available"]["images"] == 0, raw

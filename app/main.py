@@ -1338,6 +1338,22 @@ def _build_listing_data(listing_row: dict) -> dict:
             "gym_suitable": listing_row.get("basement_gym_suitable"),
         }
 
+    # State the evidence explicitly instead of leaving the model to infer it.
+    # The prompt has two bands for unknowns — 30-50 when images were supplied
+    # and a feature still can't be confirmed, 60-75 when the data simply isn't
+    # there — and the model was picking the harsh one regardless. Five listings
+    # with zero images and no description landed at 35-52 while their own
+    # reasons read "Missing data unknown", the case the prompt scores 60-75.
+    raw_images = listing_row.get("image_urls_json")
+    try:
+        image_count = len(json.loads(raw_images) or []) if raw_images else 0
+    except (json.JSONDecodeError, TypeError):
+        image_count = 0
+    listing_data["evidence_available"] = {
+        "images": image_count,
+        "description": bool((listing_row.get("description") or "").strip()),
+    }
+
     return listing_data
 
 

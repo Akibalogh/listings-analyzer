@@ -471,8 +471,17 @@ HANDLING UNKNOWNS - CRITICAL SCORING RULES:
 - Distinguish between two types of unknowns and penalize accordingly:
   A) "Verifiable unknown" — images were provided but the feature still can't be confirmed (e.g., basement photos show unfinished space). These are HIGH RISK. Deduct 10-15 points per criterion, 15-20 for basement.
   B) "Missing data unknown" — no images provided, or images provided but no floor plans (layout unknowable from photos alone). These are LOWER RISK — the feature may well exist, we just can't verify it. Deduct only 3-5 points per criterion as a mild uncertainty penalty.
-- If 3+ hard requirements are "verifiable unknowns" (images present but features unconfirmed), score should be 30-50 range.
-- If unknowns are mostly "missing data" type, a score of 60-75 is reasonable pending verification.
+- WHICH BAND APPLIES IS DECIDED BY <listing_data>.evidence_available, NOT BY YOUR JUDGEMENT:
+  * evidence_available.images == 0 AND evidence_available.description == false:
+    every unknown is a "missing data" unknown BY DEFINITION. You were shown
+    nothing, so nothing could be confirmed, and that is not the listing's
+    fault. Score 60-75 pending verification NO MATTER HOW MANY criteria are
+    unknown. The 30-50 band does NOT apply here — a thin alert email is not
+    evidence against a house.
+  * images > 0: unknowns that survive the images ARE "verifiable unknowns" —
+    you looked and could not confirm. 3+ of those belongs in the 30-50 range.
+- Never let an unknown outrank a confirmed failure: a house you cannot see is
+  worth less certainty, not less merit.
 - Always state in concerns whether unknowns are due to missing images/floor plans vs confirmed absence.
 
 OUTPUT FORMAT — return ONLY a JSON object with exactly these keys:
