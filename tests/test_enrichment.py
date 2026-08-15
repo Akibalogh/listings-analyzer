@@ -2452,6 +2452,15 @@ class TestTransitUsesTheStationName:
         transit = next(c for c in seen if c["mode"] == "TRANSIT")
         assert "Metro-North" in transit["origin"]
 
+    def test_transit_origin_carries_no_locality(self):
+        """Several stations are not named after their town — Scarborough is a
+        hamlet inside Briarcliff Manor — and appending one resolved worse than
+        the bare name (98 min vs 83)."""
+        _, seen = self._capture()
+        origin = next(c for c in seen if c["mode"] == "TRANSIT")["origin"]
+        assert origin == "Harrison Metro-North station, NY"
+        assert origin.count("Harrison") == 1
+
     def test_drive_destination_is_still_coordinates(self):
         """The drive leg is correct now and must stay on latLng."""
         _, seen = self._capture()

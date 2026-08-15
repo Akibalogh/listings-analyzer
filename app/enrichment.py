@@ -448,7 +448,12 @@ def fetch_commute_time(
     # Harrison, New Jersey — and PATH is not Metro-North. Naming the railroad
     # and the town removes the collision without handing Routes a coordinate
     # it will walk away from.
-    station_query = f"{station_town} Metro-North station, {station_town}, NY"
+    # No locality after the station name. Repeating it assumes the station is
+    # named after a town, and several are not: Scarborough is a hamlet inside
+    # Briarcliff Manor, and "Scarborough Metro-North station, Scarborough, NY"
+    # resolved worse than the bare name (98 min vs 83). Harrison improved only
+    # because it happens to be both a station and its town.
+    station_query = f"{station_town} Metro-North station, NY"
     station_transit = _routes_request(station_query, destination, "TRANSIT", departure_time)
     if not station_transit:
         logger.warning(f"No transit route from {station_town} to {destination} for {origin}")
