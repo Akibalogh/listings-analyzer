@@ -344,7 +344,10 @@ class TestNtfy:
                 assert "Katonah" in headers["Title"]
                 assert "1 A St, Katonah" in body
                 assert "1,400,000" in body
-                assert headers["Priority"] == "high"
+                # Strong Match is max since 2026-08: iOS was filing these into
+                # Notification Center with no banner. See
+                # TestPriorityIsReservedForStrongMatch.
+                assert headers["Priority"] == "max"
                 assert headers["Click"].endswith("/home/1")
 
     def test_title_stays_ascii(self):
@@ -879,3 +882,39 @@ class TestNotifyLatchIsRearmed:
     def test_the_threshold_is_the_configured_one(self):
         assert "notified = FALSE" in " ".join(self._update(65, threshold=80))
         assert "notified = FALSE" not in " ".join(self._update(85, threshold=80))
+
+
+class TestPriorityIsReservedForStrongMatch:
+    """iOS was filing alerts into Notification Center without a banner. Max
+    priority asks it to surface more insistently — but only for Strong Match.
+    Worth Touring is the common verdict (12 of 36 live listings), and if every
+    alert is urgent then none of them is.
+    """
+
+    @staticmethod
+    def _headers(verdict):
+        from unittest.mock import patch
+        from app.notifier import notify_ntfy
+        with patch("app.notifier.settings") as s:
+            s.ntfy_url = "https://ntfy.sh/t"
+            s.ntfy_token = ""
+            s.ntfy_topic = "t"
+            s.public_base_url = "https://x"
+            with patch("app.notifier.httpx.post") as post:
+                notify_ntfy({"address": "1 A St", "town": "Rye",
+                             "listing_status": "Active"}, 82, verdict)
+            return post.call_args.kwargs["headers"]
+
+    def test_strong_match_is_max(self):
+        assert self._headers("Strong Match")["Priority"] == "max"
+
+    def test_worth_touring_stays_high(self):
+        assert self._headers("Worth Touring")["Priority"] == "high"
+
+    def test_lesser_verdicts_stay_high(self):
+        for v in ("Low Priority", "Weak Match", ""):
+            assert self._headers(v)["Priority"] == "high", v
+
+    def test_strong_match_keeps_its_distinct_tag(self):
+        assert self._headers("Strong Match")["Tags"] == "house_with_garden"
+        assert self._headers("Worth Touring")["Tags"] == "house"

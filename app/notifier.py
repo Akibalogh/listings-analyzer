@@ -238,9 +238,12 @@ def notify_ntfy(listing: dict, score: int, verdict: str) -> bool:
         # Emoji go in Tags, not the Title — header values must be ASCII
         "Title": _header_safe(f"New {verdict} ({score}) - {listing.get('town', '')}"),
         "Tags": "house_with_garden" if verdict == "Strong Match" else "house",
-        # High priority: sounds and surfaces on the lock screen rather than
-        # sitting silently in the notification drawer.
-        "Priority": "high",
+        # Strong Match gets max, everything else high. iOS was filing these in
+        # Notification Center without a banner, and max asks it to surface more
+        # insistently. Reserved for Strong Match on purpose: a database where
+        # every alert is urgent has no urgent alerts, and Worth Touring is the
+        # common verdict — 12 of the 36 live listings carry it.
+        "Priority": "max" if verdict == "Strong Match" else "high",
     }
     if listing_url:
         headers["Click"] = listing_url
