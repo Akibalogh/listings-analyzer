@@ -831,3 +831,51 @@ class TestProbeRedactsTheTopic:
         with patch("app.notifier.settings") as s:
             s.ntfy_topic = ""
             assert _redact_topic("some body") == "some body"
+
+
+class TestNotifyLatchIsRearmed:
+    """`notified` is a one-shot latch, so a listing alerted once never alerted
+    again however its score moved. 38 Westerly Ln was alerted long ago, fell to
+    48 on a mis-resolved commute, came back to 72 when that was fixed, and
+    pushed nothing — the phone had no way to learn a written-off house was live
+    again. Clearing the latch on the way DOWN re-arms it.
+    """
+
+    @staticmethod
+    def _score(value):
+        from app.models import ScoringResult
+        return ScoringResult(score=value, verdict="Worth Touring" if value >= 60 else "Low Priority")
+
+    def _update(self, value, threshold=70):
+        from unittest.mock import MagicMock, patch
+        cur = MagicMock()
+        conn = MagicMock()
+        conn.cursor.return_value = cur
+        ctx = MagicMock()
+        ctx.__enter__ = MagicMock(return_value=conn)
+        ctx.__exit__ = MagicMock(return_value=False)
+        with patch("app.db.get_connection", return_value=ctx), \
+             patch("app.db.settings") as s:
+            s.is_postgres = False
+            s.notify_score_threshold = threshold
+            from app.db import update_score
+            update_score(1, self._score(value), "ai", 74, None)
+        return [c.args[0] for c in cur.execute.call_args_list]
+
+    def test_a_drop_below_threshold_rearms(self):
+        sql = " ".join(self._update(48))
+        assert "notified = FALSE" in sql
+
+    def test_a_score_at_or_above_threshold_does_not_rearm(self):
+        """Otherwise every rescore would re-alert everything."""
+        for value in (70, 72, 100):
+            assert "notified = FALSE" not in " ".join(self._update(value)), value
+
+    def test_rearming_only_touches_already_notified_rows(self):
+        """A pointless write on every low score would churn the table."""
+        sql = " ".join(self._update(30))
+        assert "notified = TRUE" in sql  # the WHERE guard
+
+    def test_the_threshold_is_the_configured_one(self):
+        assert "notified = FALSE" in " ".join(self._update(65, threshold=80))
+        assert "notified = FALSE" not in " ".join(self._update(85, threshold=80))
