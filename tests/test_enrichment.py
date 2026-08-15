@@ -2539,3 +2539,52 @@ class TestEveryTownResolvesToAStation:
                               ("thornwood", "Hawthorne"),
                               ("elmsford", "White Plains")):
             assert _STATION_OVERRIDES[town] == station
+
+
+class TestGeocoderIsSerialized:
+    """Enrichment geocodes from a five-worker thread pool, and Nominatim's ToS
+    allows one request per second. An unsynchronized read-then-sleep lets every
+    worker see the same _nominatim_last_call and fire together — five requests
+    in the instant that allows one. The distance guard added a geocode call to
+    the commute path, which is what put this on the hot path.
+    """
+
+    def test_concurrent_callers_do_not_burst(self):
+        import threading
+        import app.enrichment as enr
+        calls, lock = [], threading.Lock()
+
+        def fake_get(*a, **k):
+            with lock:
+                calls.append(time.monotonic())
+            class R:
+                def raise_for_status(self): pass
+                def json(self): return [{"lat": "41.0", "lon": "-73.0"}]
+            return R()
+
+        import time
+        from unittest.mock import MagicMock, patch
+        client = MagicMock()
+        client.__enter__ = MagicMock(return_value=client)
+        client.__exit__ = MagicMock(return_value=False)
+        client.get = fake_get
+
+        with patch.object(enr, "_geocode_cache", {}), \
+             patch.object(enr, "_nominatim_last_call", 0.0), \
+             patch.object(enr, "_NOMINATIM_RATE_LIMIT", 0.05), \
+             patch("app.enrichment.httpx.Client", return_value=client):
+            threads = [threading.Thread(target=enr._geocode_address,
+                                        args=(f"{i} A St", "Rye", "NY")) for i in range(5)]
+            for t in threads: t.start()
+            for t in threads: t.join()
+
+        gaps = [b - a for a, b in zip(sorted(calls), sorted(calls)[1:])]
+        assert all(g >= 0.04 for g in gaps), f"requests bursted: gaps {gaps}"
+
+    def test_the_cache_still_short_circuits(self):
+        import app.enrichment as enr
+        from unittest.mock import patch
+        with patch.object(enr, "_geocode_cache", {"1 a st|rye|ny": {"lat": 1.0, "lon": 2.0}}), \
+             patch("app.enrichment.httpx.Client") as client:
+            assert enr._geocode_address("1 A St", "Rye", "NY") == {"lat": 1.0, "lon": 2.0}
+            client.assert_not_called()

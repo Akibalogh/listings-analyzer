@@ -9,6 +9,7 @@ import json
 import logging
 import math
 import re
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -920,6 +921,9 @@ _NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 _OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 _NOMINATIM_RATE_LIMIT = 1.1  # seconds between Nominatim calls (ToS: max 1 req/s)
 _nominatim_last_call: float = 0.0
+# Serializes the rate limiter and cache: enrichment geocodes from a
+# five-worker thread pool, and Nominatim's ToS allows one request per second.
+_nominatim_lock = threading.Lock()
 
 # Cache: "address|town|state" → {"lat": float, "lon": float} or None
 _geocode_cache: dict[str, dict | None] = {}
@@ -941,11 +945,23 @@ def _geocode_address(address: str | None, town: str | None, state: str | None) -
     if cache_key in _geocode_cache:
         return _geocode_cache[cache_key]
 
-    # Rate limit
-    elapsed = time.time() - _nominatim_last_call
-    if elapsed < _NOMINATIM_RATE_LIMIT:
-        time.sleep(_NOMINATIM_RATE_LIMIT - elapsed)
+    # Rate limit, serialized. Enrichment runs this under a five-worker thread
+    # pool, and an unsynchronized read-then-sleep lets all five see the same
+    # _nominatim_last_call and fire together — five requests in the instant the
+    # 1 req/s ToS allows one. The lock is held across the request so the
+    # timestamp is written before the next thread reads it.
+    with _nominatim_lock:
+        if cache_key in _geocode_cache:
+            return _geocode_cache[cache_key]
+        elapsed = time.time() - _nominatim_last_call
+        if elapsed < _NOMINATIM_RATE_LIMIT:
+            time.sleep(_NOMINATIM_RATE_LIMIT - elapsed)
+        return _geocode_uncached(cache_key, address, town, state)
 
+
+def _geocode_uncached(cache_key: str, address: str, town: str, state: str | None) -> dict | None:
+    """The Nominatim call itself. Caller holds _nominatim_lock."""
+    global _nominatim_last_call
     query = f"{address}, {town}, {state or 'NY'}"
     try:
         with httpx.Client(timeout=10) as client:
