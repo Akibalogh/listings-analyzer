@@ -3733,14 +3733,37 @@ def manage_backfill_status(request: Request):
     if not (settings.manage_key and key == settings.manage_key):
         raise HTTPException(status_code=403, detail="Invalid or missing management key")
 
+    from app.parsers import status_from_subject
     from app.parsers.onehome import check_listing_status
 
     apply = request.query_params.get("apply", "").lower() == "true"
     limit = int(request.query_params.get("limit", "25"))
 
+    # The subject line first — it is the only source that actually works. The
+    # Matrix MLS alerts are filtered saved searches ("Only sold", "Only
+    # pending") and ingest dropped the subject, so the status was sitting in
+    # processed_emails the whole time. Free, instant, and no network at all.
+    from_subject, subject_results = 0, []
+    for row in db.get_listings_missing_status_with_subject():
+        status = status_from_subject(row.get("subject"))
+        if not status:
+            continue
+        from_subject += 1
+        if apply:
+            db.update_listing_fields_by_id(row["id"], listing_status=status)
+        subject_results.append({
+            "id": row["id"], "address": row.get("address"),
+            "score": row.get("score"), "status": status,
+            "subject": row.get("subject"),
+        })
+    if from_subject and apply:
+        logger.info("Recovered %d listing statuses from alert subjects", from_subject)
+
+    # Whatever the subjects could not settle falls through to the MLS lookup.
     targets = [
         l for l in db.get_all_listings()
         if not (l.get("listing_status") or "").strip()
+        and not any(r["id"] == l.get("id") for r in subject_results)
     ]
     # Highest-scoring first: those are the ones that trigger a push, so they are
     # the ones where a stale "available" costs something.
@@ -3769,8 +3792,10 @@ def manage_backfill_status(request: Request):
         })
 
     return {
-        "checked": len(targets),
-        "found": found,
+        "from_subject": from_subject,
+        "subject_results": subject_results,
+        "checked_via_mls": len(targets),
+        "found_via_mls": found,
         "not_found": missed,
         "applied": apply,
         "unknown_status_total": sum(

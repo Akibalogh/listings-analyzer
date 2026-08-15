@@ -2005,6 +2005,8 @@ class TestBackfillStatus:
     def _run(self, lookup, apply=False, monkey=None):
         from unittest.mock import patch
         with patch("app.main.db.get_all_listings", return_value=self._listings()), \
+             patch("app.main.db.get_listings_missing_status_with_subject",
+                   return_value=(monkey or [])), \
              patch("app.parsers.onehome.check_listing_status", side_effect=lookup), \
              patch("app.main.db.update_listing_fields_by_id") as upd, \
              patch("app.main.settings") as s:
@@ -2017,7 +2019,7 @@ class TestBackfillStatus:
     def test_only_targets_listings_without_a_status(self):
         """4 Old House Ln is already Active — never re-checked, never overwritten."""
         body, _ = self._run(lambda *a, **k: "Sold")
-        assert body["checked"] == 2
+        assert body["checked_via_mls"] == 2
         assert {r["address"] for r in body["results"]} == {
             "53 Hillside Terrace", "25 Hudson Avenue"}
 
@@ -2028,7 +2030,7 @@ class TestBackfillStatus:
     def test_dry_run_writes_nothing(self):
         """The hit rate has to be judgeable before anything is recorded."""
         body, upd = self._run(lambda *a, **k: "Sold", apply=False)
-        assert body["found"] == 2 and body["applied"] is False
+        assert body["found_via_mls"] == 2 and body["applied"] is False
         upd.assert_not_called()
 
     def test_apply_records_what_it_found(self):
@@ -2039,7 +2041,7 @@ class TestBackfillStatus:
 
     def test_misses_are_counted_not_written(self):
         body, upd = self._run(lambda *a, **k: None, apply=True)
-        assert body["found"] == 0 and body["not_found"] == 2
+        assert body["found_via_mls"] == 0 and body["not_found"] == 2
         upd.assert_not_called()
 
     def test_a_lookup_failure_does_not_abort_the_run(self):
@@ -2051,8 +2053,8 @@ class TestBackfillStatus:
                 raise v
             return v
         body, _ = self._run(flaky)
-        assert body["checked"] == 2
-        assert body["found"] == 1 and body["not_found"] == 1
+        assert body["checked_via_mls"] == 2
+        assert body["found_via_mls"] == 1 and body["not_found"] == 1
 
     def test_highest_scoring_first(self):
         """Those are the ones that trigger a push, so a stale status costs most."""
@@ -2064,3 +2066,126 @@ class TestBackfillStatus:
         with patch("app.main.settings") as s:
             s.manage_key = "k"
             assert TestClient(app).post("/manage/backfill-status").status_code == 403
+
+
+class TestStatusFromSubject:
+    """The Matrix MLS alerts are filtered saved searches and name the filter in
+    the subject: "Only sold", "Only pending", "Active and Contract only". That
+    was the only place status appeared for that sender — 54 listings — and
+    ingest passed the subject only to forwarded-email detection, then dropped
+    it. 516 Bellwood Avenue was pushed as a new Worth Touring (72) while its
+    own email was titled "Only sold".
+    """
+
+    def test_the_real_subjects_map(self):
+        from app.parsers import status_from_subject
+        assert status_from_subject("Only sold") == "Sold"
+        assert status_from_subject("Only pending") == "Pending"
+
+    def test_ambiguous_subjects_map_to_nothing(self):
+        """"Active and Contract only" mixes two statuses in one email with no
+        way to tell which listing is which. Guessing "Active" would recreate
+        the same false-availability bug in the other direction."""
+        from app.parsers import status_from_subject
+        assert status_from_subject("Active and Contract only") is None
+
+    def test_unrelated_subjects_map_to_nothing(self):
+        from app.parsers import status_from_subject
+        for subj in ("New listings for you", "Price drop!", "", None,
+                     "Your saved search", "3 homes you might like"):
+            assert status_from_subject(subj) is None, subj
+
+    def test_case_and_whitespace_are_ignored(self):
+        from app.parsers import status_from_subject
+        assert status_from_subject("  ONLY SOLD  ") == "Sold"
+        assert status_from_subject("Fwd: Only Pending") == "Pending"
+
+    def test_chain_applies_the_subject_status(self):
+        from unittest.mock import MagicMock, patch
+        from app.models import ParsedListing
+        from app.parsers import ParserChain
+        chain = ParserChain()
+        parsed = [ParsedListing(address="1 A St", town="Rye"),
+                  ParsedListing(address="2 B St", town="Rye")]
+        fake = MagicMock()
+        fake.can_parse.return_value = True
+        fake.parse.return_value = parsed
+        with patch.object(chain, "parsers", [fake]):
+            out = chain.parse(html="<html></html>", text=None, subject="Only sold")
+        assert [l.listing_status for l in out] == ["Sold", "Sold"]
+
+    def test_chain_never_overwrites_a_parsed_status(self):
+        """A status the parser actually read from the body wins."""
+        from unittest.mock import MagicMock, patch
+        from app.models import ParsedListing
+        from app.parsers import ParserChain
+        chain = ParserChain()
+        parsed = [ParsedListing(address="1 A St", listing_status="Active"),
+                  ParsedListing(address="2 B St")]
+        fake = MagicMock()
+        fake.can_parse.return_value = True
+        fake.parse.return_value = parsed
+        with patch.object(chain, "parsers", [fake]):
+            out = chain.parse(html="<html></html>", text=None, subject="Only sold")
+        assert [l.listing_status for l in out] == ["Active", "Sold"]
+
+    def test_ambiguous_subject_leaves_listings_alone(self):
+        from unittest.mock import MagicMock, patch
+        from app.models import ParsedListing
+        from app.parsers import ParserChain
+        chain = ParserChain()
+        fake = MagicMock()
+        fake.can_parse.return_value = True
+        fake.parse.return_value = [ParsedListing(address="1 A St")]
+        with patch.object(chain, "parsers", [fake]):
+            out = chain.parse(html="<x/>", text=None, subject="Active and Contract only")
+        assert out[0].listing_status is None
+
+
+class TestBackfillPrefersTheSubject:
+    """The MLS lookups return nothing from a cloud IP — 0 of 24 by constructed
+    URL, 0 of 12 by search. The subject costs no network at all and is the only
+    source that works, so it runs first and the lookup only sees the remainder.
+    """
+
+    ROWS = [
+        {"id": 7, "address": "516 Bellwood Avenue", "town": "Sleepy Hollow",
+         "subject": "Only sold", "score": 72},
+        {"id": 8, "address": "1 Pending Way", "town": "Rye",
+         "subject": "Only pending", "score": 60},
+        {"id": 9, "address": "2 Mixed Rd", "town": "Rye",
+         "subject": "Active and Contract only", "score": 55},
+    ]
+
+    def _run(self, apply):
+        from unittest.mock import patch
+        with patch("app.main.db.get_listings_missing_status_with_subject",
+                   return_value=self.ROWS), \
+             patch("app.main.db.get_all_listings", return_value=[]), \
+             patch("app.main.db.update_listing_fields_by_id") as upd, \
+             patch("app.main.settings") as s:
+            s.manage_key = "k"
+            r = TestClient(app).post(
+                f"/manage/backfill-status?apply={'true' if apply else 'false'}",
+                headers={"x-manage-key": "k"})
+        return r.json(), upd
+
+    def test_recovers_the_unambiguous_ones(self):
+        body, _ = self._run(apply=False)
+        assert body["from_subject"] == 2
+        got = {r["address"]: r["status"] for r in body["subject_results"]}
+        assert got == {"516 Bellwood Avenue": "Sold", "1 Pending Way": "Pending"}
+
+    def test_ambiguous_subject_is_skipped(self):
+        body, _ = self._run(apply=False)
+        assert "2 Mixed Rd" not in {r["address"] for r in body["subject_results"]}
+
+    def test_dry_run_writes_nothing(self):
+        _, upd = self._run(apply=False)
+        upd.assert_not_called()
+
+    def test_apply_writes_only_the_resolved_ones(self):
+        body, upd = self._run(apply=True)
+        assert upd.call_count == 2
+        assert {c.kwargs["listing_status"] for c in upd.call_args_list} == {"Sold", "Pending"}
+        assert body["applied"] is True
