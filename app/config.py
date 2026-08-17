@@ -65,11 +65,30 @@ class Settings(BaseSettings):
         if not self.ntfy_topic.strip():
             return ""
         return f"{self.ntfy_server.rstrip('/')}/{self.ntfy_topic.strip()}"
-    # Score at or above which a new listing triggers a phone push
-    notify_score_threshold: int = 70
+    # Score at or above which a new listing triggers a phone push.
+    #
+    # 75, not 70. 72 is the model's habitual score for "clears the hard gates,
+    # nothing else decisive" — 24 of 163 listings sit on it exactly, and 17 of
+    # the 24 alerts ever sent were 72s. A bar two points under the modal score
+    # alerts on almost everything that isn't rejected, which is the same as not
+    # having a bar. 75 leaves the top of Worth Touring and all of Strong Match.
+    notify_score_threshold: int = 75
 
-    # Public dashboard URL. Alerts link here instead of to a OneHome portal
-    # link, whose token is a bearer credential (see _alert_link).
+    # How far a score must fall below the threshold before the notify latch is
+    # re-armed. Not cosmetic: `enqueue_missing` re-queues an AI score job every
+    # hour for any listing with an enrichment gap, and 85 of 163 listings have a
+    # permanently un-scrapeable description or image set, so those are re-scored
+    # by the model hourly, forever. Scores band at 68/71/72/73/76 — one band of
+    # LLM jitter across the bar was enough to clear the latch and re-alert, every
+    # hour, for a house nothing had actually changed about.
+    #
+    # 10 points is wider than any band gap and narrower than the failure the
+    # latch exists for: 38 Westerly Ln fell from 72 to 48 on a mis-resolved
+    # commute and deserved a second alert when that was fixed.
+    notify_rearm_margin: int = 10
+
+    # Public dashboard URL. Alerts fall back to it when a listing has no URL
+    # of its own (see _alert_link).
     public_base_url: str = "https://listings-analyzer.fly.dev"
 
     # Agent name mapping: "email_or_domain:Agent Name,email_or_domain:Agent Name"

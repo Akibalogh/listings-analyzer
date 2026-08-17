@@ -113,8 +113,13 @@ def _notify_high_scores() -> None:
             return
         from app.notifier import send_high_score_alert
         for r in rows:
-            send_high_score_alert(r, r.get("score") or 0, r.get("verdict") or "")
-        logger.info(f"Sent {len(rows)} high-score alert(s)")
+            delivery = send_high_score_alert(r, r.get("score") or 0, r.get("verdict") or "")
+            db.log_alert(r, r.get("score") or 0, r.get("verdict") or "", delivery)
+        repeats = sum(1 for r in rows if r.get("alert_reason") == "re_armed")
+        logger.info(
+            f"Sent {len(rows)} high-score alert(s)"
+            + (f" ({repeats} repeat)" if repeats else "")
+        )
     except Exception:
         logger.exception("High-score notification sweep failed")
 

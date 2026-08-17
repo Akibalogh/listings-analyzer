@@ -846,7 +846,7 @@ class TestNotifyLatchIsRearmed:
         from app.models import ScoringResult
         return ScoringResult(score=value, verdict="Worth Touring" if value >= 60 else "Low Priority")
 
-    def _update(self, value, threshold=70):
+    def _update(self, value, threshold=70, margin=10, criteria_rescore=False):
         from unittest.mock import MagicMock, patch
         cur = MagicMock()
         conn = MagicMock()
@@ -858,8 +858,10 @@ class TestNotifyLatchIsRearmed:
              patch("app.db.settings") as s:
             s.is_postgres = False
             s.notify_score_threshold = threshold
+            s.notify_rearm_margin = margin
             from app.db import update_score
-            update_score(1, self._score(value), "ai", 74, None)
+            update_score(1, self._score(value), "ai", 74, None,
+                         criteria_rescore=criteria_rescore)
         return [c.args[0] for c in cur.execute.call_args_list]
 
     def test_a_drop_below_threshold_rearms(self):
@@ -879,6 +881,67 @@ class TestNotifyLatchIsRearmed:
     def test_the_threshold_is_the_configured_one(self):
         assert "notified = FALSE" in " ".join(self._update(65, threshold=80))
         assert "notified = FALSE" not in " ".join(self._update(85, threshold=80))
+
+
+class TestACriteriaRescoreNeverRearmsTheLatch:
+    """A criteria rescore rewrites every score in the corpus at once, so a
+    version that lowers scores re-arms dozens of latches and the next version
+    that raises them fires all those alerts together — houses from months ago, in
+    a burst, because the rubric changed rather than because anything about the
+    house did.
+
+    v72→v75 did this. v75 removed the missing-data penalties, so it raised scores
+    corpus-wide, and up to 17 of the 24 previously-alerted listings could have
+    re-fired on that single run. Aki noticed as "a lot of ntfy alerts".
+    """
+
+    _update = TestNotifyLatchIsRearmed._update
+    _score = staticmethod(TestNotifyLatchIsRearmed._score)
+
+    def test_a_criteria_rescore_leaves_the_latch_alone(self):
+        for value in (0, 30, 48, 69):
+            sql = " ".join(self._update(value, criteria_rescore=True))
+            assert "notified = FALSE" not in sql, value
+
+    def test_the_score_is_still_written(self):
+        """Suppressing the alert must not suppress the score."""
+        sql = " ".join(self._update(48, criteria_rescore=True))
+        assert "INSERT INTO scores" in sql
+
+    def test_an_ordinary_rescore_still_rearms(self):
+        """A fixed commute or a freshly scraped description should still be able
+        to bring a written-off house back."""
+        assert "notified = FALSE" in " ".join(self._update(48, criteria_rescore=False))
+
+
+class TestTheLatchIgnoresModelJitter:
+    """`enqueue_missing` re-queues an AI score job every hour for any listing
+    with an enrichment gap, and 85 of 163 listings have a permanently
+    un-scrapeable description or image set — so the model re-scores those hourly,
+    forever. Scores band at 68/71/72/73/76, so a single band of jitter across the
+    bar cleared the latch and re-alerted a house nothing had changed about.
+
+    notify_rearm_margin requires a real fall, not a wobble.
+    """
+
+    _update = TestNotifyLatchIsRearmed._update
+    _score = staticmethod(TestNotifyLatchIsRearmed._score)
+
+    def test_one_band_of_jitter_does_not_rearm(self):
+        """76 → 72 under a 75 bar: still a good house, not news again."""
+        assert "notified = FALSE" not in " ".join(self._update(72, threshold=75, margin=10))
+
+    def test_a_real_collapse_still_rearms(self):
+        """38 Westerly Ln: 72 → 48 on a mis-resolved commute, and it deserved a
+        second alert when that was fixed."""
+        assert "notified = FALSE" in " ".join(self._update(48, threshold=75, margin=10))
+
+    def test_the_margin_is_the_configured_one(self):
+        assert "notified = FALSE" not in " ".join(self._update(66, threshold=75, margin=10))
+        assert "notified = FALSE" in " ".join(self._update(66, threshold=75, margin=5))
+
+    def test_a_zero_margin_is_the_old_behaviour(self):
+        assert "notified = FALSE" in " ".join(self._update(74, threshold=75, margin=0))
 
 
 class TestPriorityIsReservedForStrongMatch:
