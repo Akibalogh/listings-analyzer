@@ -2274,3 +2274,105 @@ class TestScoringIntegrityEndpoint:
         with patch("app.main.settings") as s:
             s.manage_key = "k"
             assert TestClient(app).get("/manage/scoring-integrity").status_code == 403
+
+
+class TestAlertsAreVisible:
+    """The whole point of the log: "did we push this, and was it a repeat?" had
+    no answer when Aki asked. /alerts is that answer, and /health carries the
+    volume so the question doesn't need asking.
+    """
+
+    ROWS = [
+        {"sent_at": "2026-08-17T12:00:00+00:00", "score": 82, "verdict": "Strong Match",
+         "reason": "first_time", "channel": "ntfy", "delivered": True,
+         "criteria_version": 75, "listing_status": "Coming Soon", "listing_id": 1,
+         "address": "121 Law Rd", "town": "Briarcliff Manor", "mls_id": "1001"},
+        {"sent_at": "2026-08-16T12:00:00+00:00", "score": 76, "verdict": "Worth Touring",
+         "reason": "re_armed", "channel": "ntfy", "delivered": False,
+         "criteria_version": 75, "listing_status": "Active", "listing_id": 2,
+         "address": "629 Scarborough Rd", "town": "Briarcliff Manor", "mls_id": "1002"},
+    ]
+
+    def test_lists_alerts_newest_first(self):
+        from unittest.mock import patch
+        with patch("app.main.db.get_recent_alerts", return_value=self.ROWS):
+            body = TestClient(app).get("/alerts").json()
+        assert body["count"] == 2
+        assert body["alerts"][0]["address"] == "121 Law Rd"
+
+    def test_a_repeat_is_distinguishable_from_a_new_alert(self):
+        from unittest.mock import patch
+        with patch("app.main.db.get_recent_alerts", return_value=self.ROWS):
+            body = TestClient(app).get("/alerts").json()
+        assert [a["reason"] for a in body["alerts"]] == ["first_time", "re_armed"]
+
+    def test_a_failed_delivery_is_shown(self):
+        from unittest.mock import patch
+        with patch("app.main.db.get_recent_alerts", return_value=self.ROWS):
+            body = TestClient(app).get("/alerts").json()
+        assert body["alerts"][1]["delivered"] is False
+
+    def test_no_auth_required(self):
+        """Same posture as /listings: addresses and scores, no credential."""
+        from unittest.mock import patch
+        with patch("app.main.db.get_recent_alerts", return_value=[]):
+            assert TestClient(app).get("/alerts").status_code == 200
+
+    def test_limit_is_clamped(self):
+        from unittest.mock import patch
+        with patch("app.main.db.get_recent_alerts", return_value=[]) as g:
+            TestClient(app).get("/alerts?limit=99999")
+            assert g.call_args.args[0] == 500
+            TestClient(app).get("/alerts?limit=0")
+            assert g.call_args.args[0] == 1
+
+    def test_health_reports_the_volume_and_the_repeat_share(self):
+        from unittest.mock import patch
+        from app.main import _push_health
+        with patch("app.main.settings") as s, \
+             patch("app.main.db.count_alerts_since") as c:
+            s.ntfy_topic = "t" * 48
+            s.ntfy_url = "https://ntfy.sh/" + "t" * 48
+            s.ntfy_server = "https://ntfy.sh"
+            s.ntfy_token = "tk"
+            s.pushover_token = s.pushover_user = s.slack_webhook_url = ""
+            s.notify_score_threshold = 75
+            c.return_value = {"total": 9, "counts": {"first_time": 2, "re_armed": 7},
+                              "last_alert_at": "2026-08-17T12:00:00+00:00"}
+            out = _push_health()
+        assert out["alerts_last_7d"] == 9
+        assert out["alerts_last_7d_by_reason"]["re_armed"] == 7
+        assert out["last_alert_at"] == "2026-08-17T12:00:00+00:00"
+
+    def test_health_survives_a_missing_alerts_table(self):
+        """An old DB that hasn't run the new schema yet must not 500 /health."""
+        from unittest.mock import patch
+        from app.main import _push_health
+        with patch("app.main.settings") as s, \
+             patch("app.main.db.count_alerts_since", side_effect=RuntimeError("no table")):
+            s.ntfy_topic = "t"
+            s.ntfy_url = "https://ntfy.sh/t"
+            s.ntfy_server = "https://ntfy.sh"
+            s.ntfy_token = ""
+            s.pushover_token = s.pushover_user = s.slack_webhook_url = ""
+            s.notify_score_threshold = 75
+            assert _push_health()["alerts_last_7d"] is None
+
+
+class TestTheAlertBarIsAboveTheDefaultScore:
+    """72 is the model's habitual score for "clears the hard gates, nothing else
+    decisive" — 24 of 163 listings sit on it exactly, and 17 of the 24 alerts ever
+    sent were 72s. A bar at 70 alerted on nearly everything not rejected, which is
+    the same as having no bar.
+    """
+
+    def test_the_threshold_clears_the_modal_score(self):
+        from app.config import Settings
+        assert Settings().notify_score_threshold > 72
+
+    def test_a_rearm_margin_is_configured(self):
+        from app.config import Settings
+        s = Settings()
+        assert s.notify_rearm_margin > 0
+        # Wider than the gap between adjacent score bands (68/71/72/73/76)
+        assert s.notify_rearm_margin >= 5

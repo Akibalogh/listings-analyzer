@@ -443,6 +443,18 @@ def _push_health() -> dict:
         push["topic_sha256_prefix"] = hashlib.sha256(topic.encode()).hexdigest()[:12]
         push["topic_has_surrounding_whitespace"] = topic != topic.strip()
         push["topic_has_quotes"] = any(c in topic for c in "\"'")
+
+    # Volume, so "am I getting a lot of alerts?" has an answer that isn't a guess.
+    # `re_armed` is the number that matters: those are houses the phone was told
+    # about before.
+    try:
+        since = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+        recent = db.count_alerts_since(since)
+        push["alerts_last_7d"] = recent["total"]
+        push["alerts_last_7d_by_reason"] = recent["counts"]
+        push["last_alert_at"] = recent["last_alert_at"]
+    except Exception:
+        push["alerts_last_7d"] = None
     return push
 
 
@@ -586,6 +598,22 @@ def list_listings():
     """Get all scored listings. Public — no auth required."""
     listings = db.get_all_listings()
     return {"count": len(listings), "listings": listings}
+
+
+@app.get("/alerts")
+def list_alerts(limit: int = 100):
+    """Every push alert this app has sent, newest first. Public — no auth required.
+
+    Same posture as /listings: it exposes addresses and scores, which /listings
+    already does, and no credential. `reason` distinguishes a first-time alert
+    from a repeat, and `delivered` records whether the channel actually accepted
+    it — a rejected send is worth seeing, not hiding.
+
+    Only covers alerts sent after this log existed. Everything before that is
+    unrecoverable; `notified_at` on those listings reads 1970 as a marker.
+    """
+    rows = db.get_recent_alerts(min(max(limit, 1), 500))
+    return {"count": len(rows), "alerts": rows}
 
 
 @app.get("/listings/{mls_id}")
@@ -1146,6 +1174,10 @@ def notify_test(request: Request):
     # {"sent": true} no matter what, so a publish ntfy rejected was
     # indistinguishable from one that reached a phone.
     delivered = send_high_score_alert(listing, listing["score"], listing.get("verdict", ""))
+    # A test alert still buzzes the phone, so it belongs in the log — tagged, so
+    # the ntfy debugging sessions don't read later as real listing alerts.
+    db.log_alert({**listing, "alert_reason": "test"}, listing["score"],
+                 listing.get("verdict", ""), delivered)
     return {
         "sent": any(delivered.values()),
         "delivered": delivered,
@@ -1368,8 +1400,14 @@ def _get_image_urls(listing_row: dict) -> list[str] | None:
     return None
 
 
-def _rescore_one_listing(listing_row: dict, criteria: dict) -> "ScoringResult":
-    """Re-score a single listing dict using AI evaluation."""
+def _rescore_one_listing(
+    listing_row: dict, criteria: dict, criteria_rescore: bool = False,
+) -> "ScoringResult":
+    """Re-score a single listing dict using AI evaluation.
+
+    criteria_rescore=True marks this as part of a full-corpus rescore, which must
+    not re-arm the notify latch (see db.update_score).
+    """
     listing_data = _build_listing_data(listing_row)
     image_urls = _get_image_urls(listing_row)
 
@@ -1387,6 +1425,7 @@ def _rescore_one_listing(listing_row: dict, criteria: dict) -> "ScoringResult":
         criteria_version=criteria["version"],
         reasoning=reasoning,
         property_summary=score.property_summary,
+        criteria_rescore=criteria_rescore,
     )
     return score
 
@@ -1484,6 +1523,7 @@ def _rescore_all(criteria_version: int, instructions: str):
                             method=gated.evaluation_method,
                             criteria_version=criteria_version,
                             reasoning=gated.reasoning,
+                            criteria_rescore=True,
                         )
                         scored_so_far += 1
                         db.rescore_state["completed"] = skip_count + scored_so_far
@@ -1547,6 +1587,7 @@ def _rescore_all(criteria_version: int, instructions: str):
                             criteria_version=criteria_version,
                             reasoning=reasoning,
                             property_summary=score_result.property_summary,
+                            criteria_rescore=True,
                         )
                     else:
                         logger.warning(f"Batch result for listing #{lid} could not be parsed")
@@ -1590,7 +1631,7 @@ def _rescore_all_sequential(
             continue
 
         try:
-            _rescore_one_listing(listing, criteria)
+            _rescore_one_listing(listing, criteria, criteria_rescore=True)
         except Exception as e:
             logger.error(f"Failed to re-score listing #{lid}: {e}")
 

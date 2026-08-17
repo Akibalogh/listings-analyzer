@@ -95,7 +95,8 @@ def _listing_summary(listing: dict) -> tuple[str, str, str]:
     price_str = f"${price:,}" if price else "Price unknown"
     parts = [f"{sqft:,} sqft" if sqft else "", f"{beds} bd" if beds else "",
              f"{commute} min commute" if commute else "",
-             "" if (listing.get("listing_status") or "").strip() else "status unknown — may be sold"]
+             "" if (listing.get("listing_status") or "").strip() else "status unknown — may be sold",
+             f"MLS #{listing['mls_id']}" if listing.get("mls_id") else ""]
     stats = " · ".join([p for p in parts if p])
     return f"{address}, {town} {state}", f"{price_str}  {stats}".strip(), _alert_link(listing)
 
@@ -146,24 +147,28 @@ def _header_safe(text: str) -> str:
 
 
 def _alert_link(listing: dict) -> str:
-    """Where an alert should send you — never a OneHome portal link.
+    """Where an alert should send you: the listing itself, when there is one.
 
-    A OneHome URL's `token` query parameter is base64 JSON carrying the buyer's
-    email, contact id, agent id, and the saved search's id and key. There is no
-    login behind it: the token IS the authentication, so the URL is a bearer
-    credential and must not be broadcast to a push topic or a Slack channel. It
-    cannot be trimmed either — the listing id lives inside the token, so a
-    stripped URL points at nothing.
+    OneHome portal links were substituted for the dashboard for a while, because
+    their `token` query parameter is base64 JSON carrying the buyer's email,
+    contact id, agent id, and the saved search's key — and there is no login
+    behind it, so the URL is effectively a bearer credential.
 
-    They are also long. 120 Cedar Drive E's is 313 characters, and it rode in
-    the ntfy `Click` header.
+    Restored at Aki's request (2026-08). The judgement is his to make and it is
+    a defensible one: the topic is 48 random hex characters, the exposure is a
+    house shortlist rather than anything of value, and an alert you cannot tap
+    is a real cost every day against a theoretical one. 56 of 159 listings are
+    OneHome links; the other 102 are Redfin and never carried a credential.
 
-    Real listing links (Redfin and the like) carry no credential and are kept.
+    There is no credential-free alternative to weigh against it. OneKeyMLS moved
+    from /address/{slug}/{mls_id} — derivable from the MLS number — to
+    /home-details/{slug}/{opaqueId}, and the opaque id cannot be constructed
+    (see the note in app/parsers/onehome.py). So it is the portal link or
+    nothing clickable at all.
+
+    The dashboard remains the fallback for listings with no URL of any kind.
     """
-    url = listing.get("listing_url") or ""
-    if "onehome.com" in url:
-        return settings.public_base_url.rstrip("/")
-    return url
+    return (listing.get("listing_url") or "").strip() or settings.public_base_url.rstrip("/")
 
 
 def _redact_topic(text: str) -> str:

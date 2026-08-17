@@ -501,66 +501,63 @@ class TestUnknownStatusIsCalledOut:
         assert "status unknown" in (body.decode() if isinstance(body, bytes) else body)
 
 
-class TestAlertLinkNeverLeaksTheOneHomeToken:
+class TestAlertLinkPointsAtTheListing:
     """A OneHome URL's `token` is base64 JSON carrying the buyer's email,
-    contact id, agent id, and the saved search's id and key. There is no login
-    behind it — the token IS the authentication — so the URL is a bearer
-    credential and must not go to a push topic or a Slack channel. It also
-    can't be trimmed: the listing id lives inside the token.
+    contact id, agent id, and the saved search's key, with no login behind it —
+    so the URL is effectively a bearer credential. These links were swapped for
+    the dashboard for that reason, and restored at Aki's decision: the ntfy
+    topic is 48 random hex characters, the exposure is a house shortlist, and an
+    alert you cannot tap costs something every day against a theoretical risk.
+
+    No credential-free alternative exists to weigh against it — OneKeyMLS moved
+    to /home-details/{slug}/{opaqueId} and the opaque id cannot be derived from
+    the MLS number, so it is the portal link or nothing clickable.
     """
 
     ONEHOME = ("https://portal.onehome.com/en-US/listing?token="
                "eyJPU04iOiJLRVkiLCJlbWFpbCI6ImFraWJhbG9naEBnbWFpbC5jb20ifQ==&SMS=0")
+    REDFIN = "https://www.redfin.com/NY/Katonah/59-Orchard-Hill-Rd-10536/home/20050852"
 
-    def test_onehome_link_is_replaced(self):
+    def test_onehome_link_is_used(self):
         from app.notifier import _alert_link
-        out = _alert_link({"listing_url": self.ONEHOME})
-        assert "onehome" not in out
-        assert "token=" not in out
-        assert out.startswith("http")
+        assert _alert_link({"listing_url": self.ONEHOME}) == self.ONEHOME
 
-    def test_replacement_is_the_dashboard(self):
+    def test_redfin_link_is_used(self):
+        """102 of 159 listings are Redfin and never carried a credential."""
         from app.notifier import _alert_link
+        assert _alert_link({"listing_url": self.REDFIN}) == self.REDFIN
+
+    def test_dashboard_is_the_fallback_when_there_is_no_url(self):
         from app.config import settings
-        assert _alert_link({"listing_url": self.ONEHOME}) == settings.public_base_url.rstrip("/")
-
-    def test_real_listing_links_are_kept(self):
-        """Redfin URLs carry no credential — no reason to lose them."""
         from app.notifier import _alert_link
-        redfin = "https://www.redfin.com/NY/Katonah/59-Orchard-Hill-Rd-10536/home/20050852"
-        assert _alert_link({"listing_url": redfin}) == redfin
+        expected = settings.public_base_url.rstrip("/")
+        assert _alert_link({}) == expected
+        assert _alert_link({"listing_url": None}) == expected
+        assert _alert_link({"listing_url": "   "}) == expected
 
-    def test_missing_url_stays_empty(self):
-        from app.notifier import _alert_link
-        assert _alert_link({}) == ""
-        assert _alert_link({"listing_url": None}) == ""
-
-    def test_ntfy_click_header_carries_no_token(self):
+    def test_ntfy_click_header_is_tappable(self):
+        """The whole point — the alert was arriving with nothing to tap."""
         from unittest.mock import patch
         from app.notifier import notify_ntfy
         with patch("app.notifier.settings") as s:
             s.ntfy_url = "https://ntfy.sh/topic"
             s.ntfy_token = ""
+            s.ntfy_topic = "topic"
             s.public_base_url = "https://listings-analyzer.fly.dev"
             with patch("app.notifier.httpx.post") as post:
                 notify_ntfy({"address": "120 Cedar Drive E", "town": "Briarcliff",
                              "listing_url": self.ONEHOME, "listing_status": "Active"},
                             82, "Strong Match")
-            headers = post.call_args.kwargs["headers"]
-        assert "token=" not in headers.get("Click", "")
-        assert "onehome" not in headers.get("Click", "")
+            assert post.call_args.kwargs["headers"]["Click"] == self.ONEHOME
 
-    def test_slack_body_carries_no_token(self):
-        from unittest.mock import patch
-        from app.notifier import notify_new_listing
-        with patch("app.notifier.settings") as s:
-            s.slack_webhook_url = "https://hooks.slack.com/services/x"
-            s.public_base_url = "https://listings-analyzer.fly.dev"
-            with patch("app.notifier._post_slack") as post:
-                notify_new_listing({"address": "120 Cedar Drive E", "town": "Briarcliff",
-                                    "listing_url": self.ONEHOME}, 82, "Strong Match", "ai")
-            text = post.call_args.args[0]
-        assert "token=" not in text and "onehome" not in text
+    def test_mls_number_rides_along(self):
+        """Free, and it survives a link that 404s."""
+        from app.notifier import _listing_summary
+        _, stats, _ = _listing_summary({
+            "address": "1 A St", "town": "Rye", "mls_id": "1038981",
+            "listing_status": "Active", "price": 949000,
+        })
+        assert "MLS #1038981" in stats
 
 
 class TestAlertDeliveryIsReported:
@@ -849,7 +846,7 @@ class TestNotifyLatchIsRearmed:
         from app.models import ScoringResult
         return ScoringResult(score=value, verdict="Worth Touring" if value >= 60 else "Low Priority")
 
-    def _update(self, value, threshold=70):
+    def _update(self, value, threshold=70, margin=10, criteria_rescore=False):
         from unittest.mock import MagicMock, patch
         cur = MagicMock()
         conn = MagicMock()
@@ -861,8 +858,10 @@ class TestNotifyLatchIsRearmed:
              patch("app.db.settings") as s:
             s.is_postgres = False
             s.notify_score_threshold = threshold
+            s.notify_rearm_margin = margin
             from app.db import update_score
-            update_score(1, self._score(value), "ai", 74, None)
+            update_score(1, self._score(value), "ai", 74, None,
+                         criteria_rescore=criteria_rescore)
         return [c.args[0] for c in cur.execute.call_args_list]
 
     def test_a_drop_below_threshold_rearms(self):
@@ -882,6 +881,67 @@ class TestNotifyLatchIsRearmed:
     def test_the_threshold_is_the_configured_one(self):
         assert "notified = FALSE" in " ".join(self._update(65, threshold=80))
         assert "notified = FALSE" not in " ".join(self._update(85, threshold=80))
+
+
+class TestACriteriaRescoreNeverRearmsTheLatch:
+    """A criteria rescore rewrites every score in the corpus at once, so a
+    version that lowers scores re-arms dozens of latches and the next version
+    that raises them fires all those alerts together — houses from months ago, in
+    a burst, because the rubric changed rather than because anything about the
+    house did.
+
+    v72→v75 did this. v75 removed the missing-data penalties, so it raised scores
+    corpus-wide, and up to 17 of the 24 previously-alerted listings could have
+    re-fired on that single run. Aki noticed as "a lot of ntfy alerts".
+    """
+
+    _update = TestNotifyLatchIsRearmed._update
+    _score = staticmethod(TestNotifyLatchIsRearmed._score)
+
+    def test_a_criteria_rescore_leaves_the_latch_alone(self):
+        for value in (0, 30, 48, 69):
+            sql = " ".join(self._update(value, criteria_rescore=True))
+            assert "notified = FALSE" not in sql, value
+
+    def test_the_score_is_still_written(self):
+        """Suppressing the alert must not suppress the score."""
+        sql = " ".join(self._update(48, criteria_rescore=True))
+        assert "INSERT INTO scores" in sql
+
+    def test_an_ordinary_rescore_still_rearms(self):
+        """A fixed commute or a freshly scraped description should still be able
+        to bring a written-off house back."""
+        assert "notified = FALSE" in " ".join(self._update(48, criteria_rescore=False))
+
+
+class TestTheLatchIgnoresModelJitter:
+    """`enqueue_missing` re-queues an AI score job every hour for any listing
+    with an enrichment gap, and 85 of 163 listings have a permanently
+    un-scrapeable description or image set — so the model re-scores those hourly,
+    forever. Scores band at 68/71/72/73/76, so a single band of jitter across the
+    bar cleared the latch and re-alerted a house nothing had changed about.
+
+    notify_rearm_margin requires a real fall, not a wobble.
+    """
+
+    _update = TestNotifyLatchIsRearmed._update
+    _score = staticmethod(TestNotifyLatchIsRearmed._score)
+
+    def test_one_band_of_jitter_does_not_rearm(self):
+        """76 → 72 under a 75 bar: still a good house, not news again."""
+        assert "notified = FALSE" not in " ".join(self._update(72, threshold=75, margin=10))
+
+    def test_a_real_collapse_still_rearms(self):
+        """38 Westerly Ln: 72 → 48 on a mis-resolved commute, and it deserved a
+        second alert when that was fixed."""
+        assert "notified = FALSE" in " ".join(self._update(48, threshold=75, margin=10))
+
+    def test_the_margin_is_the_configured_one(self):
+        assert "notified = FALSE" not in " ".join(self._update(66, threshold=75, margin=10))
+        assert "notified = FALSE" in " ".join(self._update(66, threshold=75, margin=5))
+
+    def test_a_zero_margin_is_the_old_behaviour(self):
+        assert "notified = FALSE" in " ".join(self._update(74, threshold=75, margin=0))
 
 
 class TestPriorityIsReservedForStrongMatch:

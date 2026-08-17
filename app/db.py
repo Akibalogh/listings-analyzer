@@ -86,6 +86,19 @@ CREATE TABLE IF NOT EXISTS jobs (
     updated_at TEXT DEFAULT (datetime('now')),
     UNIQUE(listing_id, task_type)
 );
+
+CREATE TABLE IF NOT EXISTS alerts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    listing_id INTEGER NOT NULL REFERENCES listings(id) ON DELETE CASCADE,
+    score INTEGER,
+    verdict TEXT,
+    criteria_version INTEGER,
+    listing_status TEXT,
+    reason TEXT,
+    channel TEXT,
+    delivered BOOLEAN,
+    sent_at TEXT DEFAULT (datetime('now'))
+);
 """
 
 # Postgres-compatible schema (uses SERIAL, TIMESTAMP, etc.)
@@ -159,6 +172,19 @@ CREATE TABLE IF NOT EXISTS jobs (
     created_at TIMESTAMP DEFAULT NOW(),
     updated_at TIMESTAMP DEFAULT NOW(),
     UNIQUE(listing_id, task_type)
+);
+
+CREATE TABLE IF NOT EXISTS alerts (
+    id SERIAL PRIMARY KEY,
+    listing_id INTEGER NOT NULL REFERENCES listings(id) ON DELETE CASCADE,
+    score INTEGER,
+    verdict TEXT,
+    criteria_version INTEGER,
+    listing_status TEXT,
+    reason TEXT,
+    channel TEXT,
+    delivered BOOLEAN,
+    sent_at TIMESTAMP DEFAULT NOW()
 );
 """
 
@@ -243,6 +269,10 @@ def init_db():
     # to notified=FALSE and alert normally when they first cross the threshold.
     _backfill_notified_flag()
 
+    # One-time: stamp already-alerted listings so a later re-alert is recognised
+    # as a repeat rather than logged as a first-time push.
+    _backfill_notified_at()
+
     logger.info("Database initialized")
 
 
@@ -260,6 +290,34 @@ def _backfill_notified_flag() -> None:
         logger.info(f"Marked {count} existing listings as already-notified (one-time)")
     except Exception:
         logger.warning("notified backfill failed", exc_info=True)
+
+
+# Stamped on listings that were alerted before the alerts log existed. The real
+# send times are unrecoverable — `notified` carried no timestamp and the scores
+# table upserts one row per listing — so rather than invent a plausible date this
+# marks them "alerted, at an unknown time before now". Its only job is to make
+# re_armed vs first_time correct for their next alert.
+NOTIFIED_AT_UNKNOWN = "1970-01-01T00:00:00+00:00"
+
+
+def _backfill_notified_at() -> None:
+    """Stamp notified=TRUE rows that predate the notified_at column (once)."""
+    if get_app_state("notified_at_backfill_done"):
+        return
+    ph = _placeholder()
+    try:
+        with get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                f"UPDATE listings SET notified_at = {ph} "
+                "WHERE notified = TRUE AND notified_at IS NULL",
+                (NOTIFIED_AT_UNKNOWN,),
+            )
+            count = cur.rowcount or 0
+        set_app_state("notified_at_backfill_done", "1")
+        logger.info(f"Stamped {count} previously-alerted listings with a sentinel notified_at")
+    except Exception:
+        logger.warning("notified_at backfill failed", exc_info=True)
 
 
 def _placeholder():
@@ -718,6 +776,7 @@ def _migrate_add_columns():
         ("listings", "passed_by", "TEXT"),
         ("listings", "liked_by", "TEXT"),
         ("listings", "notified", "BOOLEAN DEFAULT FALSE"),
+        ("listings", "notified_at", "TEXT"),
         ("listings", "buyer_notes", "TEXT"),
         ("listings", "year_built", "INTEGER"),
         ("listings", "list_date", "TEXT"),
@@ -991,8 +1050,13 @@ def update_score(
     criteria_version: int | None,
     reasoning: str | None,
     property_summary: str | None = None,
+    criteria_rescore: bool = False,
 ):
-    """Upsert a score for a listing. Automatically sets scored_at timestamp."""
+    """Upsert a score for a listing. Automatically sets scored_at timestamp.
+
+    Pass criteria_rescore=True from a full-corpus rescore so the notify latch is
+    left alone — see the comment at the bottom of this function.
+    """
     ph = _placeholder()
     hard_json = json.dumps([hr.model_dump() for hr in score.hard_results])
     soft_json = json.dumps(score.soft_points)
@@ -1056,7 +1120,27 @@ def update_score(
         # first fall below the threshold and then climb back, so an ordinary
         # rescore that nudges scores around cannot produce a storm, and the
         # existing claim_unnotified_high_scores() path does the rest.
-        if score.score < settings.notify_score_threshold:
+        #
+        # Except that a CRITERIA rescore is not an ordinary rescore. It rewrites
+        # every score in the corpus at once, so a version that lowers scores
+        # re-arms dozens of latches and the next version that raises them fires
+        # all of those alerts together — houses from months ago, in a burst,
+        # because the rubric changed rather than because anything about the
+        # house did. v72→v75 did exactly this: v75 removed the missing-data
+        # penalties, so it raised scores across the corpus, and up to 17 of the
+        # 24 previously-alerted listings could have re-fired on that one run.
+        #
+        # So the latch is re-armed only by a rescore of THIS listing driven by
+        # THIS listing's facts changing — a fixed commute, a scraped
+        # description, an edited note. Criteria changes leave it alone.
+        #
+        # And even then, only by a real fall, not by model jitter: see
+        # notify_rearm_margin. A listing that dips one scoring band below the bar
+        # and climbs back has not become news again.
+        if criteria_rescore:
+            return
+        rearm_at = settings.notify_score_threshold - settings.notify_rearm_margin
+        if score.score < rearm_at:
             cur.execute(
                 f"UPDATE listings SET notified = FALSE WHERE id = {ph} AND notified = TRUE",
                 (listing_id,),
@@ -1164,14 +1248,21 @@ def claim_unnotified_high_scores(threshold: int) -> list[dict]:
     mark them notified in the same transaction (so each alerts exactly once).
 
     Excludes off-market statuses — no point pinging about a pending/sold home.
+
+    Each row carries `alert_reason`: "first_time" when this listing has never
+    been alerted, "re_armed" when it has (notified_at already set) and the latch
+    was cleared by a score dip since. Without that distinction a repeat alert is
+    indistinguishable from a new one in the log, which is how the v75 burst went
+    unnoticed for days.
     """
     ph = _placeholder()
     with get_connection() as conn:
         cur = conn.cursor()
         cur.execute(f"""
             SELECT l.id, l.address, l.town, l.state, l.zip_code, l.price, l.sqft,
-                   l.bedrooms, l.commute_minutes, l.listing_url, s.score, s.verdict,
-                   s.evaluation_method
+                   l.bedrooms, l.commute_minutes, l.listing_url, l.mls_id,
+                   l.listing_status, l.notified_at, s.score, s.verdict,
+                   s.evaluation_method, s.criteria_version
             FROM listings l JOIN scores s ON s.listing_id = l.id
             WHERE (l.notified IS NULL OR l.notified = FALSE)
               AND s.score >= {ph}
@@ -1181,10 +1272,79 @@ def claim_unnotified_high_scores(threshold: int) -> list[dict]:
         cols = [d[0] for d in cur.description]
         rows = [dict(zip(cols, r)) for r in cur.fetchall()]
         if rows:
+            for r in rows:
+                r["alert_reason"] = "re_armed" if r.get("notified_at") else "first_time"
             ids = tuple(r["id"] for r in rows)
             placeholders = ", ".join([ph] * len(ids))
-            cur.execute(f"UPDATE listings SET notified = TRUE WHERE id IN ({placeholders})", ids)
+            now = datetime.now(timezone.utc).isoformat()
+            cur.execute(
+                f"UPDATE listings SET notified = TRUE, notified_at = {ph} "
+                f"WHERE id IN ({placeholders})",
+                (now, *ids),
+            )
     return rows
+
+
+def log_alert(listing: dict, score: int, verdict: str, delivery: dict) -> None:
+    """Record one alert attempt per channel, so "did we push this?" is answerable.
+
+    `notified` alone cannot answer it: it is a latch that gets cleared and re-set,
+    and it carries no timestamp, no score, and no channel. When Aki asked whether
+    a week of alerts was real there was nothing to read — this table is the answer
+    to that question next time. Failures are logged too (delivered = FALSE); a
+    send that ntfy rejected is exactly the kind of thing worth being able to see.
+
+    Never raises: an unlogged alert is bad, an unsent one is worse.
+    """
+    ph = _placeholder()
+    rows = [(k, bool(v)) for k, v in (delivery or {}).items()] or [("none", False)]
+    try:
+        with get_connection() as conn:
+            cur = conn.cursor()
+            for channel, delivered in rows:
+                cur.execute(
+                    f"""INSERT INTO alerts
+                        (listing_id, score, verdict, criteria_version, listing_status,
+                         reason, channel, delivered, sent_at)
+                        VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})""",
+                    (listing.get("id"), score, verdict, listing.get("criteria_version"),
+                     listing.get("listing_status"), listing.get("alert_reason") or "first_time",
+                     channel, delivered, datetime.now(timezone.utc).isoformat()),
+                )
+    except Exception:
+        logger.warning("alert log write failed", exc_info=True)
+
+
+def get_recent_alerts(limit: int = 100) -> list[dict]:
+    """Most recent alerts, newest first, with the address they were about."""
+    ph = _placeholder()
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(f"""
+            SELECT a.sent_at, a.score, a.verdict, a.reason, a.channel, a.delivered,
+                   a.criteria_version, a.listing_status, a.listing_id,
+                   l.address, l.town, l.mls_id
+            FROM alerts a LEFT JOIN listings l ON l.id = a.listing_id
+            ORDER BY a.sent_at DESC, a.id DESC
+            LIMIT {ph}
+        """, (limit,))
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+
+def count_alerts_since(iso_timestamp: str) -> dict:
+    """Alert counts since a timestamp, split by first_time vs re_armed."""
+    ph = _placeholder()
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            f"SELECT reason, COUNT(*) FROM alerts WHERE sent_at >= {ph} GROUP BY reason",
+            (iso_timestamp,),
+        )
+        counts = {row[0] or "unknown": row[1] for row in cur.fetchall()}
+        cur.execute("SELECT MAX(sent_at) FROM alerts")
+        last = cur.fetchone()[0]
+    return {"counts": counts, "total": sum(counts.values()), "last_alert_at": last}
 
 
 def get_all_listing_ids() -> list[int]:
