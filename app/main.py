@@ -21,7 +21,12 @@ from app.auth import (
 )
 from app.config import settings
 from app.poller import poll_once
-from app.scorer import ai_score_listing, build_batch_request, parse_batch_result
+from app.scorer import (
+    ai_score_listing,
+    build_batch_request,
+    parse_batch_result,
+    score_input_fingerprint,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1426,6 +1431,7 @@ def _rescore_one_listing(
         reasoning=reasoning,
         property_summary=score.property_summary,
         criteria_rescore=criteria_rescore,
+        input_fingerprint=score_input_fingerprint(listing_row),
     )
     return score
 
@@ -1524,6 +1530,7 @@ def _rescore_all(criteria_version: int, instructions: str):
                             criteria_version=criteria_version,
                             reasoning=gated.reasoning,
                             criteria_rescore=True,
+                            input_fingerprint=score_input_fingerprint(listing),
                         )
                         scored_so_far += 1
                         db.rescore_state["completed"] = skip_count + scored_so_far
@@ -1588,6 +1595,10 @@ def _rescore_all(criteria_version: int, instructions: str):
                             reasoning=reasoning,
                             property_summary=score_result.property_summary,
                             criteria_rescore=True,
+                            input_fingerprint=(
+                                score_input_fingerprint(scored_listing)
+                                if scored_listing else None
+                            ),
                         )
                     else:
                         logger.warning(f"Batch result for listing #{lid} could not be parsed")
@@ -4121,20 +4132,17 @@ def manage_rescrape_unknowns(request: Request):
                 scraped += 1
                 logger.info(f"Scraped {len(new_images)} images for listing {listing_id}")
 
-                # Re-score with new images
-                listing_data = db.get_listing_by_id(listing_id)
-                if listing_data:
-                    result, reasoning = ai_score_listing(
-                        listing_data,
-                        criteria["instructions"],
-                        image_urls=new_images,
-                    )
-                    db.save_score(
-                        listing_id,
-                        result,
-                        reasoning,
-                        criteria_version=criteria["version"],
-                    )
+                # Re-score with new images.
+                #
+                # This used to call db.save_score(), which does not exist — the
+                # AttributeError was swallowed by the except below, so the
+                # endpoint reported an error per listing and never rescored
+                # anything. It also handed ai_score_listing() the raw DB row
+                # instead of a built payload. _rescore_one_listing does both
+                # correctly and records the input fingerprint.
+                fresh = db.get_listing_by_id(listing_id)
+                if fresh:
+                    result = _rescore_one_listing(fresh, criteria)
                     rescored += 1
                     logger.info(
                         f"Re-scored listing {listing_id}: {result.verdict} ({result.score}/100)"

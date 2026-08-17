@@ -38,6 +38,7 @@ import time
 
 from app import db
 from app.config import settings
+from app.scorer import score_input_fingerprint
 
 logger = logging.getLogger(__name__)
 
@@ -159,12 +160,24 @@ def enqueue_missing(force: bool = False) -> dict:
         if not listing.get("school_data_json") and listing.get("zip_code"):
             tasks.append("schools")
 
+        # Rescore when the model's inputs have changed since it last looked, not
+        # when the listing merely has a gap. `bool(tasks)` was the old trigger —
+        # "enrichment is about to change the data, so rescore after" — but 85 of
+        # 163 listings have a description or image set Redfin will never let us
+        # scrape. The gap never closes, so the scrape failed and the score ran
+        # every hour anyway: ~2,000 Haiku calls a day re-deriving the same answer,
+        # with enough jitter to flap scores across the alert threshold and re-push
+        # houses nothing had changed about.
+        #
+        # A fingerprint of the scored fields states the real condition. Enrichment
+        # that lands changes the fingerprint and earns its rescore; a gap that
+        # cannot be filled changes nothing and gets nothing.
         meta = score_meta.get(lid)
         needs_score = not rescore_running and (
-            bool(tasks)  # enrichment will change the data → rescore after
-            or not meta
+            not meta
             or meta.get("evaluation_method") not in ("ai", "deterministic-gate")
             or (criteria and meta.get("criteria_version") != criteria["version"])
+            or meta.get("input_fingerprint") != score_input_fingerprint(listing)
         )
         if needs_score:
             tasks.append("score")

@@ -5,7 +5,7 @@ import pytest
 from app import db, jobs
 from app.config import settings
 from app.models import ParsedListing, ScoringResult
-from app.scorer import deterministic_gate
+from app.scorer import deterministic_gate, score_input_fingerprint
 
 
 @pytest.fixture
@@ -261,6 +261,7 @@ class TestEnqueueMissing:
         db.update_score(
             listing_id=lid, score=score, method="ai",
             criteria_version=criteria_version, reasoning="fine",
+            input_fingerprint=score_input_fingerprint(db.get_listing_by_id(lid)),
         )
         counts = jobs.enqueue_missing()
         assert all(v == 0 for v in counts.values()), counts
@@ -453,3 +454,193 @@ class TestPreLogAlertsAreMarkedNotInvented:
 
     def test_it_runs_once(self, temp_db):
         assert db.get_app_state("notified_at_backfill_done") == "1"
+
+
+class TestAPermanentGapNoLongerRescoresForever:
+    """`enqueue_missing` used to queue a score job whenever a listing had a data
+    gap, on the theory that enrichment was about to change the data. But 85 of 163
+    listings have a description or image set Redfin will never let us scrape, so
+    the gap never closed: the scrape failed and the score ran every hour anyway.
+    ~2,000 Haiku calls a day re-deriving the same answer, with enough jitter to
+    flap scores across the alert threshold and re-push settled houses.
+
+    The condition is now "the inputs changed", which a permanent gap is not.
+    """
+
+    def _scored_with_gap(self, temp_db):
+        """A listing with no description and no images — the 85-listing case."""
+        lid = _make_listing(address="1 Gap St", price=1_000_000, sqft=3000,
+                            bedrooms=4, bathrooms=3)
+        db.update_listing_enrichment(lid, {
+            "commute_minutes": 75, "school_data_json": '{"high": []}',
+        })
+        version = db.save_criteria("c", created_by="t")
+        db.update_score(
+            listing_id=lid,
+            score=ScoringResult(score=72, verdict="Worth Touring", evaluation_method="ai"),
+            method="ai", criteria_version=version, reasoning="r",
+            input_fingerprint=score_input_fingerprint(db.get_listing_by_id(lid)),
+        )
+        return lid
+
+    def test_the_scrape_is_still_retried(self, temp_db):
+        """The gap is real and worth another try — that was never the problem."""
+        self._scored_with_gap(temp_db)
+        assert jobs.enqueue_missing()["scrape_desc"] == 1
+
+    def test_but_the_score_is_not(self, temp_db):
+        self._scored_with_gap(temp_db)
+        assert jobs.enqueue_missing()["score"] == 0
+
+    def test_and_not_on_the_next_tick_either(self, temp_db):
+        """The hourly loop: same inputs, same answer, no call."""
+        self._scored_with_gap(temp_db)
+        for _ in range(5):
+            assert jobs.enqueue_missing()["score"] == 0
+
+    def test_enrichment_that_lands_earns_a_rescore(self, temp_db):
+        lid = self._scored_with_gap(temp_db)
+        assert jobs.enqueue_missing()["score"] == 0
+        db.update_listing_description(lid, "https://example.com/l",
+                                      "Now with a ground-floor bedroom")
+        assert jobs.enqueue_missing()["score"] == 1
+
+    def test_new_images_earn_a_rescore(self, temp_db):
+        """Vision input the model hasn't seen is a changed input."""
+        lid = self._scored_with_gap(temp_db)
+        assert jobs.enqueue_missing()["score"] == 0
+        db.add_listing_images(lid, ["https://example.com/kitchen.jpg"])
+        assert jobs.enqueue_missing()["score"] == 1
+
+    def test_a_price_change_earns_a_rescore(self, temp_db):
+        lid = self._scored_with_gap(temp_db)
+        assert jobs.enqueue_missing()["score"] == 0
+        with db.get_connection() as conn:
+            conn.cursor().execute(
+                f"UPDATE listings SET price = 899000 WHERE id = {db._placeholder()}", (lid,))
+        assert jobs.enqueue_missing()["score"] == 1
+
+    def test_a_status_change_earns_a_rescore(self, temp_db):
+        """Sold is scoring-relevant — it is a hard reject."""
+        lid = self._scored_with_gap(temp_db)
+        with db.get_connection() as conn:
+            conn.cursor().execute(
+                f"UPDATE listings SET listing_status = 'Sold' WHERE id = {db._placeholder()}",
+                (lid,))
+        assert jobs.enqueue_missing()["score"] == 1
+
+    def test_a_never_scored_listing_still_gets_scored(self, temp_db):
+        _make_listing(address="2 Fresh St")
+        assert jobs.enqueue_missing()["score"] == 1
+
+    def test_a_criteria_change_still_rescores_everything(self, temp_db):
+        lid = self._scored_with_gap(temp_db)
+        assert jobs.enqueue_missing()["score"] == 0
+        db.save_criteria("new rubric", created_by="t")
+        assert jobs.enqueue_missing()["score"] == 1
+
+    def test_a_missing_fingerprint_means_rescore(self, temp_db):
+        """An old score written before the column existed is not known current."""
+        lid = self._scored_with_gap(temp_db)
+        with db.get_connection() as conn:
+            conn.cursor().execute(
+                f"UPDATE scores SET input_fingerprint = NULL WHERE listing_id = {db._placeholder()}",
+                (lid,))
+        assert jobs.enqueue_missing()["score"] == 1
+
+
+class TestTheFingerprintCoversWhatTheModelSees:
+    """The fingerprint hashes raw columns rather than the built payload, to avoid
+    163 regex passes per tick. That is only equivalent while the column list
+    matches what _build_listing_data reads — this test is the guard.
+    """
+
+    def test_it_covers_every_field_the_scorer_reads(self):
+        import inspect
+        import re
+
+        from app.main import _build_listing_data
+        from app.scorer import SCORE_INPUT_FIELDS
+
+        src = inspect.getsource(_build_listing_data)
+        read = set(re.findall(r'listing_row(?:\.get\(|\[)["\']([a-z_]+)["\']', src))
+        assert read - set(SCORE_INPUT_FIELDS) == set(), (
+            "a field the scorer reads is not fingerprinted, so changes to it "
+            "would never trigger a rescore"
+        )
+
+    def test_it_hashes_nothing_the_scorer_ignores(self):
+        """Extra fields would rescore on irrelevant churn — enriched_at moves on
+        every enrichment write, including ones that changed nothing."""
+        import inspect
+        import re
+
+        from app.main import _build_listing_data
+        from app.scorer import SCORE_INPUT_FIELDS
+
+        src = inspect.getsource(_build_listing_data)
+        read = set(re.findall(r'listing_row(?:\.get\(|\[)["\']([a-z_]+)["\']', src))
+        assert set(SCORE_INPUT_FIELDS) - read == set()
+
+    def test_it_is_stable_for_unchanged_data(self):
+        row = {"address": "1 A St", "price": 900000, "description": "nice"}
+        assert score_input_fingerprint(row) == score_input_fingerprint(dict(row))
+
+    def test_it_ignores_columns_outside_the_set(self):
+        base = {"address": "1 A St", "price": 900000}
+        assert score_input_fingerprint(base) == score_input_fingerprint(
+            {**base, "enriched_at": "2026-08-17T00:00:00+00:00", "notified": True})
+
+    def test_it_survives_a_non_serialisable_value(self):
+        from datetime import datetime
+        score_input_fingerprint({"list_date": datetime(2026, 8, 17)})  # must not raise
+
+
+class TestTheFingerprintBackfillAvoidsAPointlessRescore:
+    """Introducing the column left every score with NULL, which the gap scan
+    reads as "inputs changed" — a corpus-wide rescore on the first boot, the
+    exact waste the column exists to prevent.
+    """
+
+    def _score_it(self, lid, enriched_after=False):
+        version = db.save_criteria("c", created_by="t")
+        db.update_score(
+            listing_id=lid,
+            score=ScoringResult(score=72, verdict="Worth Touring", evaluation_method="ai"),
+            method="ai", criteria_version=version, reasoning="r",
+        )
+        if enriched_after:
+            with db.get_connection() as conn:
+                conn.cursor().execute(
+                    f"UPDATE listings SET enriched_at = '2999-01-01T00:00:00+00:00' "
+                    f"WHERE id = {db._placeholder()}", (lid,))
+
+    def test_a_current_score_gets_stamped(self, temp_db):
+        lid = _make_listing(address="3 Backfill St")
+        self._score_it(lid)
+        db.set_app_state("score_fingerprint_backfill_done", "")
+        db._backfill_score_fingerprints()
+        assert db.get_all_score_metadata()[lid]["input_fingerprint"] == \
+            score_input_fingerprint(db.get_listing_by_id(lid))
+
+    def test_a_score_older_than_its_enrichment_is_left_alone(self, temp_db):
+        """Data arrived after the model last looked — that one should rescore."""
+        lid = _make_listing(address="4 Backfill St")
+        self._score_it(lid, enriched_after=True)
+        db.set_app_state("score_fingerprint_backfill_done", "")
+        db._backfill_score_fingerprints()
+        assert db.get_all_score_metadata()[lid]["input_fingerprint"] is None
+
+    def test_it_runs_once(self, temp_db):
+        assert db.get_app_state("score_fingerprint_backfill_done") == "1"
+
+    def test_a_stamped_corpus_queues_no_score_jobs(self, temp_db):
+        lid = _make_listing(address="5 Backfill St", price=1_000_000, sqft=3000,
+                            bedrooms=4, bathrooms=3, description="d")
+        db.add_listing_images(lid, ["https://example.com/1.jpg"])
+        db.update_listing_enrichment(lid, {"commute_minutes": 75,
+                                           "school_data_json": '{"high": []}'})
+        self._score_it(lid)
+        db.set_app_state("score_fingerprint_backfill_done", "")
+        db._backfill_score_fingerprints()
+        assert jobs.enqueue_missing()["score"] == 0

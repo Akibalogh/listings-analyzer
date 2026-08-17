@@ -2376,3 +2376,30 @@ class TestTheAlertBarIsAboveTheDefaultScore:
         assert s.notify_rearm_margin > 0
         # Wider than the gap between adjacent score bands (68/71/72/73/76)
         assert s.notify_rearm_margin >= 5
+
+
+class TestRescrapeUnknownsActuallyRescores:
+    """/manage/rescrape-unknowns called db.save_score(), which does not exist.
+    The AttributeError was swallowed by the endpoint's own except, so every
+    listing came back as an error and nothing was ever re-scored — a silent
+    no-op that reported itself as work attempted.
+    """
+
+    def test_no_call_to_a_function_that_does_not_exist(self):
+        import inspect
+
+        import app.main as main
+        from app import db
+
+        assert not hasattr(db, "save_score")
+        code = [ln for ln in inspect.getsource(main).splitlines()
+                if not ln.lstrip().startswith("#")]
+        assert not [ln for ln in code if "db.save_score(" in ln]
+
+    def test_it_persists_through_the_fingerprinted_path(self):
+        """Any score write that skips the fingerprint gets re-scored every tick
+        until something fills it in."""
+        import inspect
+        from app.main import manage_rescrape_unknowns
+        src = inspect.getsource(manage_rescrape_unknowns)
+        assert "_rescore_one_listing(" in src
