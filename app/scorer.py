@@ -8,6 +8,7 @@ against prompt injection from listing data.
 """
 
 import base64
+import hashlib
 import json
 import logging
 import re
@@ -19,6 +20,52 @@ from app.config import settings
 from app.models import HardResult, ScoringResult
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Score input fingerprint
+# ---------------------------------------------------------------------------
+
+# Every listings column that _build_listing_data reads. Everything the model is
+# shown is a pure function of these — the parse_*/score_* helpers derive age,
+# views, outdoor features and the rest from `description` and `year_built`, so
+# hashing the raw columns is equivalent to hashing the built payload and costs no
+# regex passes over 163 descriptions on every scheduler tick.
+#
+# A test asserts this set against the columns _build_listing_data actually reads,
+# so adding a field there without adding it here fails rather than silently
+# freezing scores.
+SCORE_INPUT_FIELDS = (
+    "address", "basement_gym_suitable", "basement_type", "bathrooms", "bedrooms",
+    "buyer_notes", "commute_data_json", "commute_minutes", "description",
+    "flood_zone_json", "garage_count", "garage_type", "has_basement", "has_pool",
+    "hoa_monthly", "image_urls_json", "list_date", "listing_status", "lot_acres",
+    "mls_id", "pool_type", "power_line_json", "price", "property_tax_json",
+    "property_type", "school_data_json", "sqft", "sqft_source", "sqft_verified",
+    "state", "station_json", "town", "year_built", "zip_code",
+)
+
+
+def score_input_fingerprint(listing_row: dict) -> str:
+    """Hash of everything the scorer is shown about this listing.
+
+    Answers "has the score gone stale?" without the AI having to decide.
+
+    The gap scan used to re-queue a score job whenever a listing had a data gap,
+    reasoning that enrichment was about to change the data. But 85 of 163
+    listings have a description or image set that can never be scraped — Redfin
+    bot-blocks the page — so the gap never closes, the scrape fails every hour,
+    and the score job runs anyway. ~2,000 Haiku calls a day producing the same
+    answer, with enough jitter to flap scores across the alert threshold.
+
+    A fingerprint states the real condition: rescore when the inputs changed.
+    A permanent gap is not a change.
+    """
+    payload = json.dumps(
+        {k: listing_row.get(k) for k in SCORE_INPUT_FIELDS},
+        sort_keys=True, default=str,
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()[:32]
 
 
 # ---------------------------------------------------------------------------

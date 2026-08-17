@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS scores (
     evaluation_method TEXT DEFAULT 'deterministic',
     criteria_version INTEGER,
     ai_reasoning TEXT,
+    input_fingerprint TEXT,
     created_at TEXT DEFAULT (datetime('now'))
 );
 
@@ -145,6 +146,7 @@ CREATE TABLE IF NOT EXISTS scores (
     evaluation_method TEXT DEFAULT 'deterministic',
     criteria_version INTEGER,
     ai_reasoning TEXT,
+    input_fingerprint TEXT,
     created_at TIMESTAMP DEFAULT NOW()
 );
 
@@ -273,6 +275,10 @@ def init_db():
     # as a repeat rather than logged as a first-time push.
     _backfill_notified_at()
 
+    # One-time: fingerprint scores that already reflect their listing's data, so
+    # introducing the column doesn't trigger a corpus-wide rescore.
+    _backfill_score_fingerprints()
+
     logger.info("Database initialized")
 
 
@@ -318,6 +324,52 @@ def _backfill_notified_at() -> None:
         logger.info(f"Stamped {count} previously-alerted listings with a sentinel notified_at")
     except Exception:
         logger.warning("notified_at backfill failed", exc_info=True)
+
+
+def _backfill_score_fingerprints() -> None:
+    """Fingerprint existing scores that already reflect their listing's data.
+
+    Without this, every score has input_fingerprint = NULL on the first boot after
+    the column lands, the gap scan reads that as "inputs changed", and the whole
+    corpus is re-scored once — the exact waste this column exists to stop.
+
+    Only scores that are already current get stamped. `enriched_at > scored_at`
+    means data arrived after the model last looked, so those keep a NULL
+    fingerprint and rescore once, deliberately. Same comparison _should_skip
+    uses, on the same ISO strings.
+
+    Runs once, guarded by app_state.
+    """
+    if get_app_state("score_fingerprint_backfill_done"):
+        return
+    ph = _placeholder()
+    try:
+        from app.scorer import score_input_fingerprint
+
+        with get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT l.id FROM listings l JOIN scores s ON s.listing_id = l.id
+                WHERE s.input_fingerprint IS NULL
+                  AND s.scored_at IS NOT NULL
+                  AND (l.enriched_at IS NULL OR l.enriched_at <= s.scored_at)
+            """)
+            ids = [row[0] for row in cur.fetchall()]
+        stamped = 0
+        for lid in ids:
+            listing = get_listing_by_id(lid)
+            if not listing:
+                continue
+            with get_connection() as conn:
+                conn.cursor().execute(
+                    f"UPDATE scores SET input_fingerprint = {ph} WHERE listing_id = {ph}",
+                    (score_input_fingerprint(listing), lid),
+                )
+            stamped += 1
+        set_app_state("score_fingerprint_backfill_done", "1")
+        logger.info(f"Fingerprinted {stamped} up-to-date scores (one-time)")
+    except Exception:
+        logger.warning("score fingerprint backfill failed", exc_info=True)
 
 
 def _placeholder():
@@ -802,6 +854,7 @@ def _migrate_add_columns():
         ("scores", "ai_reasoning", "TEXT"),
         ("scores", "property_summary", "TEXT"),
         ("scores", "scored_at", "TEXT"),
+        ("scores", "input_fingerprint", "TEXT"),
     ]
     for table, column, col_type in alterations:
         try:
@@ -1051,6 +1104,7 @@ def update_score(
     reasoning: str | None,
     property_summary: str | None = None,
     criteria_rescore: bool = False,
+    input_fingerprint: str | None = None,
 ):
     """Upsert a score for a listing. Automatically sets scored_at timestamp.
 
@@ -1070,8 +1124,8 @@ def update_score(
                 """INSERT INTO scores
                 (listing_id, score, verdict, hard_results_json, soft_points_json,
                  concerns_json, confidence, evaluation_method, criteria_version,
-                 ai_reasoning, property_summary, scored_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 ai_reasoning, property_summary, scored_at, input_fingerprint)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (listing_id) DO UPDATE SET
                     score = EXCLUDED.score, verdict = EXCLUDED.verdict,
                     hard_results_json = EXCLUDED.hard_results_json,
@@ -1082,18 +1136,19 @@ def update_score(
                     criteria_version = EXCLUDED.criteria_version,
                     ai_reasoning = EXCLUDED.ai_reasoning,
                     property_summary = EXCLUDED.property_summary,
-                    scored_at = EXCLUDED.scored_at""",
+                    scored_at = EXCLUDED.scored_at,
+                    input_fingerprint = EXCLUDED.input_fingerprint""",
                 (listing_id, score.score, score.verdict, hard_json, soft_json,
                  concerns_json, score.confidence, method, criteria_version,
-                 reasoning, property_summary, scored_at),
+                 reasoning, property_summary, scored_at, input_fingerprint),
             )
         else:
             cur.execute(
                 """INSERT INTO scores
                 (listing_id, score, verdict, hard_results_json, soft_points_json,
                  concerns_json, confidence, evaluation_method, criteria_version,
-                 ai_reasoning, property_summary, scored_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 ai_reasoning, property_summary, scored_at, input_fingerprint)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (listing_id) DO UPDATE SET
                     score = excluded.score, verdict = excluded.verdict,
                     hard_results_json = excluded.hard_results_json,
@@ -1104,10 +1159,11 @@ def update_score(
                     criteria_version = excluded.criteria_version,
                     ai_reasoning = excluded.ai_reasoning,
                     property_summary = excluded.property_summary,
-                    scored_at = excluded.scored_at""",
+                    scored_at = excluded.scored_at,
+                    input_fingerprint = excluded.input_fingerprint""",
                 (listing_id, score.score, score.verdict, hard_json, soft_json,
                  concerns_json, score.confidence, method, criteria_version,
-                 reasoning, property_summary, scored_at),
+                 reasoning, property_summary, scored_at, input_fingerprint),
             )
 
         # `notified` is a one-shot latch, so a listing alerted once never
@@ -1384,7 +1440,8 @@ def get_all_score_metadata() -> dict[int, dict]:
     """
     with get_connection() as conn:
         cur = conn.cursor()
-        cur.execute("SELECT listing_id, criteria_version, scored_at, evaluation_method FROM scores")
+        cur.execute("SELECT listing_id, criteria_version, scored_at, evaluation_method, "
+                    "input_fingerprint FROM scores")
         rows = cur.fetchall()
         result = {}
         if settings.is_postgres:
@@ -1393,6 +1450,7 @@ def get_all_score_metadata() -> dict[int, dict]:
                     "criteria_version": row[1],
                     "scored_at": row[2],
                     "evaluation_method": row[3],
+                    "input_fingerprint": row[4],
                 }
         else:
             for row in rows:
@@ -1400,6 +1458,7 @@ def get_all_score_metadata() -> dict[int, dict]:
                     "criteria_version": row["criteria_version"],
                     "scored_at": row["scored_at"],
                     "evaluation_method": row["evaluation_method"],
+                    "input_fingerprint": row["input_fingerprint"],
                 }
         return result
 
