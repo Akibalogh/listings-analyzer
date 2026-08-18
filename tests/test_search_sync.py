@@ -759,3 +759,72 @@ class TestListingUpdatesFromEmails:
         lid = self._make(price=None)
         self._apply(lid, address="110 Oliver Rd", town="Bedford", price=1450000)
         assert db.get_listing_by_id(lid)["price"] == 1450000
+
+
+class TestAnEventLabelCannotResurrectAnOffMarketListing:
+    """`listing_status` holds both market states and email event labels, and
+    _update_duplicate wrote any non-sold value over whatever was there. So a
+    Pending or Sold?-flagged home that got a later "Open House" or "Price Drop"
+    email came back looking live, and the alert filter had nothing left to object
+    to. That is how a gone house reached the phone.
+
+    An event label carries no market state, so it no longer overwrites one.
+    """
+
+    def _make(self, status):
+        email_id = db.save_processed_email(
+            gmail_id=f"res-{status}", message_id="", sender="t", subject="t",
+            parser_used="t", listings_found=1)
+        return db.save_listing(
+            ParsedListing(source_format="plaintext", address="7 Resurrect Rd",
+                          town="Bedford", state="NY", price=1500000,
+                          listing_status=status),
+            ScoringResult(score=80, verdict="Worth Touring"), email_id)
+
+    def _apply(self, lid, status):
+        from app.poller import _update_duplicate
+        row = db.get_listing_by_id(lid)
+        with patch("app.jobs.kick"), patch("app.jobs.enqueue_listing"):
+            _update_duplicate(
+                (lid, row.get("listing_status")),
+                ParsedListing(source_format="plaintext", address="7 Resurrect Rd",
+                              town="Bedford", listing_status=status),
+            )
+        return db.get_listing_by_id(lid)["listing_status"]
+
+    def test_an_event_label_does_not_overwrite_pending(self, temp_db):
+        lid = self._make("Pending")
+        assert self._apply(lid, "Open House") == "Pending"
+
+    def test_nor_a_sold_suspicion(self, temp_db):
+        lid = self._make("Sold?")
+        assert self._apply(lid, "Updated MLS Listing") == "Sold?"
+
+    def test_nor_an_off_market_flag(self, temp_db):
+        lid = self._make("Off Market?")
+        assert self._apply(lid, "Price Drop") == "Off Market?"
+
+    def test_and_the_listing_stays_unpushable(self, temp_db):
+        lid = self._make("Pending")
+        self._apply(lid, "Open House")
+        assert db.claim_unnotified_high_scores(70) == []
+
+    def test_a_real_market_status_still_wins(self, temp_db):
+        """Back On Market is a genuine state change and must land."""
+        lid = self._make("Pending")
+        assert self._apply(lid, "Back On Market") == "Back On Market"
+
+    def test_an_event_label_still_lands_on_an_unknown_status(self, temp_db):
+        """Nothing is being lost there, and it is better than blank."""
+        lid = self._make(None)
+        assert self._apply(lid, "Price Drop") == "Price Drop"
+
+    def test_an_event_label_does_not_overwrite_a_live_market_state_either(self, temp_db):
+        """Keeping "Active" over "Price Drop" loses nothing and keeps the column
+        meaning one thing. Both are pushable, so the alert is unaffected."""
+        lid = self._make("Active")
+        assert self._apply(lid, "Price Drop") == "Active"
+
+    def test_a_sold_email_still_flags_over_an_event_label(self, temp_db):
+        lid = self._make("Open House")
+        assert self._apply(lid, "Sold") == "Sold?"
