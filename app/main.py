@@ -3560,9 +3560,22 @@ def manage_scoring_integrity(request: Request):
         raise HTTPException(status_code=403, detail="Invalid or missing management key")
 
     from app.models import HardResult, ScoringResult
-    from app.scorer import _SELF_CONTRADICTING_REASON, deterministic_gate, invalid_reject
+    from app.scorer import (
+        _SCHOOL_CRITERIA,
+        _SELF_CONTRADICTING_REASON,
+        _UNCERTAINTY_KEY,
+        deterministic_gate,
+        implied_score,
+        invalid_reject,
+    )
 
     contradictions, unconfirmable = [], []
+    # Score-vs-breakdown: the criteria say score = base 30 + adjustments, and
+    # for a long time nothing held the model to it (median gap +41, not one of
+    # 112 listings matched). The arithmetic contract now enforces it on new
+    # scores; this section is how the residual is measured — retroactively,
+    # from stored soft_points_json, so pre-contract history is visible too.
+    deltas, out_of_range, stacked_schools, uncertainty_charged = [], [], [], []
     scored = 0
     for l in db.get_all_listings():
         try:
@@ -3570,6 +3583,32 @@ def manage_scoring_integrity(request: Request):
         except (json.JSONDecodeError, TypeError):
             continue
         scored += 1
+        try:
+            soft = json.loads(l.get("soft_points_json") or "null")
+        except (json.JSONDecodeError, TypeError):
+            soft = None
+        if isinstance(soft, dict) and soft and l.get("verdict") != "Reject":
+            implied = implied_score(soft)
+            delta = (l.get("score") or 0) - implied
+            deltas.append(delta)
+            if abs(delta) > 5:
+                out_of_range.append({
+                    "id": l["id"], "address": l.get("address"),
+                    "score": l.get("score"), "implied": implied, "delta": delta,
+                })
+            school_keys = [k for k in soft if _SCHOOL_CRITERIA.search(k)]
+            if len(school_keys) >= 2:
+                stacked_schools.append({
+                    "id": l["id"], "address": l.get("address"),
+                    "keys": school_keys,
+                    "points": sum(v for k, v in soft.items() if k in school_keys),
+                })
+            charged = [k for k, v in soft.items()
+                       if _UNCERTAINTY_KEY.search(k) and isinstance(v, (int, float)) and v < 0]
+            if charged:
+                uncertainty_charged.append({
+                    "id": l["id"], "address": l.get("address"), "keys": charged,
+                })
         for h in hard:
             if h.get("passed") is False and _SELF_CONTRADICTING_REASON.search(h.get("reason") or ""):
                 contradictions.append({
@@ -3599,6 +3638,17 @@ def manage_scoring_integrity(request: Request):
         "contradictions": contradictions[:25],
         "unconfirmable_reject_count": len(unconfirmable),
         "unconfirmable_rejects": unconfirmable[:25],
+        "score_vs_breakdown": {
+            "checked": len(deltas),
+            "median_delta": (sorted(deltas)[len(deltas) // 2] if deltas else 0),
+            "within_tolerance": sum(1 for d in deltas if abs(d) <= 5),
+            "breach_count": len(out_of_range),
+            "breaches": sorted(out_of_range, key=lambda b: -abs(b["delta"]))[:25],
+            "stacked_school_count": len(stacked_schools),
+            "stacked_schools": stacked_schools[:25],
+            "uncertainty_penalty_count": len(uncertainty_charged),
+            "uncertainty_penalties": uncertainty_charged[:25],
+        },
     }
 
 

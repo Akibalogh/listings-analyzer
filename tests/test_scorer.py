@@ -1785,3 +1785,159 @@ class TestUnrankedSchoolsAreMissingData:
         from app.scorer import best_elementary_percentile
         assert best_elementary_percentile({"school_data": {"elementary": [
             {"name": "Hawthorne Elementary School", "rank_percentile": None}]}}) is None
+
+
+class TestScoreArithmeticContract:
+    """The criteria say score = base 30 + adjustments, clamped 0-100. For a long
+    time nothing held the model to it: the output contract asked for "score" and
+    "soft_points" as independent fields, and across 112 live listings not ONE
+    matched its own breakdown (median gap +41, reported higher in 99). "72 /
+    Worth Touring" was a vibe wearing an itemisation.
+
+    The contract is now stated in the prompt and enforced in code: one
+    corrective re-ask, then keep the score but cap confidence — never substitute
+    the sum, which is the sloppier channel and would silently reprice the board.
+    """
+
+    @staticmethod
+    def _result(score, soft, verdict="Worth Touring", confidence="high"):
+        from app.models import ScoringResult
+        return ScoringResult(score=score, verdict=verdict, soft_points=soft,
+                             confidence=confidence)
+
+    def test_implied_score_is_base_plus_sum_clamped(self):
+        from app.scorer import implied_score
+        assert implied_score({"a": 20, "b": -5}) == 45
+        assert implied_score({"a": 90}) == 100   # clamp high
+        assert implied_score({"a": -90}) == 0    # clamp low
+        assert implied_score({}) == 30
+
+    def test_delta_is_reported_minus_implied(self):
+        from app.scorer import score_breakdown_delta
+        assert score_breakdown_delta(self._result(72, {"a": 19})) == 23
+
+    def test_no_delta_for_a_reject(self):
+        """Validation forces a Reject's score to 0 regardless of breakdown —
+        that's policy, not arithmetic, so it can't contradict the ledger."""
+        from app.scorer import score_breakdown_delta
+        assert score_breakdown_delta(self._result(0, {"a": 19}, verdict="Reject")) is None
+
+    def test_no_delta_for_an_empty_breakdown(self):
+        from app.scorer import score_breakdown_delta
+        assert score_breakdown_delta(self._result(72, {})) is None
+
+    def test_within_tolerance_passes_untouched(self):
+        from app.scorer import reconcile_score_arithmetic
+        r = self._result(49, {"a": 19})  # implied 49, delta 0
+        assert reconcile_score_arithmetic(r) is r
+        r5 = self._result(54, {"a": 19})  # delta +5, on the line
+        assert reconcile_score_arithmetic(r5) is r5
+
+    def test_a_breach_keeps_the_score(self):
+        """Substituting the sum would reprice the board with arithmetic that was
+        never authoritative — 41 of 112 breakdowns summed outside 0-100."""
+        from app.scorer import reconcile_score_arithmetic
+        out = reconcile_score_arithmetic(self._result(72, {"a": 19}))
+        assert out.score == 72
+
+    def test_a_breach_caps_confidence_at_medium(self):
+        from app.scorer import reconcile_score_arithmetic
+        assert reconcile_score_arithmetic(self._result(72, {"a": 19})).confidence == "medium"
+
+    def test_a_breach_never_raises_confidence(self):
+        """low stays low — the cap is a ceiling, not a target."""
+        from app.scorer import reconcile_score_arithmetic
+        out = reconcile_score_arithmetic(self._result(72, {"a": 19}, confidence="low"))
+        assert out.confidence == "low"
+
+    def test_a_breach_is_stated_in_concerns(self):
+        from app.scorer import reconcile_score_arithmetic
+        out = reconcile_score_arithmetic(self._result(72, {"a": 19}))
+        assert any("mismatch" in c.lower() for c in out.concerns)
+        assert any("49" in c for c in out.concerns)  # the sum it disagrees with
+
+    def test_the_retry_note_shows_the_model_its_own_numbers(self):
+        from app.scorer import _arithmetic_retry_note
+        note = _arithmetic_retry_note(self._result(72, {"a": 19}))
+        assert "72" in note and "49" in note
+        assert "EXACTLY ONE school-district" in note
+
+    def test_the_prompt_states_the_contract(self):
+        """The old contract asked for score and soft_points as independent
+        fields — that's the root cause, so its absence must fail loudly."""
+        from app.scorer import _build_system_prompt
+        text = "".join(b["text"] for b in _build_system_prompt())
+        assert "30 + the sum of soft_points" in text or "30 (base) + sum" in text
+        assert "EXACTLY ONE school-district adjustment" in text
+
+    def test_the_prompt_no_longer_carries_its_own_school_points(self):
+        """It said +5 for the 50-79th band while the criteria said -20 — two
+        conflicting tables handed to the model on every call. The criteria are
+        user-editable and win; the prompt defers like it already does for
+        commute."""
+        from app.scorer import _build_system_prompt
+        text = "".join(b["text"] for b in _build_system_prompt())
+        assert "HARD REJECT if below 50th percentile" not in text
+        assert "80–94th = good (+15)" not in text
+
+
+class TestArithmeticRetryPath:
+    """One corrective re-ask on breach, then the keep-score fallback."""
+
+    def _run(self, responses):
+        import json as _json
+        from unittest.mock import MagicMock, patch
+        from app.scorer import ai_score_listing
+        msgs = []
+        for r in responses:
+            m = MagicMock()
+            m.content = [MagicMock()]
+            m.content[0].text = _json.dumps(r)
+            msgs.append(m)
+        with patch("app.scorer.settings") as ms:
+            ms.anthropic_api_key = "sk-test"
+            ms.ai_eval_model = "m"
+            with patch("app.scorer._build_user_message", return_value=[]), \
+                 patch("app.scorer._build_system_prompt", return_value=[]):
+                client = MagicMock()
+                client.messages.create.side_effect = msgs
+                with patch("app.scorer.anthropic.Anthropic", return_value=client):
+                    result, _ = ai_score_listing({"address": "T"}, "C")
+        return result, client.messages.create.call_count
+
+    BAD = {"score": 72, "verdict": "Worth Touring", "hard_results": [],
+           "soft_points": {"a": 10}, "concerns": [], "confidence": "high",
+           "reasoning": "r", "property_summary": "p"}
+    GOOD = {"score": 62, "verdict": "Worth Touring", "hard_results": [],
+            "soft_points": {"a": 32}, "concerns": [], "confidence": "high",
+            "reasoning": "r", "property_summary": "p"}
+
+    def test_a_reconciled_retry_is_adopted(self):
+        result, calls = self._run([self.BAD, self.GOOD])
+        assert calls == 2
+        assert result.score == 62 and result.confidence == "high"
+
+    def test_a_still_breaching_retry_falls_back_to_the_original(self):
+        result, calls = self._run([self.BAD, self.BAD])
+        assert calls == 2
+        assert result.score == 72 and result.confidence == "medium"
+
+    def test_a_consistent_response_is_not_re_asked(self):
+        result, calls = self._run([self.GOOD])
+        assert calls == 1
+        assert result.score == 62
+
+    def test_batch_results_get_the_fallback(self):
+        """No re-ask is possible in a batch — breach goes straight to
+        keep-score-cap-confidence."""
+        import json as _json
+        from unittest.mock import MagicMock
+        from app.scorer import parse_batch_result
+        item = MagicMock()
+        item.custom_id = "listing_1"
+        item.result.type = "succeeded"
+        item.result.message.content = [MagicMock()]
+        item.result.message.content[0].text = _json.dumps(self.BAD)
+        result, _ = parse_batch_result(item, {"address": "T"})
+        assert result.score == 72 and result.confidence == "medium"
+        assert any("mismatch" in c.lower() for c in result.concerns)

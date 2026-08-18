@@ -74,6 +74,94 @@ def score_input_fingerprint(listing_row: dict) -> str:
 
 ALLOWED_VERDICTS = {"Strong Match", "Worth Touring", "Low Priority", "Weak Match", "Reject"}
 
+# The criteria's stated arithmetic: "Base score: 30", itemised adjustments,
+# "Clamp final score between 0 and 100". The score is supposed to be a
+# calculation, not a vibe.
+BASE_SCORE = 30
+
+# How far the reported score may drift from its own breakdown before the
+# response is treated as self-contradictory. Absorbs holistic rounding without
+# inviting the old behaviour back: measured before the contract existed, the
+# median gap was +41 and not one of 112 listings matched exactly.
+ARITHMETIC_TOLERANCE = 5
+
+
+def implied_score(soft_points: dict) -> int:
+    """The score the published breakdown actually adds up to."""
+    total = BASE_SCORE + sum(
+        v for v in (soft_points or {}).values() if isinstance(v, (int, float))
+    )
+    return max(0, min(100, int(total)))
+
+
+def score_breakdown_delta(result: ScoringResult) -> int | None:
+    """reported − implied, or None where the comparison is meaningless.
+
+    A Reject's score is forced to 0 by validation regardless of the breakdown,
+    and an empty breakdown implies a bare 30 that says nothing — neither is a
+    statement of arithmetic, so neither can contradict one.
+    """
+    if result.verdict == "Reject" or not result.soft_points:
+        return None
+    return result.score - implied_score(result.soft_points)
+
+
+def reconcile_score_arithmetic(result: ScoringResult, address: str = "") -> ScoringResult:
+    """Last resort when a response won't reconcile its score with its breakdown.
+
+    Keeps the model's score — it is the number the buyer has calibrated against
+    and the alert threshold was tuned on; the breakdown is the demonstrably
+    sloppier channel (99 of 112 pre-contract listings reported HIGHER than
+    their own sum, median +41). Never substitutes the sum: that would reprice
+    the board using arithmetic that was never authoritative.
+
+    What it does do is refuse to call the result confident: a score that
+    contradicts its own published arithmetic is capped at medium confidence,
+    and the contradiction is stated in concerns where the dashboard shows it.
+    Structural, not a string match — two integers disagreeing.
+    """
+    delta = score_breakdown_delta(result)
+    if delta is None or abs(delta) <= ARITHMETIC_TOLERANCE:
+        return result
+    logger.info(
+        "Score %d disagrees with its own breakdown (sums to %d, Δ%+d)%s — "
+        "keeping the score, capping confidence",
+        result.score, implied_score(result.soft_points), delta,
+        f" ({address})" if address else "",
+    )
+    note = (
+        f"Score/breakdown mismatch: reported {result.score} but the published "
+        f"adjustments sum to {implied_score(result.soft_points)} "
+        f"(base {BASE_SCORE} + soft points). The score stands; treat the "
+        "itemisation as unreliable."
+    )
+    update = {"concerns": [*result.concerns, note]}
+    if result.confidence == "high":
+        update["confidence"] = "medium"
+    return result.model_copy(update=update)
+
+
+def _arithmetic_retry_note(result: ScoringResult) -> str:
+    """Corrective note when score and breakdown don't reconcile."""
+    return f"""
+CORRECTION — YOUR PREVIOUS ANSWER WAS REJECTED AND YOU ARE BEING ASKED AGAIN.
+
+You reported score {result.score}, but your own soft_points sum to
+{implied_score(result.soft_points)} (base {BASE_SCORE} + your adjustments).
+Those must agree: the score IS the arithmetic, not a separate judgement.
+
+Re-evaluate and return a response where:
+- soft_points is the COMPLETE ledger — every adjustment you applied appears
+  there, including age_adjustment and condition_adjustment, each exactly once.
+- There is EXACTLY ONE school-district entry, judged on the best-ranked
+  elementary school — never one per school level.
+- score == {BASE_SCORE} + sum(soft_points values), clamped to 0-100.
+
+Do not fudge the ledger to match a number you have already decided on.
+Recompute honestly: if your adjustments were wrong, fix the adjustments; if
+your score was wrong, fix the score.
+"""
+
 
 _CRITERIA_COMMUTE_LIMIT_RE = re.compile(
     r"commute[^.\n]{0,60}?(?:over|of)\s+(\d{2,3})\s*min"
@@ -581,12 +669,12 @@ verdict must therefore be "Reject". It is not a way to express a penalty.
 
 OUTPUT FORMAT — return ONLY a JSON object with exactly these keys:
 {
-  "score": <integer 0-100>,
+  "score": <integer 0-100 — MUST equal 30 + the sum of soft_points values, clamped to 0-100>,
   "verdict": "<one of: Strong Match, Worth Touring, Low Priority, Weak Match, Reject>",
   "hard_results": [
     {"criterion": "<name>", "passed": <true|false|null>, "value": "<display value>", "reason": "<why>"}
   ],
-  "soft_points": {"<feature>": <points>},
+  "soft_points": {"<feature>": <points>},   // the COMPLETE ledger: every adjustment you applied, each exactly once
   "concerns": ["<concern string>"],
   "confidence": "<high|medium|low>",
   "reasoning": "<1-2 sentence overall summary>",
@@ -666,9 +754,16 @@ These should carry the most weight in your scoring.
   Mention both the commute time and the station drive in property_summary — as a
   ⚠️ concern when the commute is long, never as a ❌ fail.
 - SCHOOLS: If school_data is provided in <listing_data>, this is a TOP PRIORITY factor.
-  HARD REJECT if below 50th percentile (score 0, verdict "Reject").
-  95th+ percentile = excellent (+25). 80–94th = good (+15). 50–79th = weak/caution (+5, flag as concern).
-  Weight elementary schools most heavily. Mention specific school names and percentiles.
+  Apply the school-district table in the EVALUATION INSTRUCTIONS exactly as
+  written — it is the authority on the points, in both directions. (This prompt
+  used to carry its own school point table; it disagreed with the instructions
+  — +5 here vs −20 there for the same 50–79th band — and the model was being
+  handed both on every call. The instructions are user-editable and win.)
+  Emit EXACTLY ONE school-district adjustment in soft_points, judged on the
+  best-ranked elementary school. Do NOT score elementary, middle, and high
+  separately — three +25 entries for one district was the single largest reason
+  published breakdowns summed far outside 0–100.
+  Mention specific school names and percentiles in property_summary.
   Note: School data is EXCLUDED from scoring — zero points, never a penalty —
   when it is missing OR when it is present but carries no usable
   rank_percentile. 00 Worth Pl listed Hawthorne Elementary and Linden Hill
@@ -686,6 +781,13 @@ These should carry the most weight in your scoring.
   and ratio into your price assessment.
 - If property_tax is provided (NYC only), use assessed_value and market_value to contextualize
   likely tax burden.
+
+SCORE ARITHMETIC — the score is a calculation, not a separate judgement:
+  score = 30 (base) + sum of every soft_points value, clamped to 0-100.
+soft_points is the complete ledger. If you applied it, it appears there —
+age_adjustment and condition_adjustment included, each exactly once, and
+exactly one school-district entry. A score that disagrees with its own ledger
+will be rejected and re-asked.
 
 Do NOT include any text outside the JSON object. Do NOT use markdown code fences.""",
         "cache_control": {"type": "ephemeral"},
@@ -1065,6 +1167,30 @@ def ai_score_listing(
                 result = strip_invalid_reject(result, listing_data)
                 reasoning = result.reasoning
 
+        # Arithmetic contract: the score must equal its own breakdown. One
+        # corrective re-ask, then keep the score but cap confidence — never
+        # substitute the sum (see reconcile_score_arithmetic). Checked after
+        # the reject machinery so the retry sees the settled verdict.
+        delta = score_breakdown_delta(result)
+        if delta is not None and abs(delta) > ARITHMETIC_TOLERANCE:
+            logger.warning(
+                "AI score %d doesn't match its breakdown (Δ%+d) — re-asking "
+                "with correction", result.score, delta,
+            )
+            try:
+                retry, retry_reasoning = _call_ai(_arithmetic_retry_note(result))
+                retry_delta = score_breakdown_delta(retry)
+                retry_ok = retry_delta is None or abs(retry_delta) <= ARITHMETIC_TOLERANCE
+                if retry_ok and not invalid_reject(retry, listing_data):
+                    result, reasoning = retry, retry_reasoning
+                else:
+                    result = reconcile_score_arithmetic(
+                        result, listing_data.get("address", ""))
+            except (json.JSONDecodeError, anthropic.APIError) as e:
+                logger.warning(f"Arithmetic-correction retry failed ({e})")
+                result = reconcile_score_arithmetic(
+                    result, listing_data.get("address", ""))
+
         logger.info(
             f"AI evaluation: score={result.score}, verdict={result.verdict}, "
             f"confidence={result.confidence}"
@@ -1183,12 +1309,24 @@ def parse_batch_result(
 
         ai_data = json.loads(cleaned)
         score_result = _validate_ai_response(ai_data)
+        address = (listing_data or {}).get("address", "") or result.custom_id
+        # The interactive path runs these on every response; the batch path —
+        # which writes the MOST scores, a full criteria rescore runs only here —
+        # used to skip them, so the telemetry was blind exactly when the most
+        # scores landed.
+        log_self_contradicting_failures(score_result, address)
+        if listing_data is not None:
+            log_uncertainty_penalties(score_result, listing_data, address)
         if listing_data is not None and invalid_reject(score_result, listing_data):
             logger.warning(
                 f"Batch item {result.custom_id} returned a Reject it isn't entitled "
                 "to make — overriding the rejection"
             )
             score_result = strip_invalid_reject(score_result, listing_data)
+        # No re-ask is possible in a batch (same asymmetry the reject override
+        # accepts above), so a breach goes straight to the keep-score-cap-
+        # confidence fallback.
+        score_result = reconcile_score_arithmetic(score_result, address)
         return score_result, score_result.reasoning
 
     except Exception as e:
