@@ -1941,3 +1941,58 @@ class TestArithmeticRetryPath:
         result, _ = parse_batch_result(item, {"address": "T"})
         assert result.score == 72 and result.confidence == "medium"
         assert any("mismatch" in c.lower() for c in result.concerns)
+
+
+class TestProposedV76CriteriaFile:
+    """docs/criteria-v76-proposed.txt is the text Aki applies as v76 via
+    PUT /criteria. It is v75 plus exactly four changes: the score-arithmetic
+    contract stated in the text, ONE school adjustment judged on the best
+    elementary (not one per level), and "Pass" renamed "Weak Match". Everything
+    enforced in code must keep reading out of it unchanged.
+    """
+
+    @staticmethod
+    def _text():
+        from pathlib import Path
+        path = Path(__file__).resolve().parent.parent / "docs" / "criteria-v76-proposed.txt"
+        return path.read_text()
+
+    def test_every_hard_gate_still_parses_in_sync(self):
+        from app.scorer import hard_gate_drift
+        drift = hard_gate_drift(self._text())
+        assert drift["in_sync"] is True, drift["drifted"]
+
+    def test_the_arithmetic_contract_is_stated(self):
+        text = self._text()
+        assert "30 + the sum of every adjustment" in text
+        assert "complete ledger" in text
+
+    def test_one_school_adjustment_judged_on_best_elementary(self):
+        """64 of 112 live breakdowns scored elementary/middle/high separately
+        (max +75 for one district) — the largest driver of sums outside 0-100.
+        This is the sentence that stops it, and it must name the same measure
+        code uses to validate school rejects (best elementary)."""
+        text = self._text()
+        assert "ONCE, judged on the best-ranked elementary" in text
+        assert "never one per school level" in text
+
+    def test_the_school_point_table_survives_unchanged(self):
+        """v76 recalibrates the stacking, not the weights."""
+        text = self._text()
+        for line in ("+25 strong school district", "+10 good school district",
+                     "-20 mediocre school district", "-35 weak school district"):
+            assert line in text, line
+
+    def test_weak_district_stays_a_penalty_not_a_reject(self):
+        """v75 is explicit: near-dealbreaker, not a Reject. The prompt used to
+        contradict this (HARD REJECT below 50th) and now defers."""
+        text = self._text()
+        assert "near-dealbreaker" in text
+        assert "HARD REJECT if below 50th" not in text
+
+    def test_the_bottom_band_is_weak_match_not_pass(self):
+        """Code and dashboard say "Weak Match"; "Pass" reads as its own
+        opposite."""
+        text = self._text()
+        assert "Below 40 Weak Match" in text
+        assert "Below 40 Pass" not in text
