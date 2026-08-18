@@ -198,9 +198,10 @@ class TestEnqueueMissing:
         assert counts["stats"] == 1
         assert counts["commute"] == 1
         assert counts["schools"] == 1
+        assert counts["status"] == 1  # no listing_status — blocks the alert path
         assert counts["score"] == 1
         pending = db.job_counts()["by_status"]["pending"]
-        assert pending == 5
+        assert pending == 6
 
     def test_gap_scan_resurrects_done_jobs_while_gap_persists(self, temp_db):
         """A done job must not block repair when its data gap still exists."""
@@ -211,10 +212,10 @@ class TestEnqueueMissing:
         for _ in range(2):
             for job in db.claim_pending_jobs(limit=50):
                 db.complete_job(job["id"])
-        assert db.job_counts()["by_status"] == {"done": 5}
+        assert db.job_counts()["by_status"] == {"done": 6}
         counts = jobs.enqueue_missing()
         assert counts["scrape_desc"] == 1
-        assert db.job_counts()["by_status"]["pending"] == 5
+        assert db.job_counts()["by_status"]["pending"] == 6
 
     def test_gap_scan_gives_failed_jobs_one_attempt_per_scan(self, temp_db):
         lid = _make_listing(listing_url="https://www.redfin.com/NY/T/1-Test-St/home/1")
@@ -249,7 +250,7 @@ class TestEnqueueMissing:
     def test_complete_listing_gets_no_jobs(self, temp_db):
         lid = _make_listing(
             price=1_000_000, sqft=3000, bedrooms=4, bathrooms=3, year_built=1990,
-            description="A lovely home",
+            description="A lovely home", listing_status="Active",
         )
         db.add_listing_images(lid, ["https://example.com/1.jpg"])
         db.update_listing_enrichment(lid, {
@@ -292,7 +293,7 @@ class TestDeterministicGate:
 class TestHighScoreSweep:
     """The drain's sweep alerts each ≥threshold listing exactly once."""
 
-    def _make_scored(self, score, status=None, notified=False):
+    def _make_scored(self, score, status="Active", notified=False):
         email_id = db.save_processed_email(
             gmail_id=f"hs-{score}-{status}-{db.get_all_listing_ids().__len__()}",
             message_id="", sender="test", subject="t", parser_used="test", listings_found=1,
@@ -644,3 +645,215 @@ class TestTheFingerprintBackfillAvoidsAPointlessRescore:
         db.set_app_state("score_fingerprint_backfill_done", "")
         db._backfill_score_fingerprints()
         assert jobs.enqueue_missing()["score"] == 0
+
+
+class TestUnknownStatusIsNotPushed:
+    """The alert filter was a denylist of off-market statuses, so anything it did
+    not recognise got pushed. Two things slipped through:
+
+      * A NULL status — COALESCE turned it into '' , which is not in the denylist.
+        6 listings have no status at all; OneHome alerts carry none.
+      * Event labels, which the same column also holds. "Updated MLS Listing" is
+        not a market state, and _update_duplicate would write one over a Pending,
+        after which the filter saw nothing to object to.
+
+    516 Bellwood Avenue was pushed as a new Worth Touring after it had sold.
+
+    An allowlist fails closed. The row is also never claimed, so it is never
+    marked notified — it alerts when its status is resolved, not never.
+    """
+
+    def _scored(self, status, score=80):
+        email_id = db.save_processed_email(
+            gmail_id=f"us-{status}-{score}-{len(db.get_all_listing_ids())}",
+            message_id="", sender="test", subject="t", parser_used="test", listings_found=1,
+        )
+        listing = ParsedListing(source_format="onehome_html", address=f"{score} {status} St",
+                                town="Katonah", state="NY", listing_status=status)
+        return db.save_listing(
+            listing, ScoringResult(score=score, verdict="Worth Touring"), email_id,
+        )
+
+    def test_a_missing_status_is_not_pushed(self, temp_db):
+        self._scored(None)
+        assert db.claim_unnotified_high_scores(70) == []
+
+    def test_an_empty_status_is_not_pushed(self, temp_db):
+        self._scored("   ")
+        assert db.claim_unnotified_high_scores(70) == []
+
+    def test_an_event_label_that_is_not_a_market_state_is_not_pushed(self, temp_db):
+        for status in ("Updated MLS Listing", "New Favorite", "New Tour Insight"):
+            self._scored(status)
+        assert db.claim_unnotified_high_scores(70) == []
+
+    def test_an_unrecognised_status_is_not_pushed(self, temp_db):
+        """Withdrawn/Expired/Cancelled come straight from the MLS lookup and were
+        in neither list."""
+        for status in ("Withdrawn", "Expired", "Cancelled", "Temporarily Off Market"):
+            self._scored(status)
+        assert db.claim_unnotified_high_scores(70) == []
+
+    def test_contingent_is_not_pushed(self, temp_db):
+        """A Redfin alert prefix that means under contract, and was missing from
+        the old denylist."""
+        self._scored("Contingent")
+        assert db.claim_unnotified_high_scores(70) == []
+
+    def test_it_is_held_not_buried(self, temp_db):
+        """Suppressing the push must not consume the listing's one alert — it has
+        to fire once the status is known."""
+        lid = self._scored(None)
+        assert db.claim_unnotified_high_scores(70) == []
+        assert not db.get_listing_by_id(lid)["notified"]
+        db.update_listing_fields_by_id(lid, listing_status="Active")
+        assert [r["id"] for r in db.claim_unnotified_high_scores(70)] == [lid]
+
+    def test_live_statuses_still_push(self, temp_db):
+        for status in ("Active", "New Listing", "Coming Soon", "Pre On-Market",
+                       "Back On Market", "Open House", "Price Drop"):
+            self._scored(status)
+        claimed = {r["listing_status"] for r in db.claim_unnotified_high_scores(70)}
+        assert claimed == {"Active", "New Listing", "Coming Soon", "Pre On-Market",
+                           "Back On Market", "Open House", "Price Drop"}
+
+    def test_case_and_whitespace_do_not_decide_it(self, temp_db):
+        """Both "Back On Market" and "Back on Market" occur in the corpus."""
+        for status in ("Back on Market", "  active  ", "NEW LISTING"):
+            self._scored(status)
+        assert len(db.claim_unnotified_high_scores(70)) == 3
+
+    def test_every_corpus_status_is_classified(self):
+        """Anything unclassified fails closed, which is safe but silent. These are
+        the values actually present, so each should be a deliberate decision."""
+        from app.listing_status import is_live, is_off_market
+        live = ["Active", "New Listing", "Open House", "Price Drop", "Coming Soon",
+                "Price Decreased", "Back On Market", "Pre On-Market",
+                "Price Increased", "Back on Market"]
+        off = ["Pending", "Sold", "Under Contract"]
+        assert all(is_live(s) for s in live), [s for s in live if not is_live(s)]
+        assert all(is_off_market(s) for s in off), [s for s in off if not is_off_market(s)]
+
+
+class TestTheStatusJobResolvesWhatItCan:
+    """Suppressing an unknown-status push is only defensible if the unknown gets
+    resolved. Resolution existed as a manual POST /manage/backfill-status behind
+    the management key, so nothing ever ran it and 6 listings sat unknown.
+    """
+
+    def _listing(self, status=None, subject="t", address="1 Status St"):
+        email_id = db.save_processed_email(
+            gmail_id=f"st-{subject}-{address}", message_id="", sender="test",
+            subject=subject, parser_used="test", listings_found=1,
+        )
+        listing = ParsedListing(source_format="onehome_html", address=address,
+                                town="Katonah", state="NY", listing_status=status)
+        return db.save_listing(listing, ScoringResult(score=80, verdict="Worth Touring"), email_id)
+
+    def test_the_subject_line_is_tried_first(self, temp_db, monkeypatch):
+        """Free, instant, no network — and the only source that works for the
+        filtered Matrix MLS searches."""
+        called = []
+        monkeypatch.setattr("app.parsers.onehome.check_listing_status",
+                            lambda *a, **k: called.append(a) or "Active")
+        lid = self._listing(subject="Only sold listings for your search")
+        jobs._handle_status(db.get_listing_by_id(lid))
+        assert db.get_listing_by_id(lid)["listing_status"] == "Sold"
+        assert called == []  # no lookup spent
+
+    def test_the_mls_lookup_is_the_fallback(self, temp_db, monkeypatch):
+        monkeypatch.setattr("app.parsers.onehome.check_listing_status",
+                            lambda *a, **k: "Pending")
+        lid = self._listing(subject="Your new listing alert")
+        jobs._handle_status(db.get_listing_by_id(lid))
+        assert db.get_listing_by_id(lid)["listing_status"] == "Pending"
+
+    def test_an_unresolvable_status_raises_so_retries_are_budgeted(self, temp_db, monkeypatch):
+        """Raising hands it to the queue's retry budget — one lookup per scan for
+        a permanently unresolvable listing, not a tight loop."""
+        monkeypatch.setattr("app.parsers.onehome.check_listing_status",
+                            lambda *a, **k: None)
+        lid = self._listing(subject="nothing useful")
+        with pytest.raises(RuntimeError):
+            jobs._handle_status(db.get_listing_by_id(lid))
+        assert db.get_listing_by_id(lid)["listing_status"] is None
+
+    def test_a_known_status_is_never_overwritten(self, temp_db, monkeypatch):
+        monkeypatch.setattr("app.parsers.onehome.check_listing_status",
+                            lambda *a, **k: "Sold")
+        lid = self._listing(status="Active")
+        jobs._handle_status(db.get_listing_by_id(lid))
+        assert db.get_listing_by_id(lid)["listing_status"] == "Active"
+
+    def test_an_event_label_does_get_replaced(self, temp_db, monkeypatch):
+        """"Updated MLS Listing" is not a market state, so it is still a gap."""
+        monkeypatch.setattr("app.parsers.onehome.check_listing_status",
+                            lambda *a, **k: "Pending")
+        lid = self._listing(status="Updated MLS Listing", subject="x")
+        jobs._handle_status(db.get_listing_by_id(lid))
+        assert db.get_listing_by_id(lid)["listing_status"] == "Pending"
+
+    def test_resolving_the_status_earns_a_rescore(self, temp_db, monkeypatch):
+        """Status is scored — Sold is a hard reject — so the score must follow."""
+        monkeypatch.setattr("app.parsers.onehome.check_listing_status",
+                            lambda *a, **k: "Sold")
+        lid = self._listing(subject="x")
+        version = db.save_criteria("c", created_by="t")
+        db.update_score(
+            listing_id=lid,
+            score=ScoringResult(score=80, verdict="Worth Touring", evaluation_method="ai"),
+            method="ai", criteria_version=version, reasoning="r",
+            input_fingerprint=score_input_fingerprint(db.get_listing_by_id(lid)),
+        )
+        assert jobs.enqueue_missing()["score"] == 0
+        jobs._handle_status(db.get_listing_by_id(lid))
+        assert jobs.enqueue_missing()["score"] == 1
+
+    def test_the_gap_scan_queues_it(self, temp_db):
+        self._listing()
+        assert jobs.enqueue_missing()["status"] == 1
+
+    def test_and_stops_once_resolved(self, temp_db):
+        lid = self._listing()
+        assert jobs.enqueue_missing()["status"] == 1
+        db.update_listing_fields_by_id(lid, listing_status="Active")
+        assert jobs.enqueue_missing()["status"] == 0
+
+    def test_it_is_wired_into_the_handlers(self):
+        assert jobs._HANDLERS["status"] is jobs._handle_status
+        assert "status" in jobs.TASK_ORDER
+        assert jobs.TASK_ORDER.index("status") < jobs.TASK_ORDER.index("score")
+
+
+class TestMarketStateVersusEventLabel:
+    """Two questions, two answers: what may be pushed on, and what may overwrite
+    a known market state."""
+
+    def test_market_states_are_authoritative(self):
+        from app.listing_status import is_market_state
+        for s in ("Active", "Pending", "Sold", "Under Contract", "Coming Soon",
+                  "New Listing", "Back on Market", "Sold?", "Off Market?"):
+            assert is_market_state(s), s
+
+    def test_event_labels_are_not(self):
+        from app.listing_status import is_market_state
+        for s in ("Price Drop", "Open House", "Price Decreased", "Price Increased",
+                  "Updated MLS Listing", "New Favorite", None, ""):
+            assert not is_market_state(s), s
+
+    def test_a_live_event_label_is_still_pushable(self):
+        """It could only have been sent about a listing that was on the market."""
+        from app.listing_status import is_live, is_market_state
+        for s in ("Price Drop", "Open House"):
+            assert is_live(s) and not is_market_state(s), s
+
+    def test_an_opaque_event_label_is_neither(self):
+        from app.listing_status import is_live, is_market_state, is_unknown
+        for s in ("Updated MLS Listing", "New Favorite", "New Tour Insight"):
+            assert is_unknown(s) and not is_live(s) and not is_market_state(s), s
+
+    def test_the_three_predicates_partition_every_value(self):
+        from app.listing_status import is_live, is_off_market, is_unknown
+        for s in (None, "", "Active", "Pending", "Price Drop", "Updated MLS Listing",
+                  "Withdrawn", "  sold  "):
+            assert sum([is_live(s), is_off_market(s), is_unknown(s)]) == 1, s

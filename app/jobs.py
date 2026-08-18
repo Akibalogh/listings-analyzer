@@ -38,12 +38,13 @@ import time
 
 from app import db
 from app.config import settings
+from app.listing_status import is_unknown
 from app.scorer import score_input_fingerprint
 
 logger = logging.getLogger(__name__)
 
 # Per-listing execution order; 'score' is also the claim-deferred final task.
-TASK_ORDER = ["scrape_desc", "stats", "commute", "schools", "score"]
+TASK_ORDER = ["scrape_desc", "stats", "commute", "schools", "status", "score"]
 
 _drain_lock = threading.Lock()
 
@@ -159,6 +160,9 @@ def enqueue_missing(force: bool = False) -> dict:
             tasks.append("commute")
         if not listing.get("school_data_json") and listing.get("zip_code"):
             tasks.append("schools")
+        # An unknown status blocks the alert, so it is a data gap like any other.
+        if is_unknown(listing.get("listing_status")):
+            tasks.append("status")
 
         # Rescore when the model's inputs have changed since it last looked, not
         # when the listing merely has a gap. `bool(tasks)` was the old trigger —
@@ -393,10 +397,62 @@ def _handle_score(listing: dict) -> None:
     _rescore_one_listing(listing, criteria)
 
 
+def _handle_status(listing: dict) -> None:
+    """Resolve a listing's market status, so "unknown" is a delay not a verdict.
+
+    The alert path requires a status that positively says the home is on the
+    market, which means an unknown status is silence. That is the right default —
+    516 Bellwood was pushed after it sold — but it must be temporary, or a good
+    house with a quiet sender never gets mentioned. Resolution existed only as a
+    manual POST /manage/backfill-status behind the management key, so nothing ran
+    it.
+
+    Two sources, cheapest first: the alert subject line, which is free and needs
+    no network (the Matrix MLS alerts are filtered saved searches — "Only sold",
+    "Only pending" — and the subject was sitting in processed_emails all along),
+    then the OneKey MLS lookup by search.
+
+    Raises when neither works, so the job queue's retry budget applies and a
+    permanently unresolvable listing costs one lookup per scan rather than a tight
+    loop. Filling the status also changes the score fingerprint, so the rescore
+    that follows sees Sold and rejects it.
+    """
+    from app.listing_status import is_unknown
+
+    if not is_unknown(listing.get("listing_status")):
+        return
+
+    from app.parsers import status_from_subject
+
+    subject = db.get_source_subject(listing["id"])
+    status = status_from_subject(subject)
+    if status:
+        # force=True because the value being replaced may be a non-empty event
+        # label ("Updated MLS Listing"), which the default fill-blanks-only update
+        # would leave in place. A genuinely known status never reaches here — the
+        # is_unknown check above returned already.
+        db.update_listing_fields_by_id(listing["id"], force=True, listing_status=status)
+        logger.info(f"Listing #{listing['id']} status {status!r} from alert subject")
+        return
+
+    address, town = listing.get("address"), listing.get("town")
+    if not address or not town:
+        raise RuntimeError("no address — cannot look up status")
+
+    from app.parsers.onehome import check_listing_status
+
+    status = check_listing_status(address, town, listing.get("state"), listing.get("zip_code"))
+    if not status:
+        raise RuntimeError(f"status unresolved for {address}, {town}")
+    db.update_listing_fields_by_id(listing["id"], force=True, listing_status=status)
+    logger.info(f"Listing #{listing['id']} status {status!r} from OneKeyMLS")
+
+
 _HANDLERS = {
     "scrape_desc": _handle_scrape_desc,
     "stats": _handle_stats,
     "commute": _handle_commute,
     "schools": _handle_schools,
+    "status": _handle_status,
     "score": _handle_score,
 }

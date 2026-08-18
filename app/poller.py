@@ -12,6 +12,7 @@ from app import db
 from app.config import settings
 from app.enrichment import fetch_commute_time, fetch_school_data, normalize_address
 from app.gmail import fetch_new_emails, mark_processed
+from app.listing_status import is_market_state
 from app.models import ParsedListing, ScoringResult
 from app.parsers import parser_chain
 from app.parsers.onehome import scrape_listing_description, scrape_listing_structured_data
@@ -399,6 +400,15 @@ def _update_duplicate(existing: tuple[int, str | None], listing: ParsedListing):
         if listing.listing_status.strip().lower() in _SOLD_STATUSES:
             db.update_listing_status(existing_id, "Sold?")
             logger.info(f"Listing #{existing_id} flagged Sold? from email status")
+        elif not is_market_state(listing.listing_status) and is_market_state(existing_status):
+            # An event label is not a market state. "Open House" and "Price Drop"
+            # say why an email was sent, and letting one land on top of an MLS
+            # "Pending" erased the one fact keeping a gone house out of the alert
+            # path. Keep the reported state; a real status may still overwrite it.
+            logger.info(
+                f"Listing #{existing_id} keeping {existing_status!r} — "
+                f"{listing.listing_status!r} is an event label, not a market state"
+            )
         else:
             db.update_listing_status(existing_id, listing.listing_status)
             logger.info(

@@ -3,6 +3,7 @@ before the migration completes) plus a Slack webhook."""
 import logging
 import httpx
 from app.config import settings
+from app.listing_status import is_unknown
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +96,7 @@ def _listing_summary(listing: dict) -> tuple[str, str, str]:
     price_str = f"${price:,}" if price else "Price unknown"
     parts = [f"{sqft:,} sqft" if sqft else "", f"{beds} bd" if beds else "",
              f"{commute} min commute" if commute else "",
-             "" if (listing.get("listing_status") or "").strip() else "status unknown — may be sold",
+             "" if not is_unknown(listing.get("listing_status")) else "status unknown — may be sold",
              f"MLS #{listing['mls_id']}" if listing.get("mls_id") else ""]
     stats = " · ".join([p for p in parts if p])
     return f"{address}, {town} {state}", f"{price_str}  {stats}".strip(), _alert_link(listing)

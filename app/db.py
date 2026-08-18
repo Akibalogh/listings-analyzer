@@ -721,6 +721,26 @@ def save_listing(listing: ParsedListing, score: ScoringResult, email_id: int, en
         return listing_id
 
 
+def get_source_subject(listing_id: int) -> str | None:
+    """Subject of the alert email a listing came from.
+
+    For the Matrix MLS senders this is the only place the market status appears
+    ("Only sold", "Only pending"), and ingest dropped it — so the status job reads
+    it back out of processed_emails before spending a network lookup.
+    """
+    ph = _placeholder()
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            f"""SELECT pe.subject FROM listings l
+                JOIN processed_emails pe ON pe.id = l.source_email_id
+                WHERE l.id = {ph}""",
+            (listing_id,),
+        )
+        row = cur.fetchone()
+    return row[0] if row else None
+
+
 def get_listings_missing_status_with_subject() -> list[dict]:
     """Listings with no status, paired with the subject of the email they came from.
 
@@ -1303,7 +1323,15 @@ def claim_unnotified_high_scores(threshold: int) -> list[dict]:
     """Return listings scoring >= threshold that haven't been notified, and
     mark them notified in the same transaction (so each alerts exactly once).
 
-    Excludes off-market statuses — no point pinging about a pending/sold home.
+    Requires a status that positively says the home is on the market. A denylist
+    of off-market statuses used to guard this, which let two things through: a
+    NULL status (COALESCE made it ''), and event labels the column also holds —
+    "Updated MLS Listing" is not a market state, and a Pending house whose status
+    it overwrote sailed past the filter. 516 Bellwood was pushed after it sold.
+
+    An allowlist fails closed instead. Unknown means no push, and because such a
+    row is never claimed it is never marked notified either — so it alerts the
+    moment its status is resolved, rather than being silently buried.
 
     Each row carries `alert_reason`: "first_time" when this listing has never
     been alerted, "re_armed" when it has (notified_at already set) and the latch
@@ -1311,7 +1339,11 @@ def claim_unnotified_high_scores(threshold: int) -> list[dict]:
     indistinguishable from a new one in the log, which is how the v75 burst went
     unnoticed for days.
     """
+    from app.listing_status import LIVE_STATUSES
+
     ph = _placeholder()
+    live_statuses = sorted(LIVE_STATUSES)
+    live_ph = ", ".join([ph] * len(live_statuses))
     with get_connection() as conn:
         cur = conn.cursor()
         cur.execute(f"""
@@ -1322,9 +1354,8 @@ def claim_unnotified_high_scores(threshold: int) -> list[dict]:
             FROM listings l JOIN scores s ON s.listing_id = l.id
             WHERE (l.notified IS NULL OR l.notified = FALSE)
               AND s.score >= {ph}
-              AND COALESCE(l.listing_status, '') NOT IN
-                  ('Pending','Sold','Under Contract','Closed','Off Market?','Sold?')
-        """, (threshold,))
+              AND LOWER(TRIM(l.listing_status)) IN ({live_ph})
+        """, (threshold, *live_statuses))
         cols = [d[0] for d in cur.description]
         rows = [dict(zip(cols, r)) for r in cur.fetchall()]
         if rows:
