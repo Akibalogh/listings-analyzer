@@ -857,3 +857,90 @@ class TestMarketStateVersusEventLabel:
         for s in (None, "", "Active", "Pending", "Price Drop", "Updated MLS Listing",
                   "Withdrawn", "  sold  "):
             assert sum([is_live(s), is_off_market(s), is_unknown(s)]) == 1, s
+
+
+class TestNotifyTestPicksALiveListing:
+    """/manage/notify-test took the top scorer outright — which for weeks was a
+    Sold house, so every push test exercised a message the production path would
+    never send."""
+
+    def test_the_endpoint_filters_on_is_live(self):
+        import inspect
+        from app.main import notify_test
+        src = inspect.getsource(notify_test)
+        assert "is_live(" in src
+
+
+class TestConcurrentClaimCannotDoubleSend:
+    """SELECT-then-UPDATE with no re-check meant two workers could both claim
+    the same rows and both send. The UPDATE now re-checks notified and the
+    caller compares rowcount — a partial claim sends nothing rather than
+    guessing which rows were its own."""
+
+    def _scored(self, score=80):
+        email_id = db.save_processed_email(
+            gmail_id=f"cc-{score}-{len(db.get_all_listing_ids())}",
+            message_id="", sender="test", subject="t", parser_used="test", listings_found=1,
+        )
+        listing = ParsedListing(source_format="onehome_html", address=f"{score} Claim St",
+                                town="Katonah", state="NY", listing_status="Active")
+        return db.save_listing(
+            listing, ScoringResult(score=score, verdict="Worth Touring"), email_id,
+        )
+
+    def test_a_row_claimed_between_select_and_update_yields_nothing(self, temp_db, monkeypatch):
+        """Simulate the race at the only point it can happen: after this
+        worker's SELECT has returned rows, before its UPDATE runs, another
+        worker claims the same row. The claim must return [] — not the row."""
+        lid = self._scored()
+        real = db.get_connection
+
+        class RacingCursor:
+            def __init__(self, cur, conn):
+                self._cur = cur
+                self._conn = conn
+
+            def execute(self, sql, *args):
+                out = self._cur.execute(sql, *args)
+                if "FROM listings l JOIN scores" in sql:
+                    # The "other worker" wins the race right after our SELECT.
+                    # A separate cursor on the same connection: same-connection
+                    # writes are allowed mid-read in SQLite (a second connection
+                    # would deadlock on the open transaction), and a fresh
+                    # cursor leaves the SELECT's pending results intact.
+                    self._conn.cursor().execute(
+                        f"UPDATE listings SET notified = TRUE "
+                        f"WHERE id = {db._placeholder()}", (lid,),
+                    )
+                return out
+
+            def __getattr__(self, name):
+                return getattr(self._cur, name)
+
+        class RacingConnection:
+            """sqlite3.Connection attributes are read-only — wrap instead."""
+
+            def __init__(self, conn):
+                self._conn = conn
+
+            def cursor(self):
+                return RacingCursor(self._conn.cursor(), self._conn)
+
+            def __getattr__(self, name):
+                return getattr(self._conn, name)
+
+        from contextlib import contextmanager
+
+        @contextmanager
+        def racing_connection():
+            with real() as conn:
+                yield RacingConnection(conn)
+
+        monkeypatch.setattr(db, "get_connection", racing_connection)
+        assert db.claim_unnotified_high_scores(70) == []
+
+    def test_an_uncontested_claim_still_works(self, temp_db):
+        lid = self._scored()
+        rows = db.claim_unnotified_high_scores(70)
+        assert [r["id"] for r in rows] == [lid]
+        assert db.claim_unnotified_high_scores(70) == []
