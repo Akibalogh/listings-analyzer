@@ -1,0 +1,66 @@
+name: Apply criteria
+
+# Applies a criteria text file from docs/ to the live app as a new version,
+# which triggers the full rescore. Manual-only (workflow_dispatch).
+#
+# Why this exists: criteria live in the DB behind PUT /criteria, which needs
+# MANAGE_KEY. Sessions that draft criteria don't hold that key (deliberately —
+# it belongs in secret stores, not chat transcripts or containers), so applying
+# a reviewed docs/criteria-*.txt was a manual curl. This makes it a button.
+#
+# One-time setup: add MANAGE_KEY under GitHub → Settings → Secrets and
+# variables → Actions, with the same value as the Fly secret.
+
+on:
+  workflow_dispatch:
+    inputs:
+      criteria_file:
+        description: "Path to the criteria text file in the repo"
+        required: true
+        default: "docs/criteria-v76-proposed.txt"
+      created_by:
+        description: "Recorded as the author of the new criteria version"
+        required: true
+        default: "aki (via apply-criteria workflow)"
+
+jobs:
+  apply:
+    name: Apply criteria to live app
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: PUT the criteria
+        env:
+          MANAGE_KEY: ${{ secrets.MANAGE_KEY }}
+          CRITERIA_FILE: ${{ inputs.criteria_file }}
+          CREATED_BY: ${{ inputs.created_by }}
+        run: |
+          if [ -z "$MANAGE_KEY" ]; then
+            echo "The MANAGE_KEY Actions secret is not set. Add it under" >&2
+            echo "Settings → Secrets and variables → Actions (same value as the Fly secret)." >&2
+            exit 1
+          fi
+          python3 - <<'PY'
+          import json, os, urllib.request
+
+          text = open(os.environ["CRITERIA_FILE"]).read()
+          body = json.dumps({
+              "instructions": text,
+              "created_by": os.environ["CREATED_BY"],
+          }).encode()
+          req = urllib.request.Request(
+              "https://listings-analyzer.fly.dev/criteria",
+              data=body,
+              headers={
+                  "x-manage-key": os.environ["MANAGE_KEY"],
+                  "content-type": "application/json",
+              },
+              method="PUT",
+          )
+          with urllib.request.urlopen(req, timeout=60) as resp:
+              out = json.loads(resp.read().decode())
+          print(f"Applied: version {out.get('version')}, "
+                f"rescore_started={out.get('rescore_started')}")
+          PY
