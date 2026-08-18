@@ -4,6 +4,72 @@ All notable changes to Listings Analyzer are documented here.
 
 ---
 
+## [2026-08-18] — the alert storm, and making the score a calculation again
+
+"Are those all real?" — a week of ntfy alerts, of which only 3 were genuinely
+new listings. Every mechanism behind the rest is now closed, and the day ended
+with the scoring arithmetic itself put under contract.
+
+### Fixed
+- **Criteria rescores no longer re-arm the notify latch** (#63). A version
+  that lowered scores re-armed dozens of latches; the next version that raised
+  them fired all those alerts in one burst — months-old houses, because the
+  rubric changed, not the house. The latch is re-armed only by a listing's own
+  facts changing, and only on a real fall (`NOTIFY_REARM_MARGIN`, 10 pts),
+  not one scoring band of model jitter.
+- **The hourly rescore loop is gone** (#64). A permanent scrape gap re-queued
+  an AI score job every hour for 85 of 180 listings — ~2,000 Haiku calls/day
+  re-deriving the same answer with enough jitter to flap across the alert bar.
+  `scores.input_fingerprint` (hash of every column the scorer reads) states
+  the real condition: rescore when the inputs changed. Steady state measured
+  after deploy: 0 rescores/tick, new listings still scored within one tick.
+- **/manage/rescrape-unknowns never worked** — it called `db.save_score()`,
+  which does not exist, and its own `except` swallowed the AttributeError.
+- **Unknown status no longer pushes** (#65). The off-market filter was a
+  denylist, so NULL statuses and email event labels ("Updated MLS Listing")
+  sailed through — 516 Bellwood was pushed after it sold. `app/listing_status.py`
+  is now the single authority: push only on `is_live`, and an event label can
+  no longer overwrite a real market state ("Open House" landing on "Pending"
+  is how a gone house came back). Unknowns fail closed but stay unclaimed, so
+  they alert the moment the status resolves. A `status` job tries the alert
+  subject, then OneKey MLS — though DDG blocks datacenter IPs, so resolution
+  is best-effort (accepted; all 12 unknowns sit below the alert bar).
+- **notify-test now picks the highest-scoring LIVE listing** — it took the top
+  scorer outright, which for weeks was a Sold house.
+- **Concurrent alert claim can no longer double-send** — the latch UPDATE
+  re-checks `notified` and a partial claim sends nothing. Unreachable on one
+  machine; insurance for the day it scales.
+
+### Added
+- **An alerts audit table** (#63): every send recorded per channel with score,
+  verdict, status, criteria version, delivered-or-rejected, and first_time vs
+  re_armed. `GET /alerts`; 7-day volume + repeat share on `/health`. The 24
+  pre-log alerts carry a 1970 sentinel in `notified_at` — real times are
+  unrecoverable, and the sentinel's only job is making their next alert read
+  as a repeat.
+- **The score arithmetic contract** (#66). Across 112 listings, not one score
+  matched its own published breakdown (median gap +41): the output contract
+  never said score = 30 + sum(soft_points), the prompt's hardcoded school
+  table contradicted the criteria's (+5 vs −20 for the same band), and 64
+  breakdowns scored one district three times. The contract is now stated and
+  enforced — one corrective re-ask, then keep-the-score-but-cap-confidence;
+  never substitute the sum (that would have silently repriced ≥60 from 58
+  listings to 17). The prompt's school table is deleted; the criteria are the
+  authority, as with commute. Residual measured at
+  `/manage/scoring-integrity → score_vs_breakdown`.
+- **Criteria v76** (#67, applied): one school adjustment judged on the best
+  elementary, the arithmetic stated in the criteria text, "Pass" renamed
+  "Weak Match". First criteria version applied via the new **apply-criteria
+  workflow** (#68) — `workflow_dispatch` + a `MANAGE_KEY` Actions secret, so
+  applying reviewed criteria is a button instead of a hand-run curl.
+
+### Changed
+- **Alert bar 70 → 75.** 72 is the model's habitual "clears the gates,
+  nothing decisive" score — 17 of the 24 alerts ever sent were 72s. A bar two
+  points under the modal score is no bar.
+
+---
+
 ## [Unreleased] — the push migration, and learning to tell delivery from silence
 
 ntfy is live and verified end to end. Getting there turned up a worse bug than

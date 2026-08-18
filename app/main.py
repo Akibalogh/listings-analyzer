@@ -1170,10 +1170,19 @@ def notify_test(request: Request):
     }
     if not any(channels.values()):
         raise HTTPException(status_code=400, detail="No notification channel configured (set ntfy, Pushover, or Slack)")
+    from app.listing_status import is_live
+
+    # Highest-scoring LIVE listing — the same bar the real alert path applies.
+    # This used to take the top scorer outright, which for weeks was a Sold
+    # house: every push test buzzed the phone about a home nobody could buy,
+    # exercising a message the production path would never send.
     listings = db.get_all_listings()
-    top = sorted(listings, key=lambda l: l.get("score") or 0, reverse=True)
+    top = sorted(
+        (l for l in listings if is_live(l.get("listing_status"))),
+        key=lambda l: l.get("score") or 0, reverse=True,
+    )
     if not top or (top[0].get("score") or 0) == 0:
-        raise HTTPException(status_code=404, detail="No scored listings found")
+        raise HTTPException(status_code=404, detail="No scored live listings found")
     listing = top[0]
     # Report what the channels actually returned. This used to answer
     # {"sent": true} no matter what, so a publish ntfy rejected was

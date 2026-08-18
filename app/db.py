@@ -1364,11 +1364,27 @@ def claim_unnotified_high_scores(threshold: int) -> list[dict]:
             ids = tuple(r["id"] for r in rows)
             placeholders = ", ".join([ph] * len(ids))
             now = datetime.now(timezone.utc).isoformat()
+            # The re-check of notified in the WHERE is the cross-process guard:
+            # two workers can both SELECT the same rows before either commits
+            # (READ COMMITTED, no row lock), but only one UPDATE flips each row.
+            # rowcount tells us how many THIS caller actually claimed; on a
+            # partial claim we can't tell WHICH rows were ours without RETURNING
+            # (Postgres-only), so the loser sends nothing rather than guessing.
+            # Unreachable on today's single Fly machine + _drain_lock; cheap
+            # insurance for the day it scales out or a deploy overlaps.
             cur.execute(
                 f"UPDATE listings SET notified = TRUE, notified_at = {ph} "
-                f"WHERE id IN ({placeholders})",
+                f"WHERE id IN ({placeholders}) "
+                f"AND (notified IS NULL OR notified = FALSE)",
                 (now, *ids),
             )
+            if (cur.rowcount or 0) != len(ids):
+                logger.warning(
+                    "Concurrent alert claim detected: %d of %d rows already "
+                    "claimed by another worker — sending none from this claim",
+                    len(ids) - (cur.rowcount or 0), len(ids),
+                )
+                return []
     return rows
 
 
