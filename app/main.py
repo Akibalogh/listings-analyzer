@@ -3579,7 +3579,7 @@ def manage_scoring_integrity(request: Request):
     )
 
     contradictions, unconfirmable = [], []
-    # Score-vs-breakdown: the criteria say score = base 30 + adjustments, and
+    # Score-vs-breakdown: the criteria say score = base + adjustments, and
     # for a long time nothing held the model to it (median gap +41, not one of
     # 112 listings matched). The arithmetic contract now enforces it on new
     # scores; this section is how the residual is measured — retroactively,

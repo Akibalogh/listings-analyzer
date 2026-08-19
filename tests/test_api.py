@@ -2359,16 +2359,19 @@ class TestAlertsAreVisible:
             assert _push_health()["alerts_last_7d"] is None
 
 
-class TestTheAlertBarIsAboveTheDefaultScore:
-    """72 is the model's habitual score for "clears the hard gates, nothing else
-    decisive" — 24 of 163 listings sit on it exactly, and 17 of the 24 alerts ever
-    sent were 72s. A bar at 70 alerted on nearly everything not rejected, which is
-    the same as having no bar.
+class TestTheAlertBarMatchesTheArithmetic:
+    """The bar was 75 when 72 was the model's habitual clustering score (17 of
+    the 24 alerts ever sent were 72s). v77's enforced ledger removed the
+    clustering, and under it a 75 bar would require a 95th-percentile school
+    district before the phone ever buzzed — the 80th-94th band, where the
+    purchase most plausibly lives, could never alert. 70 admits exactly the
+    tier the buyer cares about: confirmed ground-floor bedrooms in good
+    districts.
     """
 
-    def test_the_threshold_clears_the_modal_score(self):
+    def test_the_threshold_is_70_under_v77(self):
         from app.config import Settings
-        assert Settings().notify_score_threshold > 72
+        assert Settings().notify_score_threshold == 70
 
     def test_a_rearm_margin_is_configured(self):
         from app.config import Settings

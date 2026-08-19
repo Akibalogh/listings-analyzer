@@ -74,10 +74,14 @@ def score_input_fingerprint(listing_row: dict) -> str:
 
 ALLOWED_VERDICTS = {"Strong Match", "Worth Touring", "Low Priority", "Weak Match", "Reject"}
 
-# The criteria's stated arithmetic: "Base score: 30", itemised adjustments,
-# "Clamp final score between 0 and 100". The score is supposed to be a
-# calculation, not a vibe.
-BASE_SCORE = 30
+def base_score() -> int:
+    """The criteria's stated arithmetic base ("Base score: N" + adjustments,
+    clamped 0-100). Read from settings so a criteria retune changes one config
+    value, and hard_gate_drift() flags prose/config disagreement — a hardcoded
+    30 here survived one retune already and validated new scores against the
+    wrong arithmetic.
+    """
+    return settings.score_base_points
 
 # How far the reported score may drift from its own breakdown before the
 # response is treated as self-contradictory. Absorbs holistic rounding without
@@ -88,7 +92,7 @@ ARITHMETIC_TOLERANCE = 5
 
 def implied_score(soft_points: dict) -> int:
     """The score the published breakdown actually adds up to."""
-    total = BASE_SCORE + sum(
+    total = base_score() + sum(
         v for v in (soft_points or {}).values() if isinstance(v, (int, float))
     )
     return max(0, min(100, int(total)))
@@ -132,7 +136,7 @@ def reconcile_score_arithmetic(result: ScoringResult, address: str = "") -> Scor
     note = (
         f"Score/breakdown mismatch: reported {result.score} but the published "
         f"adjustments sum to {implied_score(result.soft_points)} "
-        f"(base {BASE_SCORE} + soft points). The score stands; treat the "
+        f"(base {base_score()} + soft points). The score stands; treat the "
         "itemisation as unreliable."
     )
     update = {"concerns": [*result.concerns, note]}
@@ -147,7 +151,7 @@ def _arithmetic_retry_note(result: ScoringResult) -> str:
 CORRECTION — YOUR PREVIOUS ANSWER WAS REJECTED AND YOU ARE BEING ASKED AGAIN.
 
 You reported score {result.score}, but your own soft_points sum to
-{implied_score(result.soft_points)} (base {BASE_SCORE} + your adjustments).
+{implied_score(result.soft_points)} (base {base_score()} + your adjustments).
 Those must agree: the score IS the arithmetic, not a separate judgement.
 
 Re-evaluate and return a response where:
@@ -155,7 +159,7 @@ Re-evaluate and return a response where:
   there, including age_adjustment and condition_adjustment, each exactly once.
 - There is EXACTLY ONE school-district entry, judged on the best-ranked
   elementary school — never one per school level.
-- score == {BASE_SCORE} + sum(soft_points values), clamped to 0-100.
+- score == {base_score()} + sum(soft_points values), clamped to 0-100.
 
 Do not fudge the ledger to match a number you have already decided on.
 Recompute honestly: if your adjustments were wrong, fix the adjustments; if
@@ -209,6 +213,8 @@ _CRITERIA_MIN_BEDS_RE = re.compile(r"minimum\s+(\d{1,2})\s+bedrooms?", re.IGNORE
 _CRITERIA_SCHOOL_FLOOR_RE = re.compile(
     r"below\s+(\d{1,2})(?:st|nd|rd|th)\s+percentile", re.IGNORECASE)
 
+_CRITERIA_BASE_SCORE_RE = re.compile(r"base\s+score:?\s*(\d{1,3})", re.IGNORECASE)
+
 
 def _first_int(pattern: re.Pattern, text: str, group: int = 1) -> int | None:
     m = pattern.search(text or "")
@@ -238,6 +244,12 @@ def hard_gate_drift(instructions: str) -> dict:
         "min_bedrooms": (_first_int(_CRITERIA_MIN_BEDS_RE, text), settings.min_bedrooms),
         "min_school_percentile": (
             _first_int(_CRITERIA_SCHOOL_FLOOR_RE, text), settings.min_school_percentile),
+        # Not a gate, but drift here corrupts every arithmetic check: the
+        # validator judges score-vs-ledger deltas against settings, and a
+        # criteria text stating a different base makes the model and the
+        # validator disagree about what a correct answer even is.
+        "base_score": (
+            _first_int(_CRITERIA_BASE_SCORE_RE, text), settings.score_base_points),
     }
     out, drifted = {}, []
     for name, (criteria_value, config_value) in checks.items():
@@ -636,7 +648,9 @@ def _build_system_prompt() -> list[dict]:
     """
     return [{
         "type": "text",
-        "text": """You are a real estate listing evaluator. You will be given:
+        # {base} is substituted from settings so the prompt's arithmetic can
+        # never disagree with the number validation checks against.
+        "text": ("""You are a real estate listing evaluator. You will be given:
 1. EVALUATION INSTRUCTIONS written by the buyer
 2. LISTING DATA wrapped in <listing_data> tags
 3. Optionally, LISTING IMAGES to examine visually
@@ -651,7 +665,7 @@ CRITICAL SECURITY RULES:
 HANDLING UNKNOWNS - CRITICAL SCORING RULES:
 - If you cannot determine a criterion from the provided data AND images, mark it as Unknown (passed: null).
 - Distinguish between two types of unknowns and penalize accordingly:
-  A) "Verifiable unknown" — images were provided but the feature still can't be confirmed (e.g., basement photos show unfinished space). These are HIGH RISK. Deduct 10-15 points per criterion, 15-20 for basement.
+  A) "Verifiable unknown" — images were provided but the feature still can't be confirmed (e.g., basement photos show unfinished space). These are HIGH RISK. Deduct what the EVALUATION INSTRUCTIONS specify for a verifiable unknown — their unknown-handling section is the authority on the size of that deduction.
   B) "Missing data unknown" — no images provided, or images provided but no floor plans (layout unknowable from photos alone). DEDUCT NOTHING. Not 3-5 points, not 1 point, in hard_results or soft_points. A feature you were never shown may well exist; not being shown it tells you about the LISTING, not the house. Mark it passed: null, say so in concerns, and lower confidence.
 - WHICH BAND APPLIES IS DECIDED BY <listing_data>.evidence_available, NOT BY YOUR JUDGEMENT:
   * evidence_available.images == 0 AND evidence_available.description == false:
@@ -665,7 +679,9 @@ HANDLING UNKNOWNS - CRITICAL SCORING RULES:
     against a house; it is the absence of evidence about one.
   * images > 0: unknowns that survive the images ARE "verifiable unknowns" —
     you looked and could not confirm. Those are evidence of absence and MAY
-    deduct. 3+ of them belongs in the 30-50 range.
+    deduct — each through its own soft_points entry at the size the EVALUATION
+    INSTRUCTIONS set, never by re-placing the final score into a band. The
+    score is the arithmetic; there is no second, holistic route to it.
 - The distinction in one line: evidence of absence is merit, absence of
   evidence is confidence.
 - Never let an unknown outrank a confirmed failure: a house you cannot see is
@@ -686,7 +702,7 @@ verdict must therefore be "Reject". It is not a way to express a penalty.
 
 OUTPUT FORMAT — return ONLY a JSON object with exactly these keys:
 {
-  "score": <integer 0-100 — MUST equal 30 + the sum of soft_points values, clamped to 0-100>,
+  "score": <integer 0-100 — MUST equal {base} + the sum of soft_points values, clamped to 0-100>,
   "verdict": "<one of: Strong Match, Worth Touring, Low Priority, Weak Match, Reject>",
   "hard_results": [
     {"criterion": "<name>", "passed": <true|false|null>, "value": "<display value>", "reason": "<why>"}
@@ -720,31 +736,36 @@ Worth Touring — 65/100
 
 A confirmed basement gym setup is a major plus. Ground floor bedroom adds convenience for parents visiting. Price at $2.1M is above the target range but within the cap — negotiate accordingly.
 
-GROUND-FLOOR BEDROOM — NICE-TO-HAVE (NOT A HARD CRITERION):
-The buyer's parents may occasionally need a ground-floor bedroom. This is a CONVENIENCE, not a dealbreaker.
-A stair lift is a viable alternative. Having a ground-floor bedroom or den/study that could serve as one
-is a positive factor worth 5-10 bonus points, but its absence should NOT trigger a reject or major penalty.
-Note it in property_summary as ✅ if present or ⚠️ if absent, but do not treat it as a hard pass/fail criterion.
+GROUND-FLOOR BEDROOM — TOP-PRIORITY LAYOUT FACTOR (SOFT, NOT A HARD CRITERION):
+The buyer's parents will live on the ground floor, so this is the single most
+important layout question — but it is scored, never a Reject. Apply the
+Ground-Floor Bedroom table in the EVALUATION INSTRUCTIONS exactly as written —
+it is the authority on the points in every direction, including the heavy
+penalty for a CONFIRMED absence and the zero for missing data. (This prompt
+used to carry its own, much milder ground-floor-bedroom framing; handed two
+conflicting tables, the model paid neither — the measured effect of this factor
+on real scores was none.)
+Note it in property_summary as ✅ if present or ⚠️ if absent/unknown.
 Look for signals: "first floor bedroom", "in-law suite", "bedroom on main", "den", "study", ranch layouts, etc.
 
-BASEMENT — STRONG REQUIREMENT (FINISHED OR UNFINISHED):
-The buyer wants a basement — finished or unfinished. This is a major priority. Evaluate:
-1. BASEMENT PRESENCE: Does the listing have a basement? (no basement = STRONG PENALTY, −25 to −40 pts)
-2. FINISH LEVEL: Finished is better (can use immediately), unfinished is acceptable (can be finished later).
-3. SIZE & USABILITY: Look for "spacious", "large", "500+ sqft", "rec room", "high ceiling", etc.
-   - Spacious (finished or unfinished) = bonus (passed: true)
-   - Tiny/cramped basement = penalty in soft_points (passed: true — it HAS a basement)
-4. GYM POTENTIAL: Finished basements with gym keywords ("gym", "fitness", "workout", "rubber flooring") = strong bonus.
-   Unfinished basements with ample space = moderate bonus (room to finish for gym).
+BASEMENT — PREFERENCE, SCORED FROM THE INSTRUCTIONS' TABLE:
+The buyer likes a basement (gym potential; walk-out best). Apply the Basement
+table in the EVALUATION INSTRUCTIONS exactly as written — it is the authority
+on the points. (This prompt used to carry its own basement point table, far
+heavier than the instructions' — and with the ledger enforced, a stray example
+number becomes a real ledger entry, so no point values appear here at all.)
+Evaluate what the evidence shows: presence, finish level, size/usability
+("spacious", "rec room", "high ceiling"), and gym potential ("gym", "fitness",
+"workout", "rubber flooring" — or unfinished space ample enough to become one).
 
-Scoring — note that NONE of these is a hard failure. A basement is a strong
-preference, not a hard requirement, so passed: false never applies here; the
-disappointment is carried by soft_points, which is what "-25 to -40 pts" above
-means. This section used to say passed: false for a small basement, and that
-is where the habit of flagging penalties as failures was learned.
+Scoring — note that NONE of these is a hard failure. A basement is a
+preference, not a hard requirement, so passed: false never applies here; any
+disappointment is carried by soft_points at the instructions' scale. This
+section used to say passed: false for a small basement, and that is where the
+habit of flagging penalties as failures was learned.
 ✅ Confirmed spacious basement (finished or unfinished): passed: true, reason: "Spacious basement, suitable for gym"
-⚠️ Confirmed small basement: passed: true, soft_points: {"basement_small": -15}, reason: "Basement present but small/cramped"
-❌ No basement: passed: true, soft_points: {"no_basement": -30}, reason: "No basement"
+⚠️ Confirmed small basement: passed: true, a small negative soft_points entry per the instructions, reason: "Basement present but small/cramped"
+❌ No basement: passed: true, the instructions' no-basement soft_points entry, reason: "No basement"
 ❓ Unknown (mention of basement but size unclear): passed: null, reason: "Basement presence/size unclear"
 
 If you see a basement photo showing ample space and good headroom = CONFIRMED suitable.
@@ -752,8 +773,11 @@ If description says "tiny" or "crawl space" = CONFIRMED not suitable.
 Unfinished basement with high ceilings and square footage = CONFIRMED suitable (can be finished).
 
 ENRICHMENT DATA — TOP PRIORITY FACTORS:
-The buyer's three highest-priority criteria are: (1) commute time, (2) school district quality, (3) price.
-These should carry the most weight in your scoring.
+Schools are the dominant driver in BOTH directions; the ground-floor bedroom is
+the top layout factor; commute is #3. Price matters inside its band but the
+EVALUATION INSTRUCTIONS' weights, not this list, decide how much anything
+carries. (This line used to rank commute first and omit the ground-floor
+bedroom entirely, contradicting the instructions it sits next to.)
 
 - COMMUTE: If commute_minutes is provided in <listing_data>, this is a TOP PRIORITY factor.
   The commute hard limit stated in the buyer's criteria is ALREADY ENFORCED IN CODE before
@@ -787,26 +811,32 @@ These should carry the most weight in your scoring.
   High with rank_percentile null for both, and was docked 15 points for
   "school_district_unknown" on the grounds that school data was not, strictly,
   missing. Names without rankings are nothing to judge. Score them as zero.
-- PRICE: The target range is $1.5M–$2M and carries NO penalty anywhere inside it.
-  Under $1.5M = mildly positive (+5 for a genuine deal). $1.5M–$2M = neutral (0).
-  $2M–$2.25M = less desirable (−8). $2.25M is the buyer's hard cap.
-  Never auto-reject on price alone.
+- PRICE: Apply the price bands in the EVALUATION INSTRUCTIONS exactly as
+  written — they are the authority. Do NOT award a below-budget bonus for the
+  asking price alone: the only price bonus is the below-market one, and it is
+  keyed to price_per_sqft_signal == "below_market", not to being under $1.5M.
+  (This prompt used to grant its own under-budget bonus — 68% of the corpus is
+  under $1.5M, so most of the board collected points the instructions never
+  offered.) Never auto-reject on price alone.
   MISSING PRICE: If price is null/unknown/not listed, treat it as a "missing data" unknown — mark the price criterion as passed: null with reason "Price not listed". Do NOT reject or heavily penalize for a missing price. Score the listing on its other merits; flag price as unverifiable.
-- If age_condition is provided, apply the age_adjustment and condition_adjustment directly
-  to your score. Note the age_tier and any keywords_matched in your reasoning.
+- If age_condition is provided, apply age_adjustment and condition_adjustment
+  as soft_points entries — they are pre-computed ON THE INSTRUCTIONS' SCALE, so
+  do not re-derive or re-size them from the age table yourself; one entry each.
+  Note the age_tier and any keywords_matched in your reasoning.
 - If price_per_sqft_signal is provided, factor the signal (below_market/at_market/above_market)
   and ratio into your price assessment.
 - If property_tax is provided (NYC only), use assessed_value and market_value to contextualize
   likely tax burden.
 
 SCORE ARITHMETIC — the score is a calculation, not a separate judgement:
-  score = 30 (base) + sum of every soft_points value, clamped to 0-100.
+  score = {base} (base) + sum of every soft_points value, clamped to 0-100.
 soft_points is the complete ledger. If you applied it, it appears there —
 age_adjustment and condition_adjustment included, each exactly once, and
 exactly one school-district entry. A score that disagrees with its own ledger
 will be rejected and re-asked.
 
-Do NOT include any text outside the JSON object. Do NOT use markdown code fences.""",
+Do NOT include any text outside the JSON object. Do NOT use markdown code fences."""
+                 ).replace("{base}", str(base_score())),
         "cache_control": {"type": "ephemeral"},
     }]
 

@@ -401,14 +401,15 @@ class TestSystemPromptUnknownPenalty:
         prompt = blocks[0]["text"]
         assert "HANDLING UNKNOWNS" in prompt
 
-    def test_two_tier_penalty_described(self):
-        """Both penalty tiers (high and low) should be quantified."""
+    def test_verifiable_unknowns_defer_to_the_instructions(self):
+        """The prompt used to quantify the deduction itself (10-15, 15-20 for
+        basement) — its own point table, contradicting the criteria's. The
+        instructions are the authority on sizes; the prompt keeps only the
+        two-tier distinction."""
         blocks = _build_system_prompt()
         prompt = blocks[0]["text"]
-        # High penalty tier
-        assert "10-15" in prompt or "10–15" in prompt
-        # Low penalty tier
-        assert "3-5" in prompt or "3–5" in prompt
+        assert "Deduct what the EVALUATION INSTRUCTIONS specify" in prompt
+        assert "DEDUCT NOTHING" in prompt  # the missing-data tier
 
 
 class TestImageHintBlocks:
@@ -512,23 +513,27 @@ class TestGFBInference:
     """Tests for the GFB (ground-floor bedroom) nice-to-have section in the system prompt."""
 
     def test_gfb_section_present_in_prompt(self):
-        """System prompt must contain the GFB nice-to-have section."""
+        """The prompt called the ground-floor bedroom a "nice-to-have" while the
+        criteria scored a confirmed absence as a near-dealbreaker — two tables,
+        and the model paid neither (regression beta -0.06, i.e. nothing). The
+        section now states the real priority and defers the numbers."""
         blocks = _build_system_prompt()
         prompt = blocks[0]["text"]
-        assert "GROUND-FLOOR BEDROOM — NICE-TO-HAVE" in prompt
+        assert "GROUND-FLOOR BEDROOM — TOP-PRIORITY LAYOUT FACTOR" in prompt
 
     def test_gfb_is_not_a_hard_criterion(self):
-        """GFB absence must not reject: it's a convenience with a stair-lift alternative."""
+        """Scored, never a Reject — however heavy the confirmed-absence penalty."""
         blocks = _build_system_prompt()
         prompt = blocks[0]["text"]
-        assert "NOT A HARD CRITERION" in prompt
-        assert "stair lift" in prompt.lower()
+        assert "SOFT, NOT A HARD CRITERION" in prompt
+        assert "scored, never a Reject" in prompt
 
-    def test_gfb_bonus_range_stated(self):
-        """Prompt must bound the GFB bonus so it can't dominate the score."""
+    def test_gfb_defers_the_points_to_the_instructions(self):
+        """No point values in the prompt — the criteria table is the authority."""
         blocks = _build_system_prompt()
         prompt = blocks[0]["text"]
-        assert "5-10 bonus points" in prompt
+        assert "Ground-Floor Bedroom table in the EVALUATION INSTRUCTIONS" in prompt
+        assert "5-10 bonus points" not in prompt
 
     def test_gfb_ranch_inference_rule(self):
         """Ranch-style homes should be noted as a GFB signal."""
@@ -544,10 +549,10 @@ class TestGFBInference:
         assert "in-law" in prompt.lower()
 
     def test_gfb_absence_never_triggers_reject(self):
-        """The prompt must say absence should not trigger a reject or major penalty."""
+        """Absence is a scored penalty from the instructions' table, not a Reject."""
         blocks = _build_system_prompt()
         prompt = blocks[0]["text"]
-        assert "should NOT trigger a reject" in prompt
+        assert "scored, never a Reject" in prompt
 
     def test_enrichment_data_instructions_present(self):
         """Prompt should tell AI how to use age_condition and price_per_sqft_signal."""
@@ -1612,9 +1617,15 @@ class TestEvidenceDecidesTheUnknownBand:
         assert "evidence of absence is merit" in prompt
 
     def test_prompt_keeps_the_harsh_band_for_seen_but_unconfirmed(self):
+        """Verifiable unknowns still deduct — but through ledger entries at the
+        instructions' scale. The old text told the model that 3+ of them
+        "belongs in the 30-50 range": a holistic score-placement instruction
+        that bypassed the arithmetic contract entirely."""
         prompt = _build_system_prompt()[0]["text"]
         assert "images > 0" in prompt
-        assert "30-50" in prompt
+        assert "MAY" in prompt and "deduct" in prompt
+        assert "30-50" not in prompt
+        assert "never by re-placing the final score" in prompt
 
     def test_listing_data_reports_the_evidence(self):
         from app.main import _build_listing_data
@@ -1713,10 +1724,22 @@ class TestPenaltyFlagsAreDemoted:
         """This section prescribed passed: false for what it called a penalty —
         where the habit was learned."""
         prompt = _build_system_prompt()[0]["text"]
-        i = prompt.index("BASEMENT — STRONG REQUIREMENT")
+        i = prompt.index("BASEMENT — PREFERENCE")
         section = prompt[i:i + 1800]
         assert "Confirmed small basement: passed: true" in section
         assert "passed: false, reason: \"Basement present but small/cramped\"" not in section
+
+    def test_the_basement_section_carries_no_point_values(self):
+        """It used to say "STRONG REQUIREMENT, -25 to -40" with literal example
+        ledger entries of -15 and -30, against a criteria table pricing the
+        whole factor within about ±4. With the ledger enforced, a stray example
+        number becomes a real ledger entry — so no numbers appear at all."""
+        prompt = _build_system_prompt()[0]["text"]
+        i = prompt.index("BASEMENT — PREFERENCE")
+        section = prompt[i:i + 1800]
+        for stale in ("-25", "-40", "-15", "-30", "STRONG PENALTY"):
+            assert stale not in section, stale
+        assert "EVALUATION INSTRUCTIONS" in section  # the deferral is stated
 
 
 class TestUncertaintyPenaltyTelemetry:
@@ -1788,7 +1811,7 @@ class TestUnrankedSchoolsAreMissingData:
 
 
 class TestScoreArithmeticContract:
-    """The criteria say score = base 30 + adjustments, clamped 0-100. For a long
+    """The criteria say score = base + adjustments, clamped 0-100. For a long
     time nothing held the model to it: the output contract asked for "score" and
     "soft_points" as independent fields, and across 112 live listings not ONE
     matched its own breakdown (median gap +41, reported higher in 99). "72 /
@@ -1806,15 +1829,24 @@ class TestScoreArithmeticContract:
                              confidence=confidence)
 
     def test_implied_score_is_base_plus_sum_clamped(self):
-        from app.scorer import implied_score
-        assert implied_score({"a": 20, "b": -5}) == 45
+        from app.scorer import base_score, implied_score
+        assert implied_score({"a": 20, "b": -5}) == base_score() + 15
         assert implied_score({"a": 90}) == 100   # clamp high
-        assert implied_score({"a": -90}) == 0    # clamp low
-        assert implied_score({}) == 30
+        assert implied_score({"a": -190}) == 0   # clamp low
+        assert implied_score({}) == base_score()
+
+    def test_the_base_is_the_configured_one(self):
+        """Hardcoding 30 here survived one retune (v77 moved the base to 50)
+        and validated new scores against the wrong arithmetic."""
+        from unittest.mock import patch
+        from app.scorer import implied_score
+        with patch("app.scorer.settings") as ms:
+            ms.score_base_points = 40
+            assert implied_score({"a": 10}) == 50
 
     def test_delta_is_reported_minus_implied(self):
-        from app.scorer import score_breakdown_delta
-        assert score_breakdown_delta(self._result(72, {"a": 19})) == 23
+        from app.scorer import base_score, score_breakdown_delta
+        assert score_breakdown_delta(self._result(72, {"a": 19})) == 72 - (base_score() + 19)
 
     def test_no_delta_for_a_reject(self):
         """Validation forces a Reject's score to 0 regardless of breakdown —
@@ -1827,10 +1859,10 @@ class TestScoreArithmeticContract:
         assert score_breakdown_delta(self._result(72, {})) is None
 
     def test_within_tolerance_passes_untouched(self):
-        from app.scorer import reconcile_score_arithmetic
-        r = self._result(49, {"a": 19})  # implied 49, delta 0
+        from app.scorer import base_score, reconcile_score_arithmetic
+        r = self._result(base_score() + 19, {"a": 19})  # delta 0
         assert reconcile_score_arithmetic(r) is r
-        r5 = self._result(54, {"a": 19})  # delta +5, on the line
+        r5 = self._result(base_score() + 24, {"a": 19})  # delta +5, on the line
         assert reconcile_score_arithmetic(r5) is r5
 
     def test_a_breach_keeps_the_score(self):
@@ -1842,32 +1874,34 @@ class TestScoreArithmeticContract:
 
     def test_a_breach_caps_confidence_at_medium(self):
         from app.scorer import reconcile_score_arithmetic
-        assert reconcile_score_arithmetic(self._result(72, {"a": 19})).confidence == "medium"
+        assert reconcile_score_arithmetic(self._result(99, {"a": 19})).confidence == "medium"
 
     def test_a_breach_never_raises_confidence(self):
         """low stays low — the cap is a ceiling, not a target."""
         from app.scorer import reconcile_score_arithmetic
-        out = reconcile_score_arithmetic(self._result(72, {"a": 19}, confidence="low"))
+        out = reconcile_score_arithmetic(self._result(99, {"a": 19}, confidence="low"))
         assert out.confidence == "low"
 
     def test_a_breach_is_stated_in_concerns(self):
-        from app.scorer import reconcile_score_arithmetic
-        out = reconcile_score_arithmetic(self._result(72, {"a": 19}))
+        from app.scorer import base_score, reconcile_score_arithmetic
+        out = reconcile_score_arithmetic(self._result(99, {"a": 19}))
         assert any("mismatch" in c.lower() for c in out.concerns)
-        assert any("49" in c for c in out.concerns)  # the sum it disagrees with
+        assert any(str(base_score() + 19) in c for c in out.concerns)
 
     def test_the_retry_note_shows_the_model_its_own_numbers(self):
-        from app.scorer import _arithmetic_retry_note
-        note = _arithmetic_retry_note(self._result(72, {"a": 19}))
-        assert "72" in note and "49" in note
+        from app.scorer import _arithmetic_retry_note, base_score
+        note = _arithmetic_retry_note(self._result(99, {"a": 19}))
+        assert "99" in note and str(base_score() + 19) in note
         assert "EXACTLY ONE school-district" in note
 
     def test_the_prompt_states_the_contract(self):
         """The old contract asked for score and soft_points as independent
         fields — that's the root cause, so its absence must fail loudly."""
-        from app.scorer import _build_system_prompt
+        from app.scorer import _build_system_prompt, base_score
         text = "".join(b["text"] for b in _build_system_prompt())
-        assert "30 + the sum of soft_points" in text or "30 (base) + sum" in text
+        assert f"{base_score()} + the sum of soft_points" in text
+        assert f"score = {base_score()} (base) + sum" in text
+        assert "{base}" not in text  # the placeholder must be substituted
         assert "EXACTLY ONE school-district adjustment" in text
 
     def test_the_prompt_no_longer_carries_its_own_school_points(self):
@@ -1894,9 +1928,13 @@ class TestArithmeticRetryPath:
             m.content = [MagicMock()]
             m.content[0].text = _json.dumps(r)
             msgs.append(m)
+        from app.config import settings as real_settings
         with patch("app.scorer.settings") as ms:
             ms.anthropic_api_key = "sk-test"
             ms.ai_eval_model = "m"
+            # base_score() reads settings at call time — a bare MagicMock here
+            # turns the arithmetic check into nonsense
+            ms.score_base_points = real_settings.score_base_points
             with patch("app.scorer._build_user_message", return_value=[]), \
                  patch("app.scorer._build_system_prompt", return_value=[]):
                 client = MagicMock()
@@ -1905,27 +1943,29 @@ class TestArithmeticRetryPath:
                     result, _ = ai_score_listing({"address": "T"}, "C")
         return result, client.messages.create.call_count
 
-    BAD = {"score": 72, "verdict": "Worth Touring", "hard_results": [],
+    from app.scorer import base_score as _bs
+
+    BAD = {"score": _bs() + 42, "verdict": "Worth Touring", "hard_results": [],
            "soft_points": {"a": 10}, "concerns": [], "confidence": "high",
            "reasoning": "r", "property_summary": "p"}
-    GOOD = {"score": 62, "verdict": "Worth Touring", "hard_results": [],
-            "soft_points": {"a": 32}, "concerns": [], "confidence": "high",
+    GOOD = {"score": _bs() + 12, "verdict": "Worth Touring", "hard_results": [],
+            "soft_points": {"a": 12}, "concerns": [], "confidence": "high",
             "reasoning": "r", "property_summary": "p"}
 
     def test_a_reconciled_retry_is_adopted(self):
         result, calls = self._run([self.BAD, self.GOOD])
         assert calls == 2
-        assert result.score == 62 and result.confidence == "high"
+        assert result.score == self.GOOD["score"] and result.confidence == "high"
 
     def test_a_still_breaching_retry_falls_back_to_the_original(self):
         result, calls = self._run([self.BAD, self.BAD])
         assert calls == 2
-        assert result.score == 72 and result.confidence == "medium"
+        assert result.score == self.BAD["score"] and result.confidence == "medium"
 
     def test_a_consistent_response_is_not_re_asked(self):
         result, calls = self._run([self.GOOD])
         assert calls == 1
-        assert result.score == 62
+        assert result.score == self.GOOD["score"]
 
     def test_batch_results_get_the_fallback(self):
         """No re-ask is possible in a batch — breach goes straight to
@@ -1939,7 +1979,7 @@ class TestArithmeticRetryPath:
         item.result.message.content = [MagicMock()]
         item.result.message.content[0].text = _json.dumps(self.BAD)
         result, _ = parse_batch_result(item, {"address": "T"})
-        assert result.score == 72 and result.confidence == "medium"
+        assert result.score == self.BAD["score"] and result.confidence == "medium"
         assert any("mismatch" in c.lower() for c in result.concerns)
 
 
@@ -1958,9 +1998,12 @@ class TestProposedV76CriteriaFile:
         return path.read_text()
 
     def test_every_hard_gate_still_parses_in_sync(self):
+        """v76 is superseded: its base (30) drifts against the v77 config (50)
+        by design, and that drift is exactly what /health should show if the
+        old text were ever re-applied. The six hard gates must stay in sync."""
         from app.scorer import hard_gate_drift
         drift = hard_gate_drift(self._text())
-        assert drift["in_sync"] is True, drift["drifted"]
+        assert drift["drifted"] == ["base_score"]
 
     def test_the_arithmetic_contract_is_stated(self):
         text = self._text()
@@ -2049,3 +2092,68 @@ class TestSoldGate:
         from app import scorer
         gate_src = inspect.getsource(scorer.deterministic_gate)
         assert "_SOLD_STATUSES" in gate_src
+
+
+class TestProposedV77CriteriaFile:
+    """docs/criteria-v77-proposed.txt: the weights recalibration. v76 proved the
+    old weights unpayable — the model's ledger sums centered at 16 while its
+    scores centered at 60 (median mismatch +35, only 9 of 122 within tolerance),
+    because a base of 30 plus a -38 commute curve on a corpus that already
+    passed the 110-minute gate demanded arithmetic no faithful ledger could pay.
+
+    v77: base 50, every weight rescaled to a budget where realistic positives
+    reach ~+40, dealbreakers are -25/-30, and a faithful sum lands in the bands.
+    """
+
+    @staticmethod
+    def _text():
+        from pathlib import Path
+        path = Path(__file__).resolve().parent.parent / "docs" / "criteria-v77-proposed.txt"
+        return path.read_text()
+
+    def test_every_gate_and_the_base_parse_in_sync(self):
+        """Six hard gates plus base_score — v77 must deploy with zero drift."""
+        from app.scorer import hard_gate_drift
+        drift = hard_gate_drift(self._text())
+        assert drift["in_sync"] is True, drift["drifted"]
+
+    def test_the_base_is_50(self):
+        assert "Base score: 50" in self._text()
+
+    def test_the_commute_curve_tops_out_at_minus_12(self):
+        """-38 was the single largest unpayable charge (average -19.5/listing on
+        a corpus that had already passed the hard gate)."""
+        text = self._text()
+        assert "-12 105-109 min" in text
+        assert "-38" not in text
+        assert "REJECT at 110 min or more" in text  # the gate itself unchanged
+
+    def test_schools_stay_dominant_in_both_directions(self):
+        """Largest single positive (+18) and largest single penalty (-30)."""
+        text = self._text()
+        assert "+18 strong school district" in text
+        assert "-30 weak school district" in text
+        assert "ONCE, judged on the best-ranked elementary" in text
+
+    def test_the_dealbreakers_survive_rescaling(self):
+        """Weak district and no ground-floor bedroom must still be able to sink
+        a listing out of Worth Touring from base 50."""
+        text = self._text()
+        assert "-30 weak school district" in text
+        assert "-25 confirmed absent" in text
+
+    def test_no_orphaned_old_weights(self):
+        """The heavy v76 numbers must not survive anywhere in the text."""
+        text = self._text()
+        for stale in ("-45 to -50", "-15 to -20", "+25 strong school district",
+                      "-35 weak school district", "-20 90-95 min", "-28 95-100 min"):
+            assert stale not in text, stale
+
+    def test_walking_to_the_station_stays_irrelevant(self):
+        assert "WALKING distance to the station is irrelevant" in self._text()
+
+    def test_unknown_handling_is_unchanged(self):
+        """The evidence rules were v75's fix and are not part of this retune."""
+        text = self._text()
+        assert "Missing data unknown (no floor plans or insufficient images): 0 pts" in text
+        assert "absence of evidence is not evidence against the house" in text

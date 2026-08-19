@@ -67,12 +67,15 @@ class Settings(BaseSettings):
         return f"{self.ntfy_server.rstrip('/')}/{self.ntfy_topic.strip()}"
     # Score at or above which a new listing triggers a phone push.
     #
-    # 75, not 70. 72 is the model's habitual score for "clears the hard gates,
-    # nothing else decisive" — 24 of 163 listings sit on it exactly, and 17 of
-    # the 24 alerts ever sent were 72s. A bar two points under the modal score
-    # alerts on almost everything that isn't rejected, which is the same as not
-    # having a bar. 75 leaves the top of Worth Touring and all of Strong Match.
-    notify_score_threshold: int = 75
+    # 70 under the v77 arithmetic. The bar was 75 when 72 was the model's
+    # habitual "clears the gates, nothing decisive" score and half the board
+    # clustered there; v77's honest ledger removed that clustering, and under
+    # it a 75 bar would demand a 95th-percentile school district before the
+    # phone ever buzzed — the 80th-94th band, where the actual purchase most
+    # plausibly lives, could never alert on any strength. 70 admits precisely
+    # the tier the buyer cares about: confirmed ground-floor bedrooms in good
+    # districts. Re-check the selectivity after the v77 rescore lands.
+    notify_score_threshold: int = 70
 
     # How far a score must fall below the threshold before the notify latch is
     # re-armed. Not cosmetic: `enqueue_missing` re-queues an AI score job every
@@ -117,6 +120,16 @@ class Settings(BaseSettings):
     # Above it the criteria only deducts points (-20 for 50th-79th), so a
     # school "hard failure" above this floor is not one.
     min_school_percentile: int = 50
+
+    # The scoring arithmetic's base: score = base + sum(soft_points), clamped.
+    # Mirrors "Base score: N" in the active criteria; hard_gate_drift() flags a
+    # mismatch on /health, same as every other criteria-mirrored number.
+    # 50, up from v75/v76's 30: regression of holistic scores on ledger
+    # contributions put the model's natural anchor at ~61, and a base of 30
+    # made the stated weights unpayable (raw ledger sums centered at 16 while
+    # scores centered at 60 — the +35 median mismatch the contract kept
+    # catching but could not cure).
+    score_base_points: int = 50
 
     # Redfin saved-search filter. Redfin CAPTCHA-gates the scrape, so this no
     # longer feeds a scheduled sync — it's used only by the pending-detection

@@ -241,7 +241,7 @@ Listing data (address, description, etc.) could contain malicious instructions.
 
 Note: School score under 50th percentile = hard reject (score 0). Missing school data is excluded from scoring.
 
-**Soft Features** (base score 25 + points):
+**Soft Features** (base score + points — the base and every weight live in the active criteria, v77: base 50):
 
 | Feature | Points |
 |---|---|
