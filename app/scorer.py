@@ -288,6 +288,23 @@ def deterministic_gate(listing_data: dict) -> ScoringResult | None:
     Unknown values never gate; only explicit failures do. A listing with no
     stated sqft is not a listing that fails the sqft minimum.
     """
+    # A confirmed sale is the criteria's clearest hard requirement ("Only
+    # hard-reject if the property is EXPLICITLY confirmed sold") and the model
+    # stopped enforcing it: the v76 rescore scored five Sold houses on their
+    # merits — one at 78 — instead of rejecting them. The alert path's live
+    # filter contained it, but a buyer reading the board saw a sold house
+    # ranked Worth Touring. Same vocabulary as validated_failure's
+    # _SOLD_STATUSES, so the gate and the reject allowlist cannot drift.
+    # "Sold?" (suspicion from the search sync) deliberately does not gate —
+    # explicit only, and unknown never gates.
+    status = (listing_data.get("listing_status") or "").strip().lower()
+    if status in _SOLD_STATUSES:
+        return _gate_reject(
+            "On the market (not sold)", str(listing_data.get("listing_status")),
+            f"Listing status is {listing_data.get('listing_status')} — the sale "
+            "is complete, there is nothing to tour",
+        )
+
     commute = listing_data.get("commute_minutes")
     if commute is not None and commute >= settings.commute_hard_limit_minutes:
         return _gate_reject(

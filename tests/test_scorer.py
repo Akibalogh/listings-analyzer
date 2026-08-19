@@ -1996,3 +1996,56 @@ class TestProposedV76CriteriaFile:
         text = self._text()
         assert "Below 40 Weak Match" in text
         assert "Below 40 Pass" not in text
+
+
+class TestSoldGate:
+    """The criteria's clearest hard requirement — "Only hard-reject if the
+    property is EXPLICITLY confirmed sold" — was left to the model, and the
+    model stopped doing it: the v76 rescore scored five Sold houses on their
+    merits, one at 78. The alert path's live filter contained it, but the board
+    showed a sold house ranked Worth Touring. The gate now owns it, using the
+    same _SOLD_STATUSES vocabulary as validated_failure so the gate and the
+    reject allowlist cannot drift.
+    """
+
+    def test_sold_gates(self):
+        from app.scorer import deterministic_gate
+        result = deterministic_gate({"listing_status": "Sold"})
+        assert result is not None and result.verdict == "Reject"
+        assert result.evaluation_method == "deterministic-gate"
+
+    def test_closed_gates(self):
+        from app.scorer import deterministic_gate
+        assert deterministic_gate({"listing_status": "Closed"}) is not None
+
+    def test_case_and_whitespace_do_not_matter(self):
+        from app.scorer import deterministic_gate
+        assert deterministic_gate({"listing_status": "  SOLD  "}) is not None
+
+    def test_suspicion_does_not_gate(self):
+        """"Sold?" is the search sync's suspicion flag — explicit only."""
+        from app.scorer import deterministic_gate
+        assert deterministic_gate({"listing_status": "Sold?"}) is None
+        assert deterministic_gate({"listing_status": "Off Market?"}) is None
+
+    def test_pending_and_under_contract_do_not_gate(self):
+        """The criteria pass "on the market, pending, or pre-listing" — those
+        are excluded from alerts, not rejected."""
+        from app.scorer import deterministic_gate
+        assert deterministic_gate({"listing_status": "Pending"}) is None
+        assert deterministic_gate({"listing_status": "Under Contract"}) is None
+
+    def test_unknown_never_gates(self):
+        from app.scorer import deterministic_gate
+        assert deterministic_gate({"listing_status": None}) is None
+        assert deterministic_gate({"listing_status": ""}) is None
+        assert deterministic_gate({}) is None
+
+    def test_the_gate_and_the_reject_allowlist_share_a_vocabulary(self):
+        """validated_failure lets a model sold-Reject stand on the same set the
+        gate enforces — if these diverge, a status one path calls sold the
+        other calls live."""
+        import inspect
+        from app import scorer
+        gate_src = inspect.getsource(scorer.deterministic_gate)
+        assert "_SOLD_STATUSES" in gate_src

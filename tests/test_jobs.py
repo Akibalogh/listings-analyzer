@@ -944,3 +944,59 @@ class TestConcurrentClaimCannotDoubleSend:
         rows = db.claim_unnotified_high_scores(70)
         assert [r["id"] for r in rows] == [lid]
         assert db.claim_unnotified_high_scores(70) == []
+
+
+class TestGateVerdictContradictionForcesRescore:
+    """A widened gate must reach listings scored before it existed. The five
+    Sold houses the v76 rescore ranked on their merits (one at 78) had matching
+    fingerprints — same status when scored — so neither the version check nor
+    the fingerprint would ever have corrected them. The gap scan now queues a
+    rescore whenever the code gate contradicts the stored verdict; the rescore
+    exits at the gate without an AI call.
+    """
+
+    def _scored(self, status, verdict="Worth Touring", score=78):
+        email_id = db.save_processed_email(
+            gmail_id=f"gv-{status}-{len(db.get_all_listing_ids())}",
+            message_id="", sender="test", subject="t", parser_used="test", listings_found=1,
+        )
+        listing = ParsedListing(source_format="onehome_html", address=f"1 {status} St",
+                                town="Katonah", state="NY", listing_status=status)
+        lid = db.save_listing(listing, ScoringResult(score=score, verdict=verdict), email_id)
+        # Freeze the fingerprint at current data and mark AI-scored on the
+        # active criteria version, so ONLY the gate check can trigger a rescore
+        version = db.get_active_criteria()
+        if not version:
+            db.save_criteria("c", created_by="t")
+            version = db.get_active_criteria()
+        db.update_score(
+            listing_id=lid,
+            score=ScoringResult(score=score, verdict=verdict, evaluation_method="ai"),
+            method="ai", criteria_version=version["version"], reasoning="r",
+            input_fingerprint=score_input_fingerprint(db.get_listing_by_id(lid)),
+        )
+        return lid
+
+    def test_a_sold_house_with_a_live_verdict_is_rescored(self, temp_db):
+        self._scored("Sold")
+        assert jobs.enqueue_missing()["score"] == 1
+
+    def test_a_sold_house_already_rejected_is_left_alone(self, temp_db):
+        self._scored("Sold", verdict="Reject", score=0)
+        assert jobs.enqueue_missing()["score"] == 0
+
+    def test_a_live_house_is_not_touched(self, temp_db):
+        self._scored("Active")
+        assert jobs.enqueue_missing()["score"] == 0
+
+    def test_the_queued_rescore_costs_no_ai_call(self):
+        """ai_score_listing hits the gate before the model."""
+        from unittest.mock import MagicMock, patch
+        from app.scorer import ai_score_listing
+        with patch("app.scorer.settings") as ms:
+            ms.anthropic_api_key = "sk-test"
+            client = MagicMock()
+            with patch("app.scorer.anthropic.Anthropic", return_value=client):
+                result, _ = ai_score_listing({"listing_status": "Sold"}, "criteria")
+        assert result.verdict == "Reject"
+        assert client.messages.create.call_count == 0

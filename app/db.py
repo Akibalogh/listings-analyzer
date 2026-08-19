@@ -1488,7 +1488,7 @@ def get_all_score_metadata() -> dict[int, dict]:
     with get_connection() as conn:
         cur = conn.cursor()
         cur.execute("SELECT listing_id, criteria_version, scored_at, evaluation_method, "
-                    "input_fingerprint FROM scores")
+                    "input_fingerprint, verdict FROM scores")
         rows = cur.fetchall()
         result = {}
         if settings.is_postgres:
@@ -1498,6 +1498,7 @@ def get_all_score_metadata() -> dict[int, dict]:
                     "scored_at": row[2],
                     "evaluation_method": row[3],
                     "input_fingerprint": row[4],
+                    "verdict": row[5],
                 }
         else:
             for row in rows:
@@ -1506,6 +1507,7 @@ def get_all_score_metadata() -> dict[int, dict]:
                     "scored_at": row["scored_at"],
                     "evaluation_method": row["evaluation_method"],
                     "input_fingerprint": row["input_fingerprint"],
+                    "verdict": row["verdict"],
                 }
         return result
 

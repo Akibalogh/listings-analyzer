@@ -39,7 +39,20 @@ import time
 from app import db
 from app.config import settings
 from app.listing_status import is_unknown
-from app.scorer import score_input_fingerprint
+from app.scorer import deterministic_gate, score_input_fingerprint
+
+
+def _gate_view(listing: dict) -> dict:
+    """The raw fields the deterministic gate reads, straight off the DB row.
+
+    Not _build_listing_data — that runs regex passes over the description and
+    is built per scoring call, not per scheduler tick over every listing.
+    """
+    return {
+        k: listing.get(k)
+        for k in ("commute_minutes", "state", "price", "sqft", "bedrooms",
+                  "listing_status", "property_type")
+    }
 
 logger = logging.getLogger(__name__)
 
@@ -177,11 +190,21 @@ def enqueue_missing(force: bool = False) -> dict:
         # that lands changes the fingerprint and earns its rescore; a gap that
         # cannot be filled changes nothing and gets nothing.
         meta = score_meta.get(lid)
+        # A stored verdict that contradicts the code gate also forces a rescore,
+        # fingerprint match or not. This is how a WIDENED gate reaches listings
+        # scored before it existed: the five Sold houses the v76 rescore ranked
+        # on their merits (one at 78) had matching fingerprints, so nothing else
+        # would ever have corrected them. Cheap — the gate reads raw fields, no
+        # regex — and the rescore it queues exits at the gate without an AI call.
+        gate_disagrees = False
+        if meta and meta.get("verdict") != "Reject":
+            gate_disagrees = deterministic_gate(_gate_view(listing)) is not None
         needs_score = not rescore_running and (
             not meta
             or meta.get("evaluation_method") not in ("ai", "deterministic-gate")
             or (criteria and meta.get("criteria_version") != criteria["version"])
             or meta.get("input_fingerprint") != score_input_fingerprint(listing)
+            or gate_disagrees
         )
         if needs_score:
             tasks.append("score")
