@@ -401,14 +401,15 @@ class TestSystemPromptUnknownPenalty:
         prompt = blocks[0]["text"]
         assert "HANDLING UNKNOWNS" in prompt
 
-    def test_two_tier_penalty_described(self):
-        """Both penalty tiers (high and low) should be quantified."""
+    def test_verifiable_unknowns_defer_to_the_instructions(self):
+        """The prompt used to quantify the deduction itself (10-15, 15-20 for
+        basement) — its own point table, contradicting the criteria's. The
+        instructions are the authority on sizes; the prompt keeps only the
+        two-tier distinction."""
         blocks = _build_system_prompt()
         prompt = blocks[0]["text"]
-        # High penalty tier
-        assert "10-15" in prompt or "10–15" in prompt
-        # Low penalty tier
-        assert "3-5" in prompt or "3–5" in prompt
+        assert "Deduct what the EVALUATION INSTRUCTIONS specify" in prompt
+        assert "DEDUCT NOTHING" in prompt  # the missing-data tier
 
 
 class TestImageHintBlocks:
@@ -512,23 +513,27 @@ class TestGFBInference:
     """Tests for the GFB (ground-floor bedroom) nice-to-have section in the system prompt."""
 
     def test_gfb_section_present_in_prompt(self):
-        """System prompt must contain the GFB nice-to-have section."""
+        """The prompt called the ground-floor bedroom a "nice-to-have" while the
+        criteria scored a confirmed absence as a near-dealbreaker — two tables,
+        and the model paid neither (regression beta -0.06, i.e. nothing). The
+        section now states the real priority and defers the numbers."""
         blocks = _build_system_prompt()
         prompt = blocks[0]["text"]
-        assert "GROUND-FLOOR BEDROOM — NICE-TO-HAVE" in prompt
+        assert "GROUND-FLOOR BEDROOM — TOP-PRIORITY LAYOUT FACTOR" in prompt
 
     def test_gfb_is_not_a_hard_criterion(self):
-        """GFB absence must not reject: it's a convenience with a stair-lift alternative."""
+        """Scored, never a Reject — however heavy the confirmed-absence penalty."""
         blocks = _build_system_prompt()
         prompt = blocks[0]["text"]
-        assert "NOT A HARD CRITERION" in prompt
-        assert "stair lift" in prompt.lower()
+        assert "SOFT, NOT A HARD CRITERION" in prompt
+        assert "scored, never a Reject" in prompt
 
-    def test_gfb_bonus_range_stated(self):
-        """Prompt must bound the GFB bonus so it can't dominate the score."""
+    def test_gfb_defers_the_points_to_the_instructions(self):
+        """No point values in the prompt — the criteria table is the authority."""
         blocks = _build_system_prompt()
         prompt = blocks[0]["text"]
-        assert "5-10 bonus points" in prompt
+        assert "Ground-Floor Bedroom table in the EVALUATION INSTRUCTIONS" in prompt
+        assert "5-10 bonus points" not in prompt
 
     def test_gfb_ranch_inference_rule(self):
         """Ranch-style homes should be noted as a GFB signal."""
@@ -544,10 +549,10 @@ class TestGFBInference:
         assert "in-law" in prompt.lower()
 
     def test_gfb_absence_never_triggers_reject(self):
-        """The prompt must say absence should not trigger a reject or major penalty."""
+        """Absence is a scored penalty from the instructions' table, not a Reject."""
         blocks = _build_system_prompt()
         prompt = blocks[0]["text"]
-        assert "should NOT trigger a reject" in prompt
+        assert "scored, never a Reject" in prompt
 
     def test_enrichment_data_instructions_present(self):
         """Prompt should tell AI how to use age_condition and price_per_sqft_signal."""
@@ -1612,9 +1617,15 @@ class TestEvidenceDecidesTheUnknownBand:
         assert "evidence of absence is merit" in prompt
 
     def test_prompt_keeps_the_harsh_band_for_seen_but_unconfirmed(self):
+        """Verifiable unknowns still deduct — but through ledger entries at the
+        instructions' scale. The old text told the model that 3+ of them
+        "belongs in the 30-50 range": a holistic score-placement instruction
+        that bypassed the arithmetic contract entirely."""
         prompt = _build_system_prompt()[0]["text"]
         assert "images > 0" in prompt
-        assert "30-50" in prompt
+        assert "MAY" in prompt and "deduct" in prompt
+        assert "30-50" not in prompt
+        assert "never by re-placing the final score" in prompt
 
     def test_listing_data_reports_the_evidence(self):
         from app.main import _build_listing_data
@@ -1713,10 +1724,22 @@ class TestPenaltyFlagsAreDemoted:
         """This section prescribed passed: false for what it called a penalty —
         where the habit was learned."""
         prompt = _build_system_prompt()[0]["text"]
-        i = prompt.index("BASEMENT — STRONG REQUIREMENT")
+        i = prompt.index("BASEMENT — PREFERENCE")
         section = prompt[i:i + 1800]
         assert "Confirmed small basement: passed: true" in section
         assert "passed: false, reason: \"Basement present but small/cramped\"" not in section
+
+    def test_the_basement_section_carries_no_point_values(self):
+        """It used to say "STRONG REQUIREMENT, -25 to -40" with literal example
+        ledger entries of -15 and -30, against a criteria table pricing the
+        whole factor within about ±4. With the ledger enforced, a stray example
+        number becomes a real ledger entry — so no numbers appear at all."""
+        prompt = _build_system_prompt()[0]["text"]
+        i = prompt.index("BASEMENT — PREFERENCE")
+        section = prompt[i:i + 1800]
+        for stale in ("-25", "-40", "-15", "-30", "STRONG PENALTY"):
+            assert stale not in section, stale
+        assert "EVALUATION INSTRUCTIONS" in section  # the deferral is stated
 
 
 class TestUncertaintyPenaltyTelemetry:
@@ -1788,7 +1811,7 @@ class TestUnrankedSchoolsAreMissingData:
 
 
 class TestScoreArithmeticContract:
-    """The criteria say score = base 30 + adjustments, clamped 0-100. For a long
+    """The criteria say score = base + adjustments, clamped 0-100. For a long
     time nothing held the model to it: the output contract asked for "score" and
     "soft_points" as independent fields, and across 112 live listings not ONE
     matched its own breakdown (median gap +41, reported higher in 99). "72 /

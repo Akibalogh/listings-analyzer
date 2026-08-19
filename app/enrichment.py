@@ -610,31 +610,37 @@ _CONDITION_KEYWORDS: list[tuple[str, int]] = [
 def score_age_condition(year_built: int | None, description: str | None) -> dict:
     """Compute an age/condition score adjustment from year_built and listing description.
 
+    The point values mirror the age table in the active criteria (v77) — the
+    prompt tells the model these are signals to score under that table, so a
+    scale mismatch here becomes a three-way contradiction between enrichment,
+    criteria, and prompt. The v75-era values (-22 pre-1940, clamp -25..+15)
+    survived two criteria retunes exactly that way.
+
     Returns:
         dict with keys:
-          - age_adjustment (int): point delta from age tier (-22 to 0)
-          - condition_adjustment (int): point delta from keyword scan (clamped -25 to +15)
+          - age_adjustment (int): point delta from age tier (-6 to 0)
+          - condition_adjustment (int): point delta from keyword scan (clamped -12 to +6)
           - age_tier (str): human-readable tier label
           - keywords_matched (list[str]): matched condition keywords
     """
-    # --- Age tier ---
+    # --- Age tier (v77 scale) ---
     if year_built is None:
         age_adj = 0
         tier = "unknown"
     elif year_built < 1940:
-        age_adj = -22
+        age_adj = -6
         tier = "pre-1940"
     elif year_built < 1960:
-        age_adj = -18
+        age_adj = -5
         tier = "1940-1959"
     elif year_built < 1975:
-        age_adj = -12
+        age_adj = -3
         tier = "1960-1974"
     elif year_built < 1990:
-        age_adj = -6
+        age_adj = -2
         tier = "1975-1989"
     elif year_built < 2005:
-        age_adj = -2
+        age_adj = -1
         tier = "1990-2004"
     else:
         age_adj = 0
@@ -650,8 +656,9 @@ def score_age_condition(year_built: int | None, description: str | None) -> dict
                 condition_adj += delta
                 matched.append(keyword)
 
-    # Clamp condition adjustment
-    condition_adj = max(-25, min(+15, condition_adj))
+    # Clamp to the v77 renovation-offset budget (gut reno +5..+6; major
+    # structural work -10..-12): stacked keywords must not outweigh the table.
+    condition_adj = max(-12, min(+6, condition_adj))
 
     return {
         "age_adjustment": age_adj,

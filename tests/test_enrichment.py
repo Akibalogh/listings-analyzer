@@ -446,20 +446,20 @@ class TestScoreAgeCondition:
     def test_pre1940_age_penalty(self):
         from app.enrichment import score_age_condition
         result = score_age_condition(1935, None)
-        assert result["age_adjustment"] == -22
+        assert result["age_adjustment"] == -6  # v77 scale — was -22 under v75
         assert result["age_tier"] == "pre-1940"
         assert result["condition_adjustment"] == 0
 
     def test_1940s_age_penalty(self):
         from app.enrichment import score_age_condition
         result = score_age_condition(1955, None)
-        assert result["age_adjustment"] == -18
+        assert result["age_adjustment"] == -5
         assert result["age_tier"] == "1940-1959"
 
     def test_1975_1989_age_penalty(self):
         from app.enrichment import score_age_condition
         result = score_age_condition(1982, None)
-        assert result["age_adjustment"] == -6
+        assert result["age_adjustment"] == -2
         assert result["age_tier"] == "1975-1989"
 
     def test_2005_plus_no_penalty(self):
@@ -491,13 +491,13 @@ class TestScoreAgeCondition:
         from app.enrichment import score_age_condition
         desc = " ".join(["new construction newly built gut renovated new roof new hvac new windows turnkey"] * 5)
         result = score_age_condition(2020, desc)
-        assert result["condition_adjustment"] <= 15
+        assert result["condition_adjustment"] <= 6  # v77 gut-reno budget
 
     def test_condition_clamped_negative(self):
         from app.enrichment import score_age_condition
         desc = " ".join(["sold as is fixer-upper needs tlc cesspool knob and tube major repairs"] * 5)
         result = score_age_condition(1940, desc)
-        assert result["condition_adjustment"] >= -25
+        assert result["condition_adjustment"] >= -12  # v77 structural budget
 
     def test_case_insensitive(self):
         from app.enrichment import score_age_condition
