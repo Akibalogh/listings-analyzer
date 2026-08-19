@@ -74,10 +74,14 @@ def score_input_fingerprint(listing_row: dict) -> str:
 
 ALLOWED_VERDICTS = {"Strong Match", "Worth Touring", "Low Priority", "Weak Match", "Reject"}
 
-# The criteria's stated arithmetic: "Base score: 30", itemised adjustments,
-# "Clamp final score between 0 and 100". The score is supposed to be a
-# calculation, not a vibe.
-BASE_SCORE = 30
+def base_score() -> int:
+    """The criteria's stated arithmetic base ("Base score: N" + adjustments,
+    clamped 0-100). Read from settings so a criteria retune changes one config
+    value, and hard_gate_drift() flags prose/config disagreement — a hardcoded
+    30 here survived one retune already and validated new scores against the
+    wrong arithmetic.
+    """
+    return settings.score_base_points
 
 # How far the reported score may drift from its own breakdown before the
 # response is treated as self-contradictory. Absorbs holistic rounding without
@@ -88,7 +92,7 @@ ARITHMETIC_TOLERANCE = 5
 
 def implied_score(soft_points: dict) -> int:
     """The score the published breakdown actually adds up to."""
-    total = BASE_SCORE + sum(
+    total = base_score() + sum(
         v for v in (soft_points or {}).values() if isinstance(v, (int, float))
     )
     return max(0, min(100, int(total)))
@@ -132,7 +136,7 @@ def reconcile_score_arithmetic(result: ScoringResult, address: str = "") -> Scor
     note = (
         f"Score/breakdown mismatch: reported {result.score} but the published "
         f"adjustments sum to {implied_score(result.soft_points)} "
-        f"(base {BASE_SCORE} + soft points). The score stands; treat the "
+        f"(base {base_score()} + soft points). The score stands; treat the "
         "itemisation as unreliable."
     )
     update = {"concerns": [*result.concerns, note]}
@@ -147,7 +151,7 @@ def _arithmetic_retry_note(result: ScoringResult) -> str:
 CORRECTION — YOUR PREVIOUS ANSWER WAS REJECTED AND YOU ARE BEING ASKED AGAIN.
 
 You reported score {result.score}, but your own soft_points sum to
-{implied_score(result.soft_points)} (base {BASE_SCORE} + your adjustments).
+{implied_score(result.soft_points)} (base {base_score()} + your adjustments).
 Those must agree: the score IS the arithmetic, not a separate judgement.
 
 Re-evaluate and return a response where:
@@ -155,7 +159,7 @@ Re-evaluate and return a response where:
   there, including age_adjustment and condition_adjustment, each exactly once.
 - There is EXACTLY ONE school-district entry, judged on the best-ranked
   elementary school — never one per school level.
-- score == {BASE_SCORE} + sum(soft_points values), clamped to 0-100.
+- score == {base_score()} + sum(soft_points values), clamped to 0-100.
 
 Do not fudge the ledger to match a number you have already decided on.
 Recompute honestly: if your adjustments were wrong, fix the adjustments; if
@@ -209,6 +213,8 @@ _CRITERIA_MIN_BEDS_RE = re.compile(r"minimum\s+(\d{1,2})\s+bedrooms?", re.IGNORE
 _CRITERIA_SCHOOL_FLOOR_RE = re.compile(
     r"below\s+(\d{1,2})(?:st|nd|rd|th)\s+percentile", re.IGNORECASE)
 
+_CRITERIA_BASE_SCORE_RE = re.compile(r"base\s+score:?\s*(\d{1,3})", re.IGNORECASE)
+
 
 def _first_int(pattern: re.Pattern, text: str, group: int = 1) -> int | None:
     m = pattern.search(text or "")
@@ -238,6 +244,12 @@ def hard_gate_drift(instructions: str) -> dict:
         "min_bedrooms": (_first_int(_CRITERIA_MIN_BEDS_RE, text), settings.min_bedrooms),
         "min_school_percentile": (
             _first_int(_CRITERIA_SCHOOL_FLOOR_RE, text), settings.min_school_percentile),
+        # Not a gate, but drift here corrupts every arithmetic check: the
+        # validator judges score-vs-ledger deltas against settings, and a
+        # criteria text stating a different base makes the model and the
+        # validator disagree about what a correct answer even is.
+        "base_score": (
+            _first_int(_CRITERIA_BASE_SCORE_RE, text), settings.score_base_points),
     }
     out, drifted = {}, []
     for name, (criteria_value, config_value) in checks.items():
@@ -636,7 +648,9 @@ def _build_system_prompt() -> list[dict]:
     """
     return [{
         "type": "text",
-        "text": """You are a real estate listing evaluator. You will be given:
+        # {base} is substituted from settings so the prompt's arithmetic can
+        # never disagree with the number validation checks against.
+        "text": ("""You are a real estate listing evaluator. You will be given:
 1. EVALUATION INSTRUCTIONS written by the buyer
 2. LISTING DATA wrapped in <listing_data> tags
 3. Optionally, LISTING IMAGES to examine visually
@@ -686,7 +700,7 @@ verdict must therefore be "Reject". It is not a way to express a penalty.
 
 OUTPUT FORMAT — return ONLY a JSON object with exactly these keys:
 {
-  "score": <integer 0-100 — MUST equal 30 + the sum of soft_points values, clamped to 0-100>,
+  "score": <integer 0-100 — MUST equal {base} + the sum of soft_points values, clamped to 0-100>,
   "verdict": "<one of: Strong Match, Worth Touring, Low Priority, Weak Match, Reject>",
   "hard_results": [
     {"criterion": "<name>", "passed": <true|false|null>, "value": "<display value>", "reason": "<why>"}
@@ -800,13 +814,14 @@ These should carry the most weight in your scoring.
   likely tax burden.
 
 SCORE ARITHMETIC — the score is a calculation, not a separate judgement:
-  score = 30 (base) + sum of every soft_points value, clamped to 0-100.
+  score = {base} (base) + sum of every soft_points value, clamped to 0-100.
 soft_points is the complete ledger. If you applied it, it appears there —
 age_adjustment and condition_adjustment included, each exactly once, and
 exactly one school-district entry. A score that disagrees with its own ledger
 will be rejected and re-asked.
 
-Do NOT include any text outside the JSON object. Do NOT use markdown code fences.""",
+Do NOT include any text outside the JSON object. Do NOT use markdown code fences."""
+                 ).replace("{base}", str(base_score())),
         "cache_control": {"type": "ephemeral"},
     }]
 

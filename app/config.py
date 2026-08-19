@@ -118,6 +118,16 @@ class Settings(BaseSettings):
     # school "hard failure" above this floor is not one.
     min_school_percentile: int = 50
 
+    # The scoring arithmetic's base: score = base + sum(soft_points), clamped.
+    # Mirrors "Base score: N" in the active criteria; hard_gate_drift() flags a
+    # mismatch on /health, same as every other criteria-mirrored number.
+    # 50, up from v75/v76's 30: regression of holistic scores on ledger
+    # contributions put the model's natural anchor at ~61, and a base of 30
+    # made the stated weights unpayable (raw ledger sums centered at 16 while
+    # scores centered at 60 — the +35 median mismatch the contract kept
+    # catching but could not cure).
+    score_base_points: int = 50
+
     # Redfin saved-search filter. Redfin CAPTCHA-gates the scrape, so this no
     # longer feeds a scheduled sync — it's used only by the pending-detection
     # presence check (best-effort) and the manual /manage/sync-search endpoint.

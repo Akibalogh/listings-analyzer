@@ -1806,15 +1806,24 @@ class TestScoreArithmeticContract:
                              confidence=confidence)
 
     def test_implied_score_is_base_plus_sum_clamped(self):
-        from app.scorer import implied_score
-        assert implied_score({"a": 20, "b": -5}) == 45
+        from app.scorer import base_score, implied_score
+        assert implied_score({"a": 20, "b": -5}) == base_score() + 15
         assert implied_score({"a": 90}) == 100   # clamp high
-        assert implied_score({"a": -90}) == 0    # clamp low
-        assert implied_score({}) == 30
+        assert implied_score({"a": -190}) == 0   # clamp low
+        assert implied_score({}) == base_score()
+
+    def test_the_base_is_the_configured_one(self):
+        """Hardcoding 30 here survived one retune (v77 moved the base to 50)
+        and validated new scores against the wrong arithmetic."""
+        from unittest.mock import patch
+        from app.scorer import implied_score
+        with patch("app.scorer.settings") as ms:
+            ms.score_base_points = 40
+            assert implied_score({"a": 10}) == 50
 
     def test_delta_is_reported_minus_implied(self):
-        from app.scorer import score_breakdown_delta
-        assert score_breakdown_delta(self._result(72, {"a": 19})) == 23
+        from app.scorer import base_score, score_breakdown_delta
+        assert score_breakdown_delta(self._result(72, {"a": 19})) == 72 - (base_score() + 19)
 
     def test_no_delta_for_a_reject(self):
         """Validation forces a Reject's score to 0 regardless of breakdown —
@@ -1827,10 +1836,10 @@ class TestScoreArithmeticContract:
         assert score_breakdown_delta(self._result(72, {})) is None
 
     def test_within_tolerance_passes_untouched(self):
-        from app.scorer import reconcile_score_arithmetic
-        r = self._result(49, {"a": 19})  # implied 49, delta 0
+        from app.scorer import base_score, reconcile_score_arithmetic
+        r = self._result(base_score() + 19, {"a": 19})  # delta 0
         assert reconcile_score_arithmetic(r) is r
-        r5 = self._result(54, {"a": 19})  # delta +5, on the line
+        r5 = self._result(base_score() + 24, {"a": 19})  # delta +5, on the line
         assert reconcile_score_arithmetic(r5) is r5
 
     def test_a_breach_keeps_the_score(self):
@@ -1842,32 +1851,34 @@ class TestScoreArithmeticContract:
 
     def test_a_breach_caps_confidence_at_medium(self):
         from app.scorer import reconcile_score_arithmetic
-        assert reconcile_score_arithmetic(self._result(72, {"a": 19})).confidence == "medium"
+        assert reconcile_score_arithmetic(self._result(99, {"a": 19})).confidence == "medium"
 
     def test_a_breach_never_raises_confidence(self):
         """low stays low — the cap is a ceiling, not a target."""
         from app.scorer import reconcile_score_arithmetic
-        out = reconcile_score_arithmetic(self._result(72, {"a": 19}, confidence="low"))
+        out = reconcile_score_arithmetic(self._result(99, {"a": 19}, confidence="low"))
         assert out.confidence == "low"
 
     def test_a_breach_is_stated_in_concerns(self):
-        from app.scorer import reconcile_score_arithmetic
-        out = reconcile_score_arithmetic(self._result(72, {"a": 19}))
+        from app.scorer import base_score, reconcile_score_arithmetic
+        out = reconcile_score_arithmetic(self._result(99, {"a": 19}))
         assert any("mismatch" in c.lower() for c in out.concerns)
-        assert any("49" in c for c in out.concerns)  # the sum it disagrees with
+        assert any(str(base_score() + 19) in c for c in out.concerns)
 
     def test_the_retry_note_shows_the_model_its_own_numbers(self):
-        from app.scorer import _arithmetic_retry_note
-        note = _arithmetic_retry_note(self._result(72, {"a": 19}))
-        assert "72" in note and "49" in note
+        from app.scorer import _arithmetic_retry_note, base_score
+        note = _arithmetic_retry_note(self._result(99, {"a": 19}))
+        assert "99" in note and str(base_score() + 19) in note
         assert "EXACTLY ONE school-district" in note
 
     def test_the_prompt_states_the_contract(self):
         """The old contract asked for score and soft_points as independent
         fields — that's the root cause, so its absence must fail loudly."""
-        from app.scorer import _build_system_prompt
+        from app.scorer import _build_system_prompt, base_score
         text = "".join(b["text"] for b in _build_system_prompt())
-        assert "30 + the sum of soft_points" in text or "30 (base) + sum" in text
+        assert f"{base_score()} + the sum of soft_points" in text
+        assert f"score = {base_score()} (base) + sum" in text
+        assert "{base}" not in text  # the placeholder must be substituted
         assert "EXACTLY ONE school-district adjustment" in text
 
     def test_the_prompt_no_longer_carries_its_own_school_points(self):
@@ -1894,9 +1905,13 @@ class TestArithmeticRetryPath:
             m.content = [MagicMock()]
             m.content[0].text = _json.dumps(r)
             msgs.append(m)
+        from app.config import settings as real_settings
         with patch("app.scorer.settings") as ms:
             ms.anthropic_api_key = "sk-test"
             ms.ai_eval_model = "m"
+            # base_score() reads settings at call time — a bare MagicMock here
+            # turns the arithmetic check into nonsense
+            ms.score_base_points = real_settings.score_base_points
             with patch("app.scorer._build_user_message", return_value=[]), \
                  patch("app.scorer._build_system_prompt", return_value=[]):
                 client = MagicMock()
@@ -1905,27 +1920,29 @@ class TestArithmeticRetryPath:
                     result, _ = ai_score_listing({"address": "T"}, "C")
         return result, client.messages.create.call_count
 
-    BAD = {"score": 72, "verdict": "Worth Touring", "hard_results": [],
+    from app.scorer import base_score as _bs
+
+    BAD = {"score": _bs() + 42, "verdict": "Worth Touring", "hard_results": [],
            "soft_points": {"a": 10}, "concerns": [], "confidence": "high",
            "reasoning": "r", "property_summary": "p"}
-    GOOD = {"score": 62, "verdict": "Worth Touring", "hard_results": [],
-            "soft_points": {"a": 32}, "concerns": [], "confidence": "high",
+    GOOD = {"score": _bs() + 12, "verdict": "Worth Touring", "hard_results": [],
+            "soft_points": {"a": 12}, "concerns": [], "confidence": "high",
             "reasoning": "r", "property_summary": "p"}
 
     def test_a_reconciled_retry_is_adopted(self):
         result, calls = self._run([self.BAD, self.GOOD])
         assert calls == 2
-        assert result.score == 62 and result.confidence == "high"
+        assert result.score == self.GOOD["score"] and result.confidence == "high"
 
     def test_a_still_breaching_retry_falls_back_to_the_original(self):
         result, calls = self._run([self.BAD, self.BAD])
         assert calls == 2
-        assert result.score == 72 and result.confidence == "medium"
+        assert result.score == self.BAD["score"] and result.confidence == "medium"
 
     def test_a_consistent_response_is_not_re_asked(self):
         result, calls = self._run([self.GOOD])
         assert calls == 1
-        assert result.score == 62
+        assert result.score == self.GOOD["score"]
 
     def test_batch_results_get_the_fallback(self):
         """No re-ask is possible in a batch — breach goes straight to
@@ -1939,7 +1956,7 @@ class TestArithmeticRetryPath:
         item.result.message.content = [MagicMock()]
         item.result.message.content[0].text = _json.dumps(self.BAD)
         result, _ = parse_batch_result(item, {"address": "T"})
-        assert result.score == 72 and result.confidence == "medium"
+        assert result.score == self.BAD["score"] and result.confidence == "medium"
         assert any("mismatch" in c.lower() for c in result.concerns)
 
 
@@ -1958,9 +1975,12 @@ class TestProposedV76CriteriaFile:
         return path.read_text()
 
     def test_every_hard_gate_still_parses_in_sync(self):
+        """v76 is superseded: its base (30) drifts against the v77 config (50)
+        by design, and that drift is exactly what /health should show if the
+        old text were ever re-applied. The six hard gates must stay in sync."""
         from app.scorer import hard_gate_drift
         drift = hard_gate_drift(self._text())
-        assert drift["in_sync"] is True, drift["drifted"]
+        assert drift["drifted"] == ["base_score"]
 
     def test_the_arithmetic_contract_is_stated(self):
         text = self._text()
@@ -2049,3 +2069,68 @@ class TestSoldGate:
         from app import scorer
         gate_src = inspect.getsource(scorer.deterministic_gate)
         assert "_SOLD_STATUSES" in gate_src
+
+
+class TestProposedV77CriteriaFile:
+    """docs/criteria-v77-proposed.txt: the weights recalibration. v76 proved the
+    old weights unpayable — the model's ledger sums centered at 16 while its
+    scores centered at 60 (median mismatch +35, only 9 of 122 within tolerance),
+    because a base of 30 plus a -38 commute curve on a corpus that already
+    passed the 110-minute gate demanded arithmetic no faithful ledger could pay.
+
+    v77: base 50, every weight rescaled to a budget where realistic positives
+    reach ~+40, dealbreakers are -25/-30, and a faithful sum lands in the bands.
+    """
+
+    @staticmethod
+    def _text():
+        from pathlib import Path
+        path = Path(__file__).resolve().parent.parent / "docs" / "criteria-v77-proposed.txt"
+        return path.read_text()
+
+    def test_every_gate_and_the_base_parse_in_sync(self):
+        """Six hard gates plus base_score — v77 must deploy with zero drift."""
+        from app.scorer import hard_gate_drift
+        drift = hard_gate_drift(self._text())
+        assert drift["in_sync"] is True, drift["drifted"]
+
+    def test_the_base_is_50(self):
+        assert "Base score: 50" in self._text()
+
+    def test_the_commute_curve_tops_out_at_minus_12(self):
+        """-38 was the single largest unpayable charge (average -19.5/listing on
+        a corpus that had already passed the hard gate)."""
+        text = self._text()
+        assert "-12 105-109 min" in text
+        assert "-38" not in text
+        assert "REJECT at 110 min or more" in text  # the gate itself unchanged
+
+    def test_schools_stay_dominant_in_both_directions(self):
+        """Largest single positive (+18) and largest single penalty (-30)."""
+        text = self._text()
+        assert "+18 strong school district" in text
+        assert "-30 weak school district" in text
+        assert "ONCE, judged on the best-ranked elementary" in text
+
+    def test_the_dealbreakers_survive_rescaling(self):
+        """Weak district and no ground-floor bedroom must still be able to sink
+        a listing out of Worth Touring from base 50."""
+        text = self._text()
+        assert "-30 weak school district" in text
+        assert "-25 confirmed absent" in text
+
+    def test_no_orphaned_old_weights(self):
+        """The heavy v76 numbers must not survive anywhere in the text."""
+        text = self._text()
+        for stale in ("-45 to -50", "-15 to -20", "+25 strong school district",
+                      "-35 weak school district", "-20 90-95 min", "-28 95-100 min"):
+            assert stale not in text, stale
+
+    def test_walking_to_the_station_stays_irrelevant(self):
+        assert "WALKING distance to the station is irrelevant" in self._text()
+
+    def test_unknown_handling_is_unchanged(self):
+        """The evidence rules were v75's fix and are not part of this retune."""
+        text = self._text()
+        assert "Missing data unknown (no floor plans or insufficient images): 0 pts" in text
+        assert "absence of evidence is not evidence against the house" in text

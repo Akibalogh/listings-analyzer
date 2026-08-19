@@ -1,0 +1,286 @@
+Spec: NY Suburbs Home Evaluator
+
+Goal
+Score one listing against a fixed buyer profile. Output: Reject or score (0–100), verdict, key warnings, confidence.
+
+Hard Requirements (any fail = Reject, score 0)
+Location must be in New York State (NJ listings are a hard pass — Reject immediately)
+Minimum 2,200 sqft
+Minimum 3 bedrooms
+If only 3 bedrooms, must also have a separate office / den / flex room that can function as a real office
+Price between $850,000 and $2,250,000 (the target range is $1.5M-$2M; above $2M is workable but less desirable; $2.25M is a hard cap)
+Detached single-family only
+Hiking nearby and not dense urban
+On the market, pending, or pre-listing (do NOT hard-reject for unknown status)
+Note: Brokers often share pre-listings before they go live. Treat null listing_status as unknown, not a fail.
+Only hard-reject if the property is EXPLICITLY confirmed sold (e.g. listing_status = 'Sold', sale price confirmed, or description unambiguously describes a completed sale with no re-listing signal).
+
+Commute of 110 minutes or more door-to-door to Brookfield Place = Reject (hard fail). If commute is unknown, mark unknown — do not reject.
+
+Base score: 50
+The final score IS the arithmetic: 50 + the sum of every adjustment listed in
+soft_points, clamped to 0-100. soft_points is the complete ledger - every
+adjustment applied appears there exactly once. A score that disagrees with its
+own ledger is invalid.
+
+(v77 note: the base moved from 30 to 50 and every weight below was recalibrated
+so that a faithfully summed ledger lands in the 0-100 bands. Under the old
+weights the sums centered at 16 while intended scores centered at 60, which
+made the arithmetic contract unpayable.)
+
+Primary Drivers (calibrated from buyer preference study)
+Schools are the dominant driver IN BOTH DIRECTIONS: this family requires great
+schools — average or weak districts are heavily penalized, not merely un-bonused.
+Commute is #3 overall — the penalty grows steadily beyond 85 min; the 110-min
+hard gate handles "too far", so the curve prices the burden, not the rejection.
+Score the school district ONCE, judged on the best-ranked elementary school.
+Exactly one school entry in soft_points - never one per school level (scoring
+elementary, middle and high separately triples the adjustment and breaks the
+0-100 scale):
++18 strong school district (best elementary at 95th percentile or higher)
++8  good school district (80th–94th percentile)
+-10 mediocre school district (50th–79th percentile)
+-30 weak school district (below 50th percentile — near-dealbreaker; a home in a
+    weak district should not reach Worth Touring regardless of other strengths)
++8  ground-floor bedroom (confirmed present; buyers parents will live on ground floor)
++4  full bathroom on ground floor (strongly preferred; meaningful but secondary to GFB itself)
++4  4-bedroom layout
++2  dedicated office beyond bedroom count
+
+Ground-Floor Bedroom Scoring (top priority — buyers parents will live on ground floor)
++8 confirmed present (floor plan or description clearly shows ground-floor bedroom)
+0 unknown, no floor plans available (missing data — NO penalty; lower confidence instead)
+-5 unknown despite floor plans present (verifiable unknown — layout shown but bedroom not confirmed)
+-25 confirmed absent (floor plan clearly shows no ground-floor bedroom — near-dealbreaker)
+
+Space & Neighbor Separation (important factor — judge it on EVERY listing)
+The buyer wants meaningful separation from neighbors — not countryside, but not
+dense either. Space around the house with a woodsy feel is a strong positive;
+visibly close neighbors are a reason the buyer passes on otherwise-good homes.
+The reference bar: Armonk NY suburban lots where houses are clearly detached
+with visible greenery, yard, or distance between them.
+
+Anchor the judgment to lot_acres FIRST, then confirm or adjust with photos:
+  - lot under 0.35 acres: assume tight (-4 to -6). NEVER award separation bonus
+    points on a lot under 0.4 acres — mature landscaping or a pretty yard photo
+    is not separation; the neighbors are still right there.
+  - 0.35-0.7 acres: neutral by default; use exterior/aerial photos to move
+    up (+3 visible side buffer) or down (-4 neighbors visibly close).
+  - over 0.7 acres, or photos showing woods/greenery buffer between houses:
+    +5 (the woodsy, private feel this buyer wants).
+
+When examining exterior and aerial photos, look specifically for neighboring
+HOUSES visible near the property line — visible close neighbors means tight
+(-4 to -6) even on a mid-size lot.
+  -8  very tight — row-house style, shared walls, or attached structures
+
+If no exterior images, aerial view, or lot size available: apply 0 (do not
+penalize for missing data).
+Note: this is NOT a hard requirement. Dense does not Reject. It is a meaningful soft factor.
+
+Age & Physical Condition (use age_condition.age_tier and age_condition.keywords_matched from structured data)
+Use the pre-computed age_condition signal when available.
+
+Age penalties reflect unrenovated condition risk, not age alone. A fully gut-renovated older home should net close to 0 — good bones and classic layouts are a positive. Penalize condition, not calendar.
+
+Age baseline (before renovation offsets):
+  0   2005+ (new construction — no penalty)
+  -1  1990-2004 (minor age penalty)
+  -2  1975-1989
+  -3  1960-1974
+  -5  1940-1959
+  -6  pre-1940
+
+Renovation offsets (can fully offset age penalty for well-renovated older homes):
+  +5 to +6   gut renovated / fully renovated (kitchen, bathrooms, systems — the whole house)
+  +3         meaningful updates (updated kitchen or baths, new roof, new HVAC, new windows)
+  0          cosmetic updates only
+  -8 to -10  sold as-is or fixer-upper (keywords: as is, fixer, needs tlc)
+  -4         cesspool or oil heat present (mechanical liability)
+  -10 to -12 major structural/mechanical renovation required
+
+Square Footage Provenance (use sqft_provenance from structured data when available)
+MLS listings state where the square footage came from. Only a municipal
+measurement (assessor, tax roll, public record) is third-party verified; every
+other source is self-reported by the owner, builder or agent.
+  sqft_provenance.verified = true — the number is municipal; trust it as stated.
+  sqft_provenance.verified = false — the size is SELF-REPORTED. Add a concern:
+    "Square footage is <source>-reported — needs manual verification." Do NOT
+    reject and do NOT deduct points for the provenance itself. Instead lower
+    confidence one step and treat every sqft-derived signal (price per sqft, the
+    2,200 sqft minimum, the 2,200-2,400 borderline penalty, the oversized-home
+    penalties) as approximate. A listing must never fail the 2,200 sqft hard
+    requirement on an unverified number alone — when the stated size is within
+    10% of the minimum, mark that requirement unknown rather than failed.
+  sqft_provenance.verified = null, or the field is absent — source unknown. No
+    concern and no adjustment: most listings simply do not publish the field,
+    and flagging all of them would make the flag meaningless.
+
+Price per Sqft vs Market (use price_per_sqft_signal from structured data when available)
+  +6    below_market (15%+ below Zillow median benchmark for the ZIP)
+  0     at_market
+  -6    above_market (20%+ above Zillow median benchmark for the ZIP)
+  If no Zillow data: omit this adjustment entirely
+
+Property Tax (use property_tax from structured data when available; otherwise use listing description/tax mentions)
+-3 slightly high for area
+-6 very high for area
+If tax data is structured (NYC assessments): use assessed_value as reference; flag if annual tax estimate seems high relative to price
+
+Taxes (general — applies when structured property_tax data not available)
+-3 slightly high for area
+-6 very high for area
+
+Commute to Brookfield Place (twice-weekly; 110+ min = hard reject)
+Buyer commutes twice per week. Every listing scored here already passed the
+110-minute hard gate, so this curve prices the recurring burden — it does not
+re-litigate the rejection. Score it on the reported door-to-door number; the
+station-drive penalty below stacks on top of it.
++6  65 min or less door-to-door
++3  65-75 min
+-2  75-85 min
+-5  85-95 min
+-8  95-105 min
+-12 105-109 min
+REJECT at 110 min or more (hard fail — too far)
+The hard reject uses the reported door-to-door number, never the
+parking-adjusted one described below.
+
+Station Access — DRIVE TIME AND PARKING (use nearest_metro_north and
+commute_data from structured data when available)
+The buyer DRIVES to the station. WALKING distance to the station is irrelevant:
+it must NEVER cost points and must NEVER be listed as a concern — do not
+penalize a home for being unwalkable to the platform.
+What does matter is the DRIVE to the station plus the time it takes to park
+there. The door-to-door number covers the drive but NOT the parking, which in
+practice runs about 10 minutes each way. So state the real burden in
+property_summary as the reported number plus that parking buffer, and apply
+this penalty on top of the curve above:
+  +2  station drive 5 minutes or less (or a genuinely walkable station)
+  0   6-8 minute station drive (the normal, expected case)
+  -2  9-12 minute station drive
+  -4  13-17 minute station drive
+  -6  18 minutes or more — a long drive plus a parking hunt, twice a day, is a
+      real recurring cost the buyer weighs
+Read the station drive from commute_data.drive_minutes when present. Otherwise
+estimate it from nearest_metro_north.distance_m (roughly 1 driving minute per
+800m) and say in property_summary that the figure is an estimate.
+If no station data of any kind is available: no adjustment.
+
+Rail Corridor / Location Preference (SOFT — buyer prefers the Hudson/Harlem side)
+The buyer prefers the Hudson River side and central corridor (Briarcliff Manor
+area) over the eastern New Haven Line toward Stamford/CT. This is a preference,
+NOT a dealbreaker — an exceptional home in a dispreferred town can still earn
+Worth Touring on its merits.
+  PREFERRED (no penalty) — Hudson Line + Harlem Line towns, e.g. Briarcliff Manor,
+    Ossining, Croton-on-Hudson, Cortlandt, Dobbs Ferry, Irvington, Tarrytown,
+    Sleepy Hollow, Pleasantville, Chappaqua, Mount Kisco, Bedford, Katonah,
+    Somers, Yorktown Heights, Thornwood, Hawthorne, Valhalla, Mount Pleasant.
+  -8 DISPREFERRED (soft penalty) — the New Haven Line corridor toward New
+    Rochelle and Stamford/CT: New Rochelle, Larchmont, Mamaroneck, Harrison,
+    Rye, Rye Brook, Port Chester. Apply a real but SURMOUNTABLE -8 penalty and
+    note the location as a concern. Do NOT reject and do NOT force to Low
+    Priority — a strong home here (great schools, space, price, short commute)
+    can still reach Worth Touring. The buyer passed on New Rochelle before, but
+    in theory the right house there could make sense.
+  NOT dispreferred (do NOT penalize): Purchase and West Harrison are fine —
+    they sit inland toward White Plains, not the CT corridor. Everywhere not
+    explicitly in the dispreferred list above is acceptable.
+  If the town is ambiguous or not listed, do not penalize.
+
+Amenities (use structured garage, pool, hoa_monthly data when available)
++3 deck
++2 soaking tub
++2 jacuzzi
++1 sauna
+
+Garage (use garage.count and garage.type from structured data when available)
+  +2 2-car or larger garage
+  +1 1-car garage
+  0  no garage or carport only (not ideal but not penalized)
+  If garage data available: use it. If absent: infer from description or images.
+
+Pool (use pool.has_pool and pool.type from structured data when available)
+  -4 in-ground pool (maintenance burden; prefer no pool)
+  -2 above-ground pool (less burden but still a negative)
+  0  no pool (preferred)
+  0  community pool only (not on property — no deduction)
+  If pool data available: use it. If absent: infer from description or images.
+  A free-standing jacuzzi or hot tub is the opposite case — a mild plus (see
+  Amenities). The buyer wants the soak without the pool's maintenance.
+
+Basement (use basement.has_basement and basement.type from structured data when available)
+  +4 walk-out basement (most desirable — daylight, secondary egress)
+  +3 finished basement (usable living space)
+  +1 partially finished basement (some utility)
+  0  unfinished basement (storage/utility only)
+  -2 no basement / slab foundation (less storage, no expansion potential)
+  If basement data available: use it. If absent: infer from description or images.
+
+Lot & Drainage (use lot_acres structured field when available)
++2 elevated lot or hillside position (good drainage, views, privacy)
+-2 low-lying or flood-prone lot (poor drainage risk)
+Note: lot_acres in structured data = lot size in acres; flag if unusually small (<0.1 ac) or unusually large (>2 ac, maintenance)
+
+Power Line Proximity (use power_line_proximity from structured data when available)
+High-voltage transmission lines (power=line or power=cable in OSM) near a property are a meaningful concern — health perception, noise, visual impact. Distribution poles (power=pole) are not flagged.
+Apply based on nearest_distance_m field:
+  0   300m or more (no concern)
+  -3  150–299m (moderate proximity — note as concern)
+  -5  75–149m (close proximity — flag as significant concern)
+  -8  under 75m (very close — flag as serious concern)
+If power_line_proximity data is absent or nearest_distance_m is null: no deduction (do not penalize for missing data).
+Include count_within_300m and voltage in the concerns section if deducting points.
+
+Flood Zone (use flood_zone from structured data when available)
+FEMA flood zone designation from the National Flood Hazard Layer (NFHL).
+SFHA zones (A, AE, AH, AO, AR, A99, V, VE) require mandatory flood insurance and carry real risk.
+  -3 to -4  Zone AE, VE, or other SFHA where property is marketed as waterfront/lakefront (flood zone is expected and priced in; flood insurance typically $800-1,500/yr)
+  -6 to -8  Zone AE, VE, or other SFHA for a non-waterfront property (unexpected flood risk — flag as significant concern)
+  -5  Zone A (SFHA, no base flood elevation determined)
+  0   Zone X 500-year (0.2% annual chance; acceptable risk, no deduction)
+  0   Zone X minimal hazard (standard expectation; no deduction)
+If flood_zone data is absent: no deduction (do not penalize for missing data).
+Include fld_zone and zone_subty in the concerns section if deducting points.
+
+
+HOA (use hoa_monthly from structured data when available)
+Do not penalize HOA fees directly. Treat HOA as part of effective carrying cost:
+note the monthly fee in concerns and fold it into overall affordability context.
+Flag if HOA exceeds $500/month as a mild cost concern.
+If hoa_monthly = 0: explicitly note no HOA (positive signal for carrying cost).
+If hoa_monthly data is absent: no assumption — infer from description if possible.
+
+Soft Concerns (never reject)
+-3  2,200–2,400 sqft (borderline minimum — note as mild concern)
+Price (the target range is $1.5M-$2M and carries NO penalty anywhere inside it —
+$1.75M and $1.85M are exactly as fine as $1.55M. Above $2M is less desirable but
+never a dealbreaker within the hard cap — a great home at $2.1M can still be
+Worth Touring)
+ 0  price at or below $1.5M (under budget — no penalty, and no bonus either)
+ 0  price $1.5M-$2.0M (the target range)
+-5  price $2.0M-$2.25M (above target — note it, but judge the home on its merits)
+-3  4,000-4,500 sqft (too large)
+-6  4,500+ sqft (significantly oversized)
+-3  6+ bedrooms
+
+Clamp final score between 0 and 100.
+
+Verdict
+80 or higher Strong Match
+60-79 Worth Touring
+40-59 Low Priority
+Below 40 Weak Match
+
+Output (short format)
+Summary with price, beds, sqft
+Hard requirements pass/fail/unknown
+Score breakdown
+Final score and verdict
+Warnings
+Confidence level
+
+Handling Unknowns for Layout-Dependent Requirements
+- Verifiable unknown (floor plans present but feature unconfirmed): deduct 5 pts, flag as high risk.
+- Missing data unknown (no floor plans or insufficient images): 0 pts. Never a deduction. Flag as pending verification and lower confidence.
+For non-layout requirements (detached structure, hiking proximity), unknowns warrant NO deduction either — absence of evidence is not evidence against the house. Score what is known and lower confidence.
