@@ -463,6 +463,27 @@ def _push_health() -> dict:
     return push
 
 
+def _job_health() -> dict:
+    """Queue counts, plus WHICH task types are failing.
+
+    by_status alone says "225 failed" and leaves you guessing. The failure is
+    almost always concentrated in one task — a scrape the source bot-blocks, an
+    API over quota — and which one decides whether it matters: a failed
+    scrape_desc costs evidence, a failed score costs a listing its rating.
+    """
+    counts = db.job_counts()
+    by_task = counts.get("by_task", {})
+    failed_by_task = {
+        task: statuses["failed"]
+        for task, statuses in by_task.items()
+        if statuses.get("failed")
+    }
+    return {
+        "by_status": counts.get("by_status", {}),
+        "failed_by_task": dict(sorted(failed_by_task.items(), key=lambda kv: -kv[1])),
+    }
+
+
 def _safe(fn):
     """Health is dashboard-polled; a broken sub-query reports None, not a 500."""
     try:
@@ -494,7 +515,7 @@ def health(request: Request):
         # two signals the daily check needs, and putting them here is what let
         # that routine stop carrying a copy of the manage key in its prompt.
         "recent_ingest": _safe(db.ingest_summary),
-        "jobs": _safe(lambda: db.job_counts().get("by_status", {})),
+        "jobs": _safe(_job_health),
     }
 
 
