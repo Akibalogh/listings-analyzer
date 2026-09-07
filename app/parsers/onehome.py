@@ -604,6 +604,29 @@ def _redfin_url_matches(
     return False
 
 
+# Set when Jina answers 429. Cleared by clear_transport_throttle() at the top
+# of each drain, so the block lasts one drain and not longer.
+_JINA_THROTTLED = False
+
+
+def transport_throttled() -> bool:
+    """Has Jina rate-limited us during this drain?
+
+    Worth asking before starting a scrape, because a 429 is not this
+    listing's failure. Every scrape_desc attempt burns one of the job's three
+    attempts, so a single throttling episode drove all 179 OneHome listings
+    into 'failed' — and the gap scan then grants a failed row only one attempt
+    per scan, whereas a 'done' row gets a full budget. So the throttle cost
+    179 listings their retries for a condition none of them caused.
+    """
+    return _JINA_THROTTLED
+
+
+def clear_transport_throttle() -> None:
+    global _JINA_THROTTLED
+    _JINA_THROTTLED = False
+
+
 # Last scrape's stage trail, read by the job handler for its error message.
 # A module global rather than a return value because scrape_listing_description
 # has one signature used from four call sites; the alternative was threading an
@@ -638,6 +661,15 @@ def _fetch_via_jina(url: str) -> str | None:
         if response.status_code != 200:
             logger.info(f"Jina fetch returned {response.status_code} for {url[:80]}")
             _trail(f"jina HTTP {response.status_code}")
+            if response.status_code in (429, 402):
+                global _JINA_THROTTLED
+                _JINA_THROTTLED = True
+                logger.warning(
+                    "Jina returned %s — treating the transport as throttled for the "
+                    "rest of this drain rather than spending every listing's retries "
+                    "on it. Set JINA_API_KEY to leave the shared-IP quota.",
+                    response.status_code,
+                )
             return None
         _trail(f"jina ok {len(response.text)}ch")
         return response.text
