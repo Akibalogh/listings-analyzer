@@ -2440,31 +2440,27 @@ class TestJobHealthNamesTheFailingTask:
         },
     }
 
-    def test_it_reports_failures_per_task(self):
+    def _health(self):
         from unittest.mock import patch
         from app.main import _job_health
-        with patch("app.main.db.job_counts", return_value=self.COUNTS):
-            out = _job_health()
-        assert out["failed_by_task"] == {"scrape_desc": 200, "commute": 25}
+        with patch("app.main.db.job_counts", return_value=self.COUNTS), \
+             patch("app.main.db.failed_job_reasons", return_value=[
+                 {"task": "scrape_desc", "count": 200, "error": "404 onekeymls"}]):
+            return _job_health()
+
+    def test_it_reports_failures_per_task(self):
+        assert self._health()["failed_by_task"] == {"scrape_desc": 200, "commute": 25}
 
     def test_worst_offender_comes_first(self):
-        from unittest.mock import patch
-        from app.main import _job_health
-        with patch("app.main.db.job_counts", return_value=self.COUNTS):
-            out = _job_health()
-        assert list(out["failed_by_task"])[0] == "scrape_desc"
+        assert list(self._health()["failed_by_task"])[0] == "scrape_desc"
 
     def test_clean_tasks_are_omitted(self):
         """Only the tasks actually failing, so the field stays readable."""
-        from unittest.mock import patch
-        from app.main import _job_health
-        with patch("app.main.db.job_counts", return_value=self.COUNTS):
-            out = _job_health()
-        assert "schools" not in out["failed_by_task"]
+        assert "schools" not in self._health()["failed_by_task"]
 
     def test_by_status_is_still_reported(self):
-        from unittest.mock import patch
-        from app.main import _job_health
-        with patch("app.main.db.job_counts", return_value=self.COUNTS):
-            out = _job_health()
-        assert out["by_status"]["failed"] == 225
+        assert self._health()["by_status"]["failed"] == 225
+
+    def test_the_reasons_ride_along(self):
+        """The count says something broke; the reason says what."""
+        assert self._health()["failed_reasons"][0]["error"] == "404 onekeymls"

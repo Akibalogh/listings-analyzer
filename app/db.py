@@ -6,6 +6,7 @@ Provides a simple connection helper and schema initialization.
 
 import json
 import logging
+import re
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -1807,6 +1808,50 @@ def ingest_summary(window_hours: int = 48) -> dict:
         # nudge/confirmation email can't raise it.
         "parser_suspect": total >= 2 and zero == total,
     }
+
+
+_TOKEN_QUERY = re.compile(r"\?[^\s\"\']*", re.IGNORECASE)
+_LONG_OPAQUE = re.compile(r"[A-Za-z0-9_-]{40,}")
+
+
+def redact_error(text: str | None, limit: int = 160) -> str:
+    """Strip credentials out of a job error before it can be shown publicly.
+
+    Job errors quote the URL they failed on, and a OneHome listing URL's
+    `token` query parameter is a bearer credential — base64 JSON carrying the
+    buyer's email, contact id, agent id and the saved search's key, with no
+    login behind it. Publishing an error verbatim would publish that. So the
+    whole query string goes, and any remaining 40+ character opaque run with
+    it, before the message is truncated.
+    """
+    if not text:
+        return ""
+    cleaned = _TOKEN_QUERY.sub("?<redacted>", str(text))
+    cleaned = _LONG_OPAQUE.sub("<redacted>", cleaned)
+    cleaned = " ".join(cleaned.split())
+    return cleaned[:limit]
+
+
+def failed_job_reasons(limit: int = 6) -> list[dict]:
+    """The distinct reasons jobs are failing, commonest first.
+
+    A count of failures says something is broken; the reason says what. 189
+    failed scrape_desc jobs could be a bot block, a dead URL format, a quota,
+    or a timeout, and those want four different fixes.
+    """
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT task_type, last_error FROM jobs "
+            "WHERE status = 'failed' AND last_error IS NOT NULL"
+        )
+        rows = cur.fetchall()
+    tally: dict[tuple[str, str], int] = {}
+    for task_type, err in rows:
+        key = (task_type or "?", redact_error(err))
+        tally[key] = tally.get(key, 0) + 1
+    ordered = sorted(tally.items(), key=lambda kv: -kv[1])[:limit]
+    return [{"task": t, "count": n, "error": e} for (t, e), n in ordered]
 
 
 def job_counts() -> dict:

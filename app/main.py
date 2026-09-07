@@ -481,6 +481,9 @@ def _job_health() -> dict:
     return {
         "by_status": counts.get("by_status", {}),
         "failed_by_task": dict(sorted(failed_by_task.items(), key=lambda kv: -kv[1])),
+        # WHY, not just how many. Redacted: job errors quote the URL they
+        # failed on, and a OneHome URL's token is a bearer credential.
+        "failed_reasons": db.failed_job_reasons(),
     }
 
 

@@ -1,5 +1,7 @@
 """Tests for the persistent job queue (app/jobs.py + jobs table in app/db.py)."""
 
+import json
+
 import pytest
 
 from app import db, jobs
@@ -1093,3 +1095,64 @@ class TestIngestSummaryIsPublicAndAggregate:
         blob = json.dumps(db.ingest_summary())
         for sentinel in ("SENDER-SENTINEL", "SUBJECT-SENTINEL", "PARSER-SENTINEL"):
             assert sentinel not in blob, sentinel
+
+
+class TestFailedJobReasonsAreRedacted:
+    """A failure count says something is broken; the reason says what — 189
+    failed scrape_desc jobs could be a bot block, a dead URL format, a quota or
+    a timeout, and those want four different fixes.
+
+    But job errors quote the URL they failed on, and a OneHome listing URL's
+    `token` is a bearer credential (base64 JSON carrying the buyer's email,
+    contact id, agent id and the saved search's key, with no login behind it).
+    These reasons ride on public /health, so the token cannot survive.
+    """
+
+    ONEHOME_ERR = (
+        "timeout fetching https://portal.onehome.com/en-US/listing?token="
+        "eyJPU04iOiJLRVkiLCJlbWFpbCI6ImFraWJhbG9naEBnbWFpbC5jb20ifQ==&SMS=0"
+    )
+
+    def _fail(self, task, error):
+        lid = _make_listing(address=f"{task}-{abs(hash(error)) % 9999} St")
+        db.enqueue_jobs(lid, [task])
+        for _ in range(db.JOB_MAX_ATTEMPTS):
+            claimed = [j for j in db.claim_pending_jobs() if j["listing_id"] == lid]
+            if not claimed:
+                break
+            db.fail_job(claimed[0]["id"], error)
+
+    def test_the_token_never_survives(self, temp_db):
+        self._fail("scrape_desc", self.ONEHOME_ERR)
+        blob = json.dumps(db.failed_job_reasons())
+        assert "token=" not in blob
+        assert "eyJPU04" not in blob  # the base64 payload itself
+
+    def test_the_diagnostic_content_does_survive(self, temp_db):
+        """Redaction that removed the useful part would defeat the purpose."""
+        self._fail("scrape_desc", "HTTP 404 for https://www.onekeymls.com/address/1-Main-St/824113")
+        reasons = db.failed_job_reasons()
+        assert any("404" in r["error"] and "onekeymls" in r["error"] for r in reasons)
+
+    def test_reasons_are_tallied_commonest_first(self, temp_db):
+        for i in range(3):
+            self._fail("scrape_desc", "403 Forbidden")
+        self._fail("commute", "no route found")
+        reasons = db.failed_job_reasons()
+        assert reasons[0]["count"] == 3
+        assert reasons[0]["task"] == "scrape_desc"
+
+    def test_the_task_is_named_with_the_reason(self, temp_db):
+        self._fail("commute", "no route found")
+        assert db.failed_job_reasons()[0]["task"] == "commute"
+
+    def test_a_clean_queue_reports_nothing(self, temp_db):
+        assert db.failed_job_reasons() == []
+
+    def test_a_long_opaque_run_is_redacted_even_without_a_query_string(self, temp_db):
+        """A token pasted into a path, not a query string, must go too."""
+        out = db.redact_error("failed on /listing/" + "A1b2C3d4" * 8)
+        assert "A1b2C3d4A1b2C3d4" not in out and "<redacted>" in out
+
+    def test_errors_are_truncated(self, temp_db):
+        assert len(db.redact_error("x" * 500)) <= 160
