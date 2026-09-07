@@ -2406,3 +2406,21 @@ class TestRescrapeUnknownsActuallyRescores:
         from app.main import manage_rescrape_unknowns
         src = inspect.getsource(manage_rescrape_unknowns)
         assert "_rescore_one_listing(" in src
+
+
+class TestHealthSurvivesAFailingSubcheck:
+    """Health is dashboard-polled, so a broken sub-query must report None
+    rather than 500 the page that tells you whether anything works."""
+
+    def test_a_failing_ingest_summary_reports_none(self):
+        from unittest.mock import patch
+        with patch("app.main.db.ingest_summary", side_effect=RuntimeError("no table")):
+            body = TestClient(app).get("/health").json()
+        assert body["recent_ingest"] is None
+        assert body["status"] == "ok"  # the rest of health still answers
+
+    def test_a_failing_job_count_reports_none(self):
+        from unittest.mock import patch
+        with patch("app.main.db.job_counts", side_effect=RuntimeError("no table")):
+            body = TestClient(app).get("/health").json()
+        assert body["jobs"] is None

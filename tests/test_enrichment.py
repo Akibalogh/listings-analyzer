@@ -2588,3 +2588,71 @@ class TestGeocoderIsSerialized:
              patch("app.enrichment.httpx.Client") as client:
             assert enr._geocode_address("1 A St", "Rye", "NY") == {"lat": 1.0, "lon": 2.0}
             client.assert_not_called()
+
+
+class TestGarageAdjectivesKeepTheCount:
+    """Two bugs in one branch, both pre-dating the last 40 PRs.
+
+    1. The type check read `"built[\\s-]?in" in context` — a regex pattern in a
+       plain substring test, so it only ever matched the literal text
+       `built[\\s-]?in` and never a real listing. It also emitted the
+       SyntaxWarning that printed on every test run.
+    2. Worse, the COUNT regex allowed only attached|detached between the
+       number and "garage", so any other adjective dropped the count entirely:
+       "2-car built-in garage" fell through to the generic "assume 1" path and
+       was stored as a one-car garage.
+    """
+
+    @staticmethod
+    def _p(desc):
+        from app.enrichment import parse_garage_count
+        return parse_garage_count(desc)
+
+    def test_built_in_keeps_its_count(self):
+        assert self._p("2-car built-in garage")["garage_count"] == 2
+
+    def test_built_in_is_typed_attached(self):
+        """The branch that could never fire — integrated means attached."""
+        assert self._p("2-car built-in garage")["garage_type"] == "attached"
+        assert self._p("3 car integrated garage")["garage_type"] == "attached"
+
+    def test_other_adjectives_keep_their_count(self):
+        for desc, count in [
+            ("2 car enclosed garage", 2),
+            ("2 car oversized garage", 2),
+            ("3-car heated attached garage", 3),
+            ("2 car tandem garage", 2),
+            ("1-car underground garage", 1),
+        ]:
+            assert self._p(desc)["garage_count"] == count, desc
+
+    def test_attached_and_detached_still_work(self):
+        assert self._p("2 car attached garage") == {
+            "garage_count": 2, "garage_type": "attached", "source": "description_parse"}
+        assert self._p("2 car detached garage") == {
+            "garage_count": 2, "garage_type": "detached", "source": "description_parse"}
+
+    def test_an_adjective_list_not_a_wildcard(self):
+        """A wildcard between count and "garage" would misread ordinary prose.
+        "2 car spots near the garage" is not a two-car garage."""
+        assert self._p("2 car spots near the garage")["garage_count"] == 1
+
+    def test_no_garage_and_carport_unaffected(self):
+        assert self._p("no garage")["garage_count"] == 0
+        assert self._p("carport only")["garage_type"] == "carport"
+
+    def test_word_numbers_remain_unhandled(self):
+        """Documented limitation, not fixed here: the count regex is digits
+        only, so "Two car garage" reads as a generic 1-car garage. Recorded so
+        the next person knows it is known rather than newly broken."""
+        assert self._p("Two car built in garage")["garage_count"] == 1
+
+    def test_the_module_emits_no_syntax_warning(self):
+        """The '\\s' escape in the old substring test warned on every import."""
+        import importlib
+        import warnings
+
+        import app.enrichment
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", SyntaxWarning)
+            importlib.reload(app.enrichment)
