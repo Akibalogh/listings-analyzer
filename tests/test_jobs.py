@@ -1000,3 +1000,96 @@ class TestGateVerdictContradictionForcesRescore:
                 result, _ = ai_score_listing({"listing_status": "Sold"}, "criteria")
         assert result.verdict == "Reject"
         assert client.messages.create.call_count == 0
+
+
+class TestIngestSummaryIsPublicAndAggregate:
+    """The daily MLS check carried a copy of MANAGE_KEY in its stored prompt for
+    one reason: the parser-failure signal ("emails arriving, none of them
+    parsing") lived only behind /manage/emails. Four integers on /health remove
+    that reason. Counts only — no senders, no subjects, no bodies — so this is
+    safe to expose where /manage/emails is not.
+    """
+
+    @staticmethod
+    def _seed(rows):
+        """rows: list of (hours_ago, listings_found)."""
+        from datetime import datetime, timedelta, timezone
+
+        from app import db
+        for i, (hours_ago, found) in enumerate(rows):
+            when = (datetime.now(timezone.utc) - timedelta(hours=hours_ago)).isoformat()
+            eid = db.save_processed_email(
+                gmail_id=f"seed-{i}-{hours_ago}-{found}", message_id="", sender="ken@mls",
+                subject="listing", parser_used="onehome_html", listings_found=found,
+            )
+            ph = db._placeholder()
+            with db.get_connection() as conn:
+                conn.cursor().execute(
+                    f"UPDATE processed_emails SET processed_at = {ph} WHERE id = {ph}",
+                    (when, eid),
+                )
+
+    def test_counts_split_parsed_from_unparsed(self, temp_db):
+        from app import db
+        self._seed([(2, 3), (5, 0), (10, 1)])
+        out = db.ingest_summary()
+        assert out["emails"] == 3
+        assert out["yielded_zero_listings"] == 1
+        assert out["yielded_listings"] == 2
+
+    def test_the_window_excludes_older_mail(self, temp_db):
+        from app import db
+        self._seed([(2, 1), (100, 1)])
+        assert db.ingest_summary(window_hours=48)["emails"] == 1
+
+    def test_parser_suspect_when_everything_yields_zero(self, temp_db):
+        """The silent failure this check exists for."""
+        from app import db
+        self._seed([(2, 0), (6, 0), (20, 0)])
+        assert db.ingest_summary()["parser_suspect"] is True
+
+    def test_one_empty_email_is_not_suspect(self, temp_db):
+        """A single confirmation or nudge email parses to zero legitimately."""
+        from app import db
+        self._seed([(2, 0)])
+        assert db.ingest_summary()["parser_suspect"] is False
+
+    def test_not_suspect_when_anything_parsed(self, temp_db):
+        from app import db
+        self._seed([(2, 0), (3, 0), (4, 2)])
+        assert db.ingest_summary()["parser_suspect"] is False
+
+    def test_quiet_feed_is_not_suspect(self, temp_db):
+        """No mail at all is a different problem — hours_since_success covers
+        it — and must not raise the parser alarm."""
+        from app import db
+        out = db.ingest_summary()
+        assert out["emails"] == 0 and out["parser_suspect"] is False
+
+    def test_last_email_at_falls_back_outside_the_window(self, temp_db):
+        """A quiet feed still reports when mail last arrived."""
+        from app import db
+        self._seed([(200, 1)])
+        assert db.ingest_summary()["last_email_at"] is not None
+
+    def test_it_leaks_no_content(self, temp_db):
+        """Only counts cross the public boundary — this is why it can live on
+        /health while /manage/emails stays behind auth."""
+        import json
+
+        from app import db
+        from datetime import datetime, timedelta, timezone
+
+        eid = db.save_processed_email(
+            gmail_id="leak-probe", message_id="", sender="SENDER-SENTINEL@example.com",
+            subject="SUBJECT-SENTINEL", parser_used="PARSER-SENTINEL", listings_found=1,
+        )
+        ph = db._placeholder()
+        with db.get_connection() as conn:
+            conn.cursor().execute(
+                f"UPDATE processed_emails SET processed_at = {ph} WHERE id = {ph}",
+                (datetime.now(timezone.utc).isoformat(), eid),
+            )
+        blob = json.dumps(db.ingest_summary())
+        for sentinel in ("SENDER-SENTINEL", "SUBJECT-SENTINEL", "PARSER-SENTINEL"):
+            assert sentinel not in blob, sentinel

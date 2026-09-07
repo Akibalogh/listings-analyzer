@@ -463,6 +463,15 @@ def _push_health() -> dict:
     return push
 
 
+def _safe(fn):
+    """Health is dashboard-polled; a broken sub-query reports None, not a 500."""
+    try:
+        return fn()
+    except Exception:
+        logger.warning("health sub-check failed", exc_info=True)
+        return None
+
+
 @app.get("/health")
 def health(request: Request):
     with _poll_lock:
@@ -481,6 +490,11 @@ def health(request: Request):
         "commute_gate": commute_gate,
         "hard_gates": _hard_gate_health(),
         "push": _push_health(),
+        # Aggregate ingest and queue counts, public on purpose: these are the
+        # two signals the daily check needs, and putting them here is what let
+        # that routine stop carrying a copy of the manage key in its prompt.
+        "recent_ingest": _safe(db.ingest_summary),
+        "jobs": _safe(lambda: db.job_counts().get("by_status", {})),
     }
 
 

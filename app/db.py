@@ -8,7 +8,7 @@ import json
 import logging
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from app.config import settings
 from app.models import ParsedListing, ScoringResult
@@ -1762,6 +1762,51 @@ def get_score_metadata(listing_id: int) -> dict | None:
             "scored_at": row[1],
             "evaluation_method": row[2],
         }
+
+
+def ingest_summary(window_hours: int = 48) -> dict:
+    """Aggregate counts of recently ingested emails — no senders, no bodies.
+
+    This is the parser-failure signal, made public. "Emails are arriving but
+    every one yields zero listings" is the way this pipeline fails silently
+    (516 Bellwood's sender changed format once already), and the only way to
+    see it used to be /manage/emails, which needs the manage key. So the daily
+    check carried a copy of that key in its stored prompt just to read four
+    integers.
+
+    Counts only: how many emails landed in the window, how many produced no
+    listings, how many produced at least one, and when the last one arrived.
+    Nothing here is sensitive — no subjects, no senders, no content — so it
+    can sit on /health and any monitor can read it without a credential.
+    """
+    ph = _placeholder()
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=window_hours)).isoformat()
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            f"""SELECT COUNT(*),
+                       SUM(CASE WHEN COALESCE(listings_found, 0) = 0 THEN 1 ELSE 0 END),
+                       MAX(processed_at)
+                FROM processed_emails
+                WHERE processed_at >= {ph}""",
+            (cutoff,),
+        )
+        total, zero, latest = cur.fetchone()
+        cur.execute("SELECT MAX(processed_at) FROM processed_emails")
+        latest_any = cur.fetchone()[0]
+    total = int(total or 0)
+    zero = int(zero or 0)
+    return {
+        "window_hours": window_hours,
+        "emails": total,
+        "yielded_zero_listings": zero,
+        "yielded_listings": total - zero,
+        "last_email_at": latest or latest_any,
+        # The failure mode, stated rather than left to be inferred: mail is
+        # arriving and none of it parses. Needs at least two emails so a single
+        # nudge/confirmation email can't raise it.
+        "parser_suspect": total >= 2 and zero == total,
+    }
 
 
 def job_counts() -> dict:

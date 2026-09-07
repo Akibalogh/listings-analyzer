@@ -1732,6 +1732,16 @@ def fetch_property_tax_orpts(
 # ---------------------------------------------------------------------------
 
 
+# Adjectives MLS copy puts between the stall count and the word "garage".
+# "attached" and "detached" also decide garage_type below; the rest only need
+# to not break the count.
+_GARAGE_ADJECTIVES = (
+    r"(?:attached|detached|integrated|built[\s-]?in|enclosed|open|heated|"
+    r"unheated|oversized|over-sized|tandem|underground|under-house|drive[\s-]?under|"
+    r"finished|insulated|new|updated|spacious|large)"
+)
+
+
 def parse_garage_count(description: str | None) -> dict:
     """Parse garage stall count from listing description text.
 
@@ -1758,10 +1768,17 @@ def parse_garage_count(description: str | None) -> dict:
         return {"garage_count": 1, "garage_type": "carport", "source": "description_parse"}
 
     # Numeric patterns: "2-car garage", "2 car garage", "3-car attached", etc.
+    #
+    # _GARAGE_ADJECTIVES is what may sit between the count and the word
+    # "garage". It used to be just attached|detached, so ANY other adjective
+    # dropped the count: "2-car built-in garage" fell through to the generic
+    # "garage without count — assume 1" path below and was stored as a 1-car
+    # garage. An explicit list rather than a wildcard, so a phrase like
+    # "2 car spots near the garage" cannot be read as a 2-car garage.
     m = re.search(
-        r"\b([1-9])\s*[-\u2013]?\s*car\b(?:\s+(?:attached|detached))?\s*garage\b"
-        r"|\bgarage\s+(?:with\s+)?([1-9])\s*[-\u2013]?\s*car\b"
-        r"|\b([1-9])\s*[-\u2013]?\s*car\s+(?:attached|detached)\b",
+        rf"\b([1-9])\s*[-\u2013]?\s*car\b(?:[\s-]+{_GARAGE_ADJECTIVES})*\s*garage\b"
+        rf"|\bgarage\s+(?:with\s+)?([1-9])\s*[-\u2013]?\s*car\b"
+        rf"|\b([1-9])\s*[-\u2013]?\s*car\s+{_GARAGE_ADJECTIVES}\b",
         text,
     )
     if m:
@@ -1775,7 +1792,13 @@ def parse_garage_count(description: str | None) -> dict:
             garage_type = "attached"
         elif "detached" in context:
             garage_type = "detached"
-        elif "integrated" in context or "built[\s-]?in" in context:
+        elif re.search(r"\bintegrated\b|\bbuilt[\s-]?in\b", context):
+            # A regex pattern in a plain `in` substring test never matched: the
+            # branch only fired on the literal text "built[\s-]?in", so no real
+            # listing ever reached it ("built-in garage" fell through to the
+            # enclosed/open check below, or to garage_type = None). Nine lines
+            # down the generic-garage path always did this correctly with
+            # re.search, which is what the intent was.
             garage_type = "attached"  # integrated = effectively attached
         elif "enclosed" in context or "open" in context or "carport" in context:
             garage_type = "detached"  # enclosed/open typically implies separate structure
