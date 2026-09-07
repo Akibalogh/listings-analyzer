@@ -1168,3 +1168,83 @@ class TestFailedJobReasonsAreRedacted:
         reasons = db.failed_job_reasons()
         assert "none verified" in reasons[0]["error"]
         assert "token=" not in reasons[0]["error"]
+
+
+class TestAThrottleDoesNotBurnEveryListingsRetries:
+    """Production evidence: 24 scrape jobs failed with
+    "[jina HTTP 429 -> discovery: no search body]". A rate limit is not any one
+    listing's fault, but every attempt spends one of that job's three — so a
+    single throttling episode drove all 179 OneHome listings into 'failed',
+    and the gap scan grants a failed row only one attempt per scan while a
+    'done' row gets a full budget. The throttle cost 179 listings their
+    retries for a condition none of them caused.
+    """
+
+    def test_a_429_marks_the_transport_throttled(self):
+        from unittest.mock import MagicMock, patch
+        from app.parsers import onehome
+        onehome.clear_transport_throttle()
+        client = MagicMock()
+        client.__enter__.return_value = client
+        client.get.return_value = MagicMock(status_code=429, text="slow down")
+        with patch("app.parsers.onehome.httpx.Client", return_value=client):
+            onehome._fetch_via_jina("https://example.com")
+        assert onehome.transport_throttled() is True
+        onehome.clear_transport_throttle()
+
+    def test_a_payment_required_counts_too(self):
+        """402 is the paid-tier equivalent of the same condition."""
+        from unittest.mock import MagicMock, patch
+        from app.parsers import onehome
+        onehome.clear_transport_throttle()
+        client = MagicMock()
+        client.__enter__.return_value = client
+        client.get.return_value = MagicMock(status_code=402, text="quota")
+        with patch("app.parsers.onehome.httpx.Client", return_value=client):
+            onehome._fetch_via_jina("https://example.com")
+        assert onehome.transport_throttled() is True
+        onehome.clear_transport_throttle()
+
+    def test_an_ordinary_failure_does_not(self):
+        """A 404 is about that URL, not about the quota."""
+        from unittest.mock import MagicMock, patch
+        from app.parsers import onehome
+        onehome.clear_transport_throttle()
+        client = MagicMock()
+        client.__enter__.return_value = client
+        client.get.return_value = MagicMock(status_code=404, text="nope")
+        with patch("app.parsers.onehome.httpx.Client", return_value=client):
+            onehome._fetch_via_jina("https://example.com")
+        assert onehome.transport_throttled() is False
+
+    def test_a_throttled_scrape_job_completes_instead_of_failing(self, temp_db):
+        """Completing leaves the data gap, so the next scan re-enqueues with a
+        full budget; failing would have spent an attempt on the rate limit."""
+        from unittest.mock import patch
+        from app.parsers import onehome
+        lid = _make_listing(address="1 Throttle St")
+        db.enqueue_jobs(lid, ["scrape_desc"])
+        with patch.object(onehome, "transport_throttled", return_value=True), \
+             patch.object(onehome, "scrape_listing_description") as scrape:
+            jobs.drain()
+            assert scrape.call_count == 0  # never even attempted
+        assert db.job_counts()["by_status"] == {"done": 1}
+
+    def test_the_gap_scan_re_enqueues_the_skipped_listing(self, temp_db):
+        """The skip must not look like success — the listing still has no
+        description, so it comes back round."""
+        from unittest.mock import patch
+        from app.parsers import onehome
+        lid = _make_listing(address="2 Throttle St")
+        db.enqueue_jobs(lid, ["scrape_desc"])
+        with patch.object(onehome, "transport_throttled", return_value=True):
+            jobs.drain()
+        assert jobs.enqueue_missing()["scrape_desc"] == 1
+
+    def test_each_drain_retests_the_quota(self, temp_db, monkeypatch):
+        """Whatever was exhausted may have recovered, so a throttle lasts one
+        drain and not longer."""
+        from app.parsers import onehome
+        monkeypatch.setattr(onehome, "_JINA_THROTTLED", True)
+        jobs.drain()
+        assert onehome.transport_throttled() is False

@@ -86,6 +86,10 @@ def drain(max_jobs: int = 500) -> dict:
     if not _drain_lock.acquire(blocking=False):
         return {"status": "already_running"}
     try:
+        # A throttle is per-drain: whatever quota was exhausted last time may
+        # have recovered, so every drain gets to find out for itself.
+        from app.parsers.onehome import clear_transport_throttle
+        clear_transport_throttle()
         processed = 0
         failed_ids: set[int] = set()
         while processed + len(failed_ids) < max_jobs:
@@ -245,9 +249,21 @@ def _handle_scrape_desc(listing: dict) -> None:
         _search_redfin_url,
         last_scrape_trail,
         scrape_listing_description,
+        transport_throttled,
     )
 
     if listing.get("description") and _has_images(listing):
+        return
+
+    # A rate limit is not this listing's fault, and failing here would cost it
+    # an attempt: the gap scan gives a 'failed' row one attempt per scan but a
+    # 'done' row a full budget. Returning leaves the data gap in place, so the
+    # next scan re-enqueues this listing with its retries intact.
+    if transport_throttled():
+        logger.info(
+            f"Skipping scrape for listing {listing['id']} — transport throttled "
+            "this drain; the gap scan will re-enqueue it"
+        )
         return
 
     url = listing.get("listing_url")
