@@ -3582,6 +3582,36 @@ def manage_prune_sold(request: Request):
     return _prune_sold_listings(fix=fix)
 
 
+@app.get("/scoring-integrity")
+def scoring_integrity_summary():
+    """Aggregate scoring-integrity numbers. Public — no auth required.
+
+    The counts only, not the per-listing lists. Everything here is derived
+    from /listings, which is already public, so the manage key on the detailed
+    version was never protecting secrets — it guards the cost of a
+    full-corpus scan. This summary pays that cost only when asked, which is
+    why it is a separate endpoint rather than another field on /health (the
+    dashboard polls that one every few seconds).
+
+    Worth having public because score_vs_breakdown.median_delta is the number
+    that says whether the scores can be trusted as arithmetic, and it was
+    readable only by whoever held the key — so nothing watched it.
+    """
+    full = _scoring_integrity_scan()
+    svb = full["score_vs_breakdown"]
+    return {
+        "listings_scored": full["listings_scored"],
+        "contradiction_count": full["contradiction_count"],
+        "contradiction_rate": full["contradiction_rate"],
+        "unconfirmable_reject_count": full["unconfirmable_reject_count"],
+        "score_vs_breakdown": {
+            k: v for k, v in svb.items()
+            if k in ("checked", "median_delta", "within_tolerance", "breach_count",
+                     "stacked_school_count", "uncertainty_penalty_count")
+        },
+    }
+
+
 @app.get("/manage/scoring-integrity")
 def manage_scoring_integrity(request: Request):
     """Count hard failures whose own reason admits they are not failures.
@@ -3605,7 +3635,11 @@ def manage_scoring_integrity(request: Request):
     key = request.headers.get("x-manage-key", "")
     if not (settings.manage_key and key == settings.manage_key):
         raise HTTPException(status_code=403, detail="Invalid or missing management key")
+    return _scoring_integrity_scan()
 
+
+def _scoring_integrity_scan() -> dict:
+    """The scan itself, shared by the public summary and the keyed detail."""
     from app.models import HardResult, ScoringResult
     from app.scorer import (
         _SCHOOL_CRITERIA,

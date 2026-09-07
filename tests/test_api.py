@@ -2464,3 +2464,75 @@ class TestJobHealthNamesTheFailingTask:
     def test_the_reasons_ride_along(self):
         """The count says something broke; the reason says what."""
         assert self._health()["failed_reasons"][0]["error"] == "404 onekeymls"
+
+
+class TestScoringIntegrityHasAPublicSummary:
+    """score_vs_breakdown.median_delta is the number that says whether the
+    scores can be trusted as arithmetic — and it was readable only by whoever
+    held the manage key, so nothing watched it.
+
+    The key was never protecting secrets: every input is derived from
+    /listings, which is public. It guards the cost of a full-corpus scan. So
+    the summary is public and pays that cost on request, the per-listing detail
+    stays keyed, and neither goes on /health (which the dashboard polls).
+    """
+
+    ROWS = [
+        {"id": 1, "address": "1 A St", "score": 72, "verdict": "Worth Touring",
+         "hard_results_json": "[]", "soft_points_json": '{"schools": 18, "commute": -5}',
+         "concerns_json": "[]"},
+        {"id": 2, "address": "2 B St", "score": 60, "verdict": "Worth Touring",
+         "hard_results_json": "[]", "soft_points_json": '{"schools": 8, "commute": 2}',
+         "concerns_json": "[]"},
+    ]
+
+    def _get(self, path, headers=None):
+        from unittest.mock import patch
+        with patch("app.main.db.get_all_listings", return_value=self.ROWS), \
+             patch("app.main._build_listing_data", return_value={}):
+            return TestClient(app).get(path, headers=headers or {})
+
+    def test_the_summary_needs_no_key(self):
+        assert self._get("/scoring-integrity").status_code == 200
+
+    def test_it_reports_the_residual(self):
+        body = self._get("/scoring-integrity").json()
+        svb = body["score_vs_breakdown"]
+        assert "median_delta" in svb and "within_tolerance" in svb
+        assert svb["checked"] == 2
+
+    def test_it_withholds_the_per_listing_detail(self):
+        """Addresses are public via /listings, but the point of the summary is
+        to be cheap to read and quote — not to re-serve the whole corpus."""
+        body = self._get("/scoring-integrity").json()
+        assert "breaches" not in body["score_vs_breakdown"]
+        assert "contradictions" not in body
+        assert "unconfirmable_rejects" not in body
+
+    def test_the_counts_still_come_through(self):
+        body = self._get("/scoring-integrity").json()
+        for field in ("listings_scored", "contradiction_count",
+                      "contradiction_rate", "unconfirmable_reject_count"):
+            assert field in body, field
+
+    def test_the_detailed_endpoint_still_requires_the_key(self):
+        from unittest.mock import patch
+        with patch("app.main.settings") as s:
+            s.manage_key = "k"
+            assert TestClient(app).get("/manage/scoring-integrity").status_code == 403
+
+    def test_both_endpoints_run_the_same_scan(self):
+        """One implementation, so the public number can never disagree with the
+        detailed one."""
+        import inspect
+        from app.main import manage_scoring_integrity, scoring_integrity_summary
+        for fn in (manage_scoring_integrity, scoring_integrity_summary):
+            assert "_scoring_integrity_scan()" in inspect.getsource(fn)
+
+    def test_it_is_not_on_health(self):
+        """A full-corpus scan must not ride on the endpoint the dashboard polls
+        every few seconds — the original docstring is explicit about this."""
+        from unittest.mock import patch
+        with patch("app.main.db.get_all_listings") as scan:
+            TestClient(app).get("/health")
+            assert scan.call_count == 0
