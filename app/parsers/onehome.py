@@ -20,6 +20,8 @@ from typing import NamedTuple
 from urllib.parse import quote, urljoin, urlparse
 
 import httpx
+
+from app.config import settings
 from bs4 import BeautifulSoup
 
 from app.models import ParsedListing
@@ -346,8 +348,21 @@ def scrape_listing_description(
 
     # --- OneHome URLs: Angular SPA, static + Jina always return empty shell ---
     if "onehome.com" in url_lower:
-        logger.info(f"OneHome URL detected, skipping to MLS lookup: {url[:80]}")
-        # Try OneKey MLS directly (constructs URL from MLS ID — no DDG needed)
+        logger.info(f"OneHome URL detected, no page to scrape: {url[:80]}")
+        # Verified Redfin discovery first. Redfin scraping works (94 of 104
+        # Redfin listings enriched); OneKeyMLS's /address/ form has 404'd since
+        # 2026-08-02 and only 4 of 183 OneHome listings ever got evidence, all
+        # in March. So try the path with a demonstrated success rate before the
+        # one with a documented failure.
+        discovered = _discover_redfin_url(address, town, state, zip_code, mls_id)
+        if discovered:
+            result = _scrape_static(discovered)
+            if result and result[0]:
+                return result
+            result = _scrape_with_jina(discovered)
+            if result and result[0]:
+                return result
+            logger.info(f"Discovered Redfin URL but both scrapes came back empty: {discovered}")
         if mls_id and address and town:
             result = _try_onekeymls(address, town, state, zip_code, mls_id)
             if result and result[0]:
@@ -455,6 +470,139 @@ def _try_onekeymls(
         return result
 
     return None, []
+
+
+# --- Address-verified search discovery ----------------------------------
+
+_REDFIN_HOME_RE = re.compile(
+    r"redfin\.com/([A-Z]{2})/([^/\s]+)/([^/\s]+)/home/(\d+)", re.IGNORECASE)
+
+_STREET_SUFFIXES = re.compile(
+    r"\b(road|rd|drive|dr|street|st|avenue|ave|lane|ln|terrace|ter|court|ct|"
+    r"place|pl|way|circle|cir|boulevard|blvd|trail|trl|path|run|row|loop|"
+    r"heights|hts|extension|ext|turnpike|tpke|highway|hwy)\b",
+    re.IGNORECASE,
+)
+
+
+def _street_key(text: str | None) -> str:
+    """Street name reduced to comparable letters, suffix words dropped.
+
+    "53 Tarryhill Road" and "53-Tarryhill-Rd-10591" both reduce to
+    "53tarryhill", so an MLS address and a Redfin slug can be compared without
+    caring which suffix abbreviation each side used.
+    """
+    if not text:
+        return ""
+    cleaned = _STREET_SUFFIXES.sub(" ", str(text))
+    return re.sub(r"[^a-z0-9]", "", cleaned.lower())
+
+
+def _redfin_url_matches(
+    url: str, address: str | None, town: str | None, zip_code: str | None,
+) -> bool:
+    """Is this discovered Redfin URL definitely the same property?
+
+    A wrong URL here is worse than no URL: its description and photos get
+    attached to someone else's listing and scored as that house's evidence.
+
+    The check this replaces accepted a URL if ANY street word over two
+    characters appeared anywhere in it — and in Westchester "Hill", "Ridge",
+    "Brook" and "Lane" are in half the street names, so "12 Oak Lane" would
+    match "98-Maple-Lane". Three things must now agree:
+
+      * the street number, exactly;
+      * the street name, suffix-insensitive;
+      * the ZIP, or failing that the town — corroboration that it is the same
+        place. ZIP is checked first because the town legitimately differs
+        across sources at borders: 149 Brook Farm Rd E is a Bedford listing
+        whose Redfin page is filed under Pound Ridge, same ZIP 10576.
+    """
+    m = _REDFIN_HOME_RE.search(url or "")
+    if not m:
+        return False
+    slug_town, slug = m.group(2), m.group(3)
+    zip_in_slug = re.search(r"-(\d{5})$", slug)
+    slug_core = re.sub(r"-\d{5}$", "", slug)
+
+    want_num = re.match(r"\s*(\d+)", address or "")
+    got_num = re.match(r"(\d+)", slug_core)
+    if not (want_num and got_num) or want_num.group(1) != got_num.group(1):
+        return False
+    if _street_key(slug_core) != _street_key(address):
+        return False
+
+    want_zip = (str(zip_code).strip()[:5] if zip_code else "")
+    if zip_in_slug and want_zip:
+        return zip_in_slug.group(1) == want_zip
+    if town:
+        return _street_key(slug_town) == _street_key(town)
+    # Number and street matched but nothing corroborates the place — the one
+    # case where two real properties could collide, so decline.
+    return False
+
+
+def _fetch_via_jina(url: str) -> str | None:
+    """Fetch a URL's text through Jina Reader, which requests from its own IPs.
+
+    This is the transport that makes search discovery work at all. Redfin
+    bot-blocks its autocomplete API from cloud IPs (403, verified), and
+    reaching a search engine directly is unreliable from a datacenter, but
+    Jina fetches server-side and returns the rendered result.
+    """
+    headers = {"Accept": "text/html"}
+    if settings.jina_api_key:
+        # Unauthenticated r.jina.ai is metered per visitor IP, which a Fly app
+        # shares with other tenants.
+        headers["Authorization"] = f"Bearer {settings.jina_api_key}"
+    try:
+        with httpx.Client(timeout=_JINA_TIMEOUT, follow_redirects=True) as client:
+            response = client.get(f"{_JINA_READER_URL}{url}", headers=headers)
+        if response.status_code != 200:
+            logger.info(f"Jina fetch returned {response.status_code} for {url[:80]}")
+            return None
+        return response.text
+    except Exception as e:
+        logger.info(f"Jina fetch failed for {url[:80]}: {e}")
+        return None
+
+
+def _discover_redfin_url(
+    address: str | None, town: str | None, state: str | None, zip_code: str | None,
+    mls_id: str | None = None,
+) -> str | None:
+    """Find the Redfin page for an address, and prove it is the right one.
+
+    Why this exists: 179 of 278 listings arrive as OneHome portal URLs, which
+    are an Angular SPA with nothing to scrape. Their only evidence path ran
+    through OneKeyMLS's /address/{slug}/{mls_id} form, which has 404'd for
+    every listing since 2026-08-02, and a search step that yields nothing from
+    the deployed app. Result: 4 of 183 OneHome listings ever enriched, all four
+    back in March. Redfin scraping, by contrast, works for 94 of 104 — so the
+    missing piece was never the scrape, it was finding the Redfin URL.
+    """
+    if not address or not town:
+        return None
+    query = " ".join(
+        [address, town, state or "NY", str(zip_code or ""), "redfin"]
+    ).split()
+    search = "https://lite.duckduckgo.com/lite/?q=" + "+".join(query)
+
+    body = _fetch_via_jina(search)
+    if not body:
+        return None
+    seen = list(dict.fromkeys(m.group(0) for m in _REDFIN_HOME_RE.finditer(body)))
+    for candidate in seen:
+        full = candidate if candidate.startswith("http") else f"https://www.{candidate}"
+        if _redfin_url_matches(full, address, town, zip_code):
+            logger.info(f"Discovered Redfin URL for {address}: {full}")
+            return full
+    if seen:
+        logger.info(
+            f"{len(seen)} Redfin URL(s) found for {address} but none verified as "
+            "the same property — declining rather than attaching another house"
+        )
+    return None
 
 
 def _try_redfin_fallback(
@@ -754,21 +902,15 @@ def _search_redfin_url(
             logger.info(f"No Redfin URLs found in DDG results for: {query}")
             return None
 
-        # Verify the URL contains a word from the street address (avoid false matches)
-        # Use the street number as the most specific identifier
-        street_parts = address.split() if address else []
+        # Strict verification. This used to accept a URL if ANY street word
+        # over two characters appeared anywhere in it, so "12 Oak Lane" would
+        # match "98-Maple-Lane" and attach that house's description and photos.
         for redfin_url in matches:
-            url_lower = redfin_url.lower()
-            # Check street number match (most reliable)
-            if street_parts and street_parts[0].isdigit():
-                if f"/{street_parts[0]}-" in url_lower:
-                    return redfin_url
-            # Check street name match (fallback)
-            for part in street_parts[1:]:
-                if len(part) > 2 and part.lower() in url_lower:
-                    return redfin_url
+            full = redfin_url if redfin_url.startswith("http") else f"https://www.{redfin_url}"
+            if _redfin_url_matches(full, address, town, zip_code):
+                return full
 
-        logger.info(f"Redfin URLs found but none matched address: {address}")
+        logger.info(f"Redfin URLs found but none verified for address: {address}")
         return None
 
     except Exception as e:
