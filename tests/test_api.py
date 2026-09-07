@@ -2424,3 +2424,47 @@ class TestHealthSurvivesAFailingSubcheck:
         with patch("app.main.db.job_counts", side_effect=RuntimeError("no table")):
             body = TestClient(app).get("/health").json()
         assert body["jobs"] is None
+
+
+class TestJobHealthNamesTheFailingTask:
+    """"225 failed" is not a diagnosis. Which task is failing decides whether
+    it matters: a failed scrape_desc costs evidence for scoring, a failed score
+    costs a listing its rating entirely."""
+
+    COUNTS = {
+        "by_status": {"done": 419, "failed": 225, "pending": 3},
+        "by_task": {
+            "scrape_desc": {"done": 100, "failed": 200},
+            "commute": {"done": 150, "failed": 25},
+            "schools": {"done": 169},
+        },
+    }
+
+    def test_it_reports_failures_per_task(self):
+        from unittest.mock import patch
+        from app.main import _job_health
+        with patch("app.main.db.job_counts", return_value=self.COUNTS):
+            out = _job_health()
+        assert out["failed_by_task"] == {"scrape_desc": 200, "commute": 25}
+
+    def test_worst_offender_comes_first(self):
+        from unittest.mock import patch
+        from app.main import _job_health
+        with patch("app.main.db.job_counts", return_value=self.COUNTS):
+            out = _job_health()
+        assert list(out["failed_by_task"])[0] == "scrape_desc"
+
+    def test_clean_tasks_are_omitted(self):
+        """Only the tasks actually failing, so the field stays readable."""
+        from unittest.mock import patch
+        from app.main import _job_health
+        with patch("app.main.db.job_counts", return_value=self.COUNTS):
+            out = _job_health()
+        assert "schools" not in out["failed_by_task"]
+
+    def test_by_status_is_still_reported(self):
+        from unittest.mock import patch
+        from app.main import _job_health
+        with patch("app.main.db.job_counts", return_value=self.COUNTS):
+            out = _job_health()
+        assert out["by_status"]["failed"] == 225
