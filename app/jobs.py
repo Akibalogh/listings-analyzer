@@ -241,7 +241,11 @@ def _has_images(listing: dict) -> bool:
 
 
 def _handle_scrape_desc(listing: dict) -> None:
-    from app.parsers.onehome import _search_redfin_url, scrape_listing_description
+    from app.parsers.onehome import (
+        _search_redfin_url,
+        last_scrape_trail,
+        scrape_listing_description,
+    )
 
     if listing.get("description") and _has_images(listing):
         return
@@ -283,7 +287,16 @@ def _handle_scrape_desc(listing: dict) -> None:
     if image_urls:
         db.add_listing_images(listing["id"], image_urls)
     if not description and not image_urls and not listing.get("description"):
-        raise RuntimeError(f"scrape returned no description or images for {url}")
+        # Name the stage that failed. The bare message said only that the
+        # scrape came back empty, which is equally true of a metered Jina
+        # quota, a search that returned nothing, candidates that failed
+        # address verification, and a page that fetched but parsed to nothing —
+        # four different fixes. The trail is redacted like any other job error
+        # before it can reach public /health.
+        raise RuntimeError(
+            f"scrape returned no description or images for {url} "
+            f"[{last_scrape_trail()}]"
+        )
 
 
 _STATS_FIELDS = ("price", "bedrooms", "bathrooms", "sqft", "year_built", "list_date", "lot_acres")

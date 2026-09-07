@@ -2842,3 +2842,80 @@ class TestBothDiscoveryPathsShareOneVerifier:
     def test_an_address_without_a_number_is_declined(self):
         """"Lot 3 Dorchester Gln" style entries can't be verified by number."""
         assert not self._ok(self.OK, "Tarryhill Road", "Tarrytown", "10591")
+
+
+class TestScrapeStageTrail:
+    """"scrape returned no description or images" was equally true of a metered
+    Jina quota, a search that returned nothing, candidates that failed address
+    verification, and a page that fetched but parsed to nothing — four
+    different fixes. The fix for the OneHome listings ran in production and
+    failed all 179 times with that one message, which is what made the trail
+    necessary.
+    """
+
+    def test_a_successful_run_records_each_stage(self):
+        from unittest.mock import patch
+        from app.parsers.onehome import last_scrape_trail, scrape_listing_description
+        body = "https://www.redfin.com/NY/Chappaqua/131-Douglas-Rd-10514/home/20087273"
+        with patch("app.parsers.onehome._fetch_via_jina", return_value=body), \
+             patch("app.parsers.onehome._scrape_static", return_value=("desc", ["i"])):
+            scrape_listing_description(
+                "https://portal.onehome.com/en-US/listing?token=x",
+                address="131 Douglas Rd", town="Chappaqua", state="NY", zip_code="10514")
+        trail = last_scrape_trail()
+        assert "discovery: verified" in trail and "static ok" in trail
+
+    def test_a_metered_jina_is_distinguishable(self):
+        """The hypothesis for the production failure — it must be visible."""
+        from unittest.mock import MagicMock, patch
+        from app.parsers.onehome import last_scrape_trail, scrape_listing_description
+        client = MagicMock()
+        client.__enter__.return_value = client
+        client.get.return_value = MagicMock(status_code=429, text="rate limited")
+        with patch("app.parsers.onehome.httpx.Client", return_value=client), \
+             patch("app.parsers.onehome._try_onekeymls", return_value=(None, [])), \
+             patch("app.parsers.onehome._try_redfin_fallback", return_value=(None, [])):
+            scrape_listing_description(
+                "https://portal.onehome.com/en-US/listing?token=x",
+                address="131 Douglas Rd", town="Chappaqua", state="NY", zip_code="10514")
+        assert "jina HTTP 429" in last_scrape_trail()
+
+    def test_unverified_candidates_are_distinguishable_from_none(self):
+        from unittest.mock import patch
+        from app.parsers.onehome import last_scrape_trail, scrape_listing_description
+        wrong = "https://www.redfin.com/NY/Somers/98-Maple-Ln-10589/home/9"
+        with patch("app.parsers.onehome._fetch_via_jina", return_value=wrong), \
+             patch("app.parsers.onehome._try_onekeymls", return_value=(None, [])), \
+             patch("app.parsers.onehome._try_redfin_fallback", return_value=(None, [])):
+            scrape_listing_description(
+                "https://portal.onehome.com/en-US/listing?token=x",
+                address="131 Douglas Rd", town="Chappaqua", state="NY", zip_code="10514")
+        assert "discovery: none verified" in last_scrape_trail()
+
+    def test_the_trail_resets_between_scrapes(self):
+        """Stale stages from a previous listing would misdirect the next diagnosis."""
+        from unittest.mock import patch
+        from app.parsers.onehome import last_scrape_trail, scrape_listing_description
+        with patch("app.parsers.onehome._fetch_via_jina", return_value=None), \
+             patch("app.parsers.onehome._try_onekeymls", return_value=(None, [])), \
+             patch("app.parsers.onehome._try_redfin_fallback", return_value=(None, [])):
+            for _ in range(2):
+                scrape_listing_description(
+                    "https://portal.onehome.com/en-US/listing?token=x",
+                    address="1 A St", town="Rye", state="NY", zip_code="10580")
+        assert last_scrape_trail().count("no search body") == 1
+
+    def test_the_job_error_carries_the_trail(self):
+        import inspect
+        from app.jobs import _handle_scrape_desc
+        assert "last_scrape_trail()" in inspect.getsource(_handle_scrape_desc)
+
+    def test_the_trail_is_redacted_like_any_job_error(self):
+        """It reaches public /health through failed_reasons, and a OneHome URL
+        in the message carries a bearer token."""
+        from app.db import redact_error
+        msg = ("scrape returned no description or images for "
+               "https://portal.onehome.com/en-US/listing?token=eyJPU04iOiJLRVkifQ== "
+               "[jina HTTP 429]")
+        out = redact_error(msg)
+        assert "token=" not in out and "eyJPU04" not in out
