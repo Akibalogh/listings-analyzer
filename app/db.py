@@ -1848,7 +1848,11 @@ def failed_job_reasons(limit: int = 6) -> list[dict]:
         rows = cur.fetchall()
     tally: dict[tuple[str, str], int] = {}
     for task_type, err in rows:
-        key = (task_type or "?", redact_error(err))
+        # 240, not the 160 default: the stage trail is appended at the END of
+        # a scrape error, and that last stage is the diagnostic part —
+        # "discovery: none verified" truncated to "discovery: none" says the
+        # opposite of what happened.
+        key = (task_type or "?", redact_error(err, limit=240))
         tally[key] = tally.get(key, 0) + 1
     ordered = sorted(tally.items(), key=lambda kv: -kv[1])[:limit]
     return [{"task": t, "count": n, "error": e} for (t, e), n in ordered]

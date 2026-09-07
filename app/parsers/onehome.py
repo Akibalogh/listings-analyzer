@@ -344,6 +344,7 @@ def scrape_listing_description(
     if not url:
         return None, []
 
+    _LAST_TRAIL.clear()
     url_lower = url.lower()
 
     # --- OneHome URLs: Angular SPA, static + Jina always return empty shell ---
@@ -358,10 +359,14 @@ def scrape_listing_description(
         if discovered:
             result = _scrape_static(discovered)
             if result and result[0]:
+                _trail("static ok")
                 return result
+            _trail("static empty")
             result = _scrape_with_jina(discovered)
             if result and result[0]:
+                _trail("jina scrape ok")
                 return result
+            _trail("jina scrape empty")
             logger.info(f"Discovered Redfin URL but both scrapes came back empty: {discovered}")
         if mls_id and address and town:
             result = _try_onekeymls(address, town, state, zip_code, mls_id)
@@ -599,6 +604,21 @@ def _redfin_url_matches(
     return False
 
 
+# Last scrape's stage trail, read by the job handler for its error message.
+# A module global rather than a return value because scrape_listing_description
+# has one signature used from four call sites; the alternative was threading an
+# out-param through all of them for telemetry.
+_LAST_TRAIL: list[str] = []
+
+
+def _trail(stage: str) -> None:
+    _LAST_TRAIL.append(stage)
+
+
+def last_scrape_trail() -> str:
+    return " -> ".join(_LAST_TRAIL) if _LAST_TRAIL else "no stages recorded"
+
+
 def _fetch_via_jina(url: str) -> str | None:
     """Fetch a URL's text through Jina Reader, which requests from its own IPs.
 
@@ -617,10 +637,13 @@ def _fetch_via_jina(url: str) -> str | None:
             response = client.get(f"{_JINA_READER_URL}{url}", headers=headers)
         if response.status_code != 200:
             logger.info(f"Jina fetch returned {response.status_code} for {url[:80]}")
+            _trail(f"jina HTTP {response.status_code}")
             return None
+        _trail(f"jina ok {len(response.text)}ch")
         return response.text
     except Exception as e:
         logger.info(f"Jina fetch failed for {url[:80]}: {e}")
+        _trail(f"jina error {type(e).__name__}")
         return None
 
 
@@ -647,18 +670,22 @@ def _discover_redfin_url(
 
     body = _fetch_via_jina(search)
     if not body:
+        _trail("discovery: no search body")
         return None
     seen = list(dict.fromkeys(m.group(0) for m in _REDFIN_HOME_RE.finditer(body)))
+    _trail(f"discovery: {len(seen)} candidate(s)")
     for candidate in seen:
         full = candidate if candidate.startswith("http") else f"https://www.{candidate}"
         if _redfin_url_matches(full, address, town, zip_code):
             logger.info(f"Discovered Redfin URL for {address}: {full}")
+            _trail("discovery: verified")
             return full
     if seen:
         logger.info(
             f"{len(seen)} Redfin URL(s) found for {address} but none verified as "
             "the same property — declining rather than attaching another house"
         )
+        _trail("discovery: none verified")
     return None
 
 

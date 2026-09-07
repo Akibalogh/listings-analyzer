@@ -1156,3 +1156,15 @@ class TestFailedJobReasonsAreRedacted:
 
     def test_errors_are_truncated(self, temp_db):
         assert len(db.redact_error("x" * 500)) <= 160
+
+    def test_the_stage_trail_survives_truncation(self, temp_db):
+        """The trail is appended at the END of a scrape error and its last
+        stage is the diagnostic part — "discovery: none verified" cut down to
+        "discovery: none" says the opposite of what happened."""
+        self._fail("scrape_desc",
+                   "scrape returned no description or images for "
+                   "https://portal.onehome.com/en-US/listing?token=eyJPU04iOiJLRVkifQ== "
+                   "[jina ok 6051ch -> discovery: 2 candidate(s) -> discovery: none verified]")
+        reasons = db.failed_job_reasons()
+        assert "none verified" in reasons[0]["error"]
+        assert "token=" not in reasons[0]["error"]
