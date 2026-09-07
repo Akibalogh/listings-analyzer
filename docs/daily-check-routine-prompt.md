@@ -53,7 +53,11 @@ DO THESE CHECKS:
 
    Report the total count. Report how many have verdict "Worth Touring" or "Strong Match" and are NOT passed and NOT toured — the live candidates. List anything created in the last 48h with address, score, verdict and listing_status.
 
-3. curl -s 'https://listings-analyzer.fly.dev/alerts?limit=10'
+3. curl -s https://listings-analyzer.fly.dev/scoring-integrity
+
+   Scoring trustworthiness. Report score_vs_breakdown.median_delta and within_tolerance out of checked — that is how many scores agree with their own published breakdown. A median_delta drifting upward means scores are becoming assertions again rather than arithmetic. Also report contradiction_count and unconfirmable_reject_count; the latter should be 0, and anything above 0 means a listing sits at zero on grounds the code cannot confirm.
+
+4. curl -s 'https://listings-analyzer.fly.dev/alerts?limit=10'
 
    The alert audit log. Report anything sent in the last 24h: address, score, reason (first_time vs re_armed), and whether delivered is true. A delivered:false row means the push channel rejected a send — flag it.
 
