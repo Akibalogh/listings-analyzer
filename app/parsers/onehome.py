@@ -498,6 +498,63 @@ def _street_key(text: str | None) -> str:
     return re.sub(r"[^a-z0-9]", "", cleaned.lower())
 
 
+def _slug_matches_address(
+    slug: str, address: str | None, town: str | None, zip_code: str | None,
+    slug_town: str | None = None,
+) -> bool:
+    """Does this URL's address slug describe the property we asked for?
+
+    Shared by both discovery paths, so the Redfin and OneKeyMLS twins cannot
+    drift apart again — they previously carried the same loose check
+    independently, and fixing one left the other accepting false matches.
+
+    Number and street must match; then the ZIP must corroborate, or the town
+    if no ZIP is available. See _redfin_url_matches for why ZIP outranks town.
+    """
+    zip_in_slug = re.search(r"[-/](\d{5})(?:$|[-/])", slug)
+
+    # Token-sequence match, not substring: a OneKeyMLS slug legitimately
+    # embeds the town and state ("53-tarryhill-rd-tarrytown-ny-10591"), so the
+    # address cannot be compared as a whole. Requiring the address tokens to
+    # appear CONSECUTIVELY keeps it strict — "12 Oak" does not match
+    # "12-Oakwood-Dr", which a substring test would have accepted.
+    def _tokens(text: str) -> list[str]:
+        cleaned = _STREET_SUFFIXES.sub(" ", str(text or ""))
+        return [t for t in re.split(r"[^a-z0-9]+", cleaned.lower()) if t]
+
+    want = _tokens(address)
+    got = _tokens(slug)
+    if not want or not want[0].isdigit():
+        return False
+    if not any(got[i:i + len(want)] == want for i in range(len(got) - len(want) + 1)):
+        return False
+
+    want_zip = (str(zip_code).strip()[:5] if zip_code else "")
+    if zip_in_slug and want_zip:
+        return zip_in_slug.group(1) == want_zip
+    if town and slug_town:
+        return _street_key(slug_town) == _street_key(town)
+    if town:
+        # No town segment in the URL (OneKeyMLS puts the town inside the slug)
+        return _street_key(town) in _street_key(slug)
+    return False
+
+
+def _onekeymls_url_matches(
+    url: str, address: str | None, town: str | None, zip_code: str | None,
+) -> bool:
+    """Same strictness as the Redfin check, for OneKeyMLS URLs.
+
+    Its slug shape varies (/address/{slug}/{id} historically,
+    /home-details/{slug}/{opaqueId} now), so verification works off the path
+    rather than a fixed capture.
+    """
+    if not url or "onekeymls.com" not in url.lower():
+        return False
+    path = url.split("onekeymls.com", 1)[1]
+    return _slug_matches_address(path, address, town, zip_code)
+
+
 def _redfin_url_matches(
     url: str, address: str | None, town: str | None, zip_code: str | None,
 ) -> bool:
@@ -959,17 +1016,12 @@ def _search_onekeymls_url(
             logger.info(f"No OneKeyMLS URLs found in DDG results for: {query}")
             return None
 
-        # Validate street number match
-        street_parts = address.split() if address else []
+        # Strict verification, shared with the Redfin path. This block used to
+        # accept any street word over two characters appearing anywhere in the
+        # URL — the same false-match bug its twin had.
         for url in matches:
-            url_lower = url.lower()
-            if street_parts and street_parts[0].isdigit():
-                if f"/{street_parts[0]}-" in url_lower or f"/{street_parts[0]}." in url_lower:
-                    return url
-            # Fallback: check street name
-            for part in street_parts[1:]:
-                if len(part) > 2 and part.lower() in url_lower:
-                    return url
+            if _onekeymls_url_matches(url, address, town, zip_code):
+                return url
 
         logger.info(f"OneKeyMLS URLs found but none matched address: {address}")
         return None

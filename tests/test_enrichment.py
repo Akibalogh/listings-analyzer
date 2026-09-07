@@ -2783,3 +2783,62 @@ class TestDiscoveryDeclinesRatherThanGuesses:
         from app.parsers.onehome import _fetch_via_jina
         with patch("app.parsers.onehome.httpx.Client", side_effect=RuntimeError("down")):
             assert _fetch_via_jina("https://example.com") is None
+
+
+class TestBothDiscoveryPathsShareOneVerifier:
+    """The Redfin and OneKeyMLS searches each carried their own copy of the
+    same loose check — "any street word over two characters appearing anywhere
+    in the URL" — and fixing only the Redfin one left the twin accepting false
+    matches. They now share _slug_matches_address so they cannot drift again.
+    """
+
+    OK = "https://www.onekeymls.com/home-details/53-tarryhill-rd-tarrytown-ny-10591/abc123"
+
+    @staticmethod
+    def _ok(url, address, town, zip_code):
+        from app.parsers.onehome import _onekeymls_url_matches
+        return _onekeymls_url_matches(url, address, town, zip_code)
+
+    def test_onekeymls_exact_match(self):
+        assert self._ok(self.OK, "53 Tarryhill Road", "Tarrytown", "10591")
+
+    def test_onekeymls_suffix_spelling_does_not_matter(self):
+        assert self._ok(self.OK, "53 Tarryhill Rd", "Tarrytown", "10591")
+
+    def test_onekeymls_legacy_url_form_still_verifies(self):
+        """The /address/{slug}/{mls_id} form is 404ing but not yet removed."""
+        assert self._ok(
+            "https://www.onekeymls.com/address/53-Tarryhill-Road-Tarrytown-NY-10591/824113",
+            "53 Tarryhill Road", "Tarrytown", "10591")
+
+    def test_onekeymls_wrong_number_rejected(self):
+        assert not self._ok(self.OK, "54 Tarryhill Road", "Tarrytown", "10591")
+
+    def test_onekeymls_wrong_zip_rejected(self):
+        assert not self._ok(self.OK, "53 Tarryhill Road", "Tarrytown", "10580")
+
+    def test_onekeymls_false_match_rejected(self):
+        assert not self._ok(
+            "https://www.onekeymls.com/home-details/98-maple-lane-somers-ny-10589/a",
+            "12 Oak Lane", "Somers", "10589")
+
+    def test_a_non_onekeymls_url_is_rejected(self):
+        assert not self._ok("https://example.com/53-tarryhill", "53 Tarryhill Road",
+                            "Tarrytown", "10591")
+
+    def test_token_matching_not_substring_matching(self):
+        """The reason the shared verifier compares CONSECUTIVE tokens: a
+        OneKeyMLS slug embeds the town and state, so the address can't be
+        compared as a whole — but a substring test would let "12 Oak" match
+        "12-Oakwood-Dr", i.e. a different house on a different street."""
+        from app.parsers.onehome import _onekeymls_url_matches, _redfin_url_matches
+        assert not _onekeymls_url_matches(
+            "https://www.onekeymls.com/home-details/12-oakwood-dr-somers-ny-10589/a",
+            "12 Oak Lane", "Somers", "10589")
+        assert not _redfin_url_matches(
+            "https://www.redfin.com/NY/Somers/12-Oakwood-Dr-10589/home/1",
+            "12 Oak Lane", "Somers", "10589")
+
+    def test_an_address_without_a_number_is_declined(self):
+        """"Lot 3 Dorchester Gln" style entries can't be verified by number."""
+        assert not self._ok(self.OK, "Tarryhill Road", "Tarrytown", "10591")
