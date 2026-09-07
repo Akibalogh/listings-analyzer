@@ -232,6 +232,27 @@ async def lifespan(app: FastAPI):
     # reset them to pending) without waiting for the first scheduler tick
     jobs.kick()
 
+    # ...and run the gap scan too, because kick() alone cannot reach a job that
+    # has exhausted its attempts. Only enqueue_missing() resurrects those, and
+    # it used to run exclusively on the scheduler tick — which sleeps for the
+    # full interval BEFORE its first pass. Every deploy restarts that sleep, so
+    # a run of four deploys in half an hour starved the repair scan entirely:
+    # 189 failed scrape jobs sat untouched for 50 minutes after the fix that
+    # would have cleared them shipped, because nothing was scheduled to try.
+    #
+    # In a thread: the scan reads every listing and the drain does network work,
+    # neither of which belongs in a startup path that a health check is waiting on.
+    def _boot_repair() -> None:
+        try:
+            enqueued = jobs.enqueue_missing()
+            if any(enqueued.values()):
+                logger.info(f"Boot gap scan enqueued: {enqueued}")
+            jobs.kick()
+        except Exception:
+            logger.exception("Boot gap scan failed")
+
+    threading.Thread(target=_boot_repair, daemon=True).start()
+
     # Surface criteria-vs-config drift on the commute gate at every boot
     try:
         _log_commute_gate_drift()

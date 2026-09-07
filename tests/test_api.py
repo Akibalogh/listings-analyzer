@@ -2536,3 +2536,68 @@ class TestScoringIntegrityHasAPublicSummary:
         with patch("app.main.db.get_all_listings") as scan:
             TestClient(app).get("/health")
             assert scan.call_count == 0
+
+
+class TestBootRunsTheGapScan:
+    """The repair scan ran only on the scheduler tick, and that loop sleeps for
+    the full interval BEFORE its first pass. Every deploy restarts the sleep,
+    so four deploys in half an hour starved it completely: 189 failed scrape
+    jobs sat untouched for 50 minutes after the fix that would have cleared
+    them shipped, because nothing was scheduled to try.
+
+    kick() alone cannot substitute — it drains pending jobs, and a job that has
+    exhausted its attempts is 'failed'. Only enqueue_missing() resurrects those.
+    """
+
+    def test_lifespan_runs_the_gap_scan_not_just_a_drain(self):
+        import inspect
+        from app.main import lifespan
+        src = inspect.getsource(lifespan)
+        assert "enqueue_missing()" in src
+        assert "jobs.kick()" in src
+
+    def test_the_scan_runs_off_the_startup_path(self):
+        """It reads every listing and the drain does network work — a health
+        check waiting on startup should not wait for that."""
+        import inspect
+        from app.main import lifespan
+        src = inspect.getsource(lifespan)
+        assert "threading.Thread(target=_boot_repair" in src
+        assert "daemon=True" in src
+
+    def test_a_failing_scan_does_not_break_boot(self):
+        """Boot must survive a scan failure; the app is still serveable."""
+        import inspect
+        from app.main import lifespan
+        src = inspect.getsource(lifespan)
+        boot = src[src.index("def _boot_repair"):]
+        assert "except Exception" in boot
+        assert "logger.exception" in boot
+
+    def test_exhausted_jobs_are_only_reachable_via_requeue(self, tmp_path, monkeypatch):
+        """The premise: a drain cannot see an attempts-exhausted job, which is
+        why the boot path needed the scan and not another kick()."""
+        from app import db, jobs
+        from app.config import settings
+        from app.models import ParsedListing, ScoringResult
+        monkeypatch.setattr(settings, "database_url", f"sqlite:///{tmp_path}/t.db")
+        db.init_db()
+        email_id = db.save_processed_email(
+            gmail_id="boot-1", message_id="", sender="s", subject="t",
+            parser_used="p", listings_found=1,
+        )
+        lid = db.save_listing(
+            ParsedListing(source_format="test", address="1 Boot St", town="Rye",
+                          state="NY", zip_code="10580"),
+            ScoringResult(score=0, verdict="Reject"), email_id,
+        )
+        db.enqueue_jobs(lid, ["commute"])
+        for _ in range(db.JOB_MAX_ATTEMPTS):
+            claimed = db.claim_pending_jobs()
+            if not claimed:
+                break
+            db.fail_job(claimed[0]["id"], "boom")
+        assert db.job_counts()["by_status"] == {"failed": 1}
+        assert db.claim_pending_jobs() == []          # a drain sees nothing
+        db.enqueue_jobs(lid, ["commute"], requeue=True)
+        assert db.claim_pending_jobs() != []          # the scan resurrects it
