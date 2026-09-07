@@ -2656,3 +2656,130 @@ class TestGarageAdjectivesKeepTheCount:
         with warnings.catch_warnings():
             warnings.simplefilter("error", SyntaxWarning)
             importlib.reload(app.enrichment)
+
+
+class TestVerifiedRedfinDiscovery:
+    """179 of 278 listings arrive as OneHome portal URLs — an Angular SPA with
+    nothing to scrape. Their only evidence path ran through OneKeyMLS's
+    /address/{slug}/{mls_id} form, which has 404'd for every listing since
+    2026-08-02, plus a search step that yields nothing from the deployed app.
+    Measured result: 4 of 183 OneHome listings ever enriched, all four in March.
+    Redfin scraping meanwhile works for 94 of 104 — so the missing piece was
+    never the scrape, it was finding the Redfin URL.
+
+    Discovery goes through Jina Reader, which fetches from its own IPs: Redfin
+    bot-blocks its autocomplete API from cloud IPs (403, verified both directly
+    and through Jina). Measured 10/10 verified hits on a sample of the blind
+    listings.
+    """
+
+    URL = "https://www.redfin.com/NY/Chappaqua/131-Douglas-Rd-10514/home/20087273"
+
+    @staticmethod
+    def _m(url, address, town, zip_code):
+        from app.parsers.onehome import _redfin_url_matches
+        return _redfin_url_matches(url, address, town, zip_code)
+
+    def test_exact_match_accepted(self):
+        assert self._m(self.URL, "131 Douglas Rd", "Chappaqua", "10514")
+
+    def test_suffix_spelling_does_not_matter(self):
+        """The MLS says "Road", Redfin's slug says "Rd"."""
+        assert self._m(self.URL, "131 Douglas Road", "Chappaqua", "10514")
+
+    def test_wrong_street_number_rejected(self):
+        assert not self._m(self.URL, "132 Douglas Rd", "Chappaqua", "10514")
+
+    def test_wrong_street_name_rejected(self):
+        assert not self._m(self.URL, "131 Maple Rd", "Chappaqua", "10514")
+
+    def test_wrong_zip_rejected(self):
+        assert not self._m(self.URL, "131 Douglas Rd", "Chappaqua", "10580")
+
+    def test_the_false_match_the_old_check_allowed(self):
+        """It accepted any street word over two characters appearing anywhere in
+        the URL — and in Westchester "Lane", "Hill", "Ridge" and "Brook" are in
+        half the street names, so another house's photos would be attached."""
+        assert not self._m(
+            "https://www.redfin.com/NY/Somers/98-Maple-Lane-10589/home/1",
+            "12 Oak Lane", "Somers", "10589")
+
+    def test_town_corroborates_when_zip_is_missing(self):
+        assert self._m(self.URL, "131 Douglas Rd", "Chappaqua", None)
+        assert not self._m(self.URL, "131 Douglas Rd", "Yonkers", None)
+
+    def test_nothing_corroborating_is_declined(self):
+        """Number and street can genuinely collide across towns, so without a
+        ZIP or a town there is no way to know — decline rather than guess."""
+        assert not self._m(self.URL, "131 Douglas Rd", None, None)
+
+    def test_a_border_town_mismatch_passes_on_zip(self):
+        """149 Brook Farm Rd E is a Bedford listing whose Redfin page is filed
+        under Pound Ridge — same ZIP. Verifying on town alone would lose it."""
+        assert self._m(
+            "https://www.redfin.com/NY/Pound-Ridge/149-Brook-Farm-Rd-E-10576/home/20069705",
+            "149 Brook Farm Road E", "Bedford", "10576")
+
+    def test_a_non_listing_url_is_rejected(self):
+        for url in ("https://www.redfin.com/city/30738/NY/Yorktown",
+                    "https://www.redfin.com/NY/Chappaqua/",
+                    "not a url", ""):
+            assert not self._m(url, "131 Douglas Rd", "Chappaqua", "10514"), url
+
+
+class TestDiscoveryDeclinesRatherThanGuesses:
+    """The failure mode to design against is not "no URL found" — it is the
+    wrong house's description and photos scored as this house's evidence."""
+
+    @staticmethod
+    def _discover(body):
+        from unittest.mock import patch
+        from app.parsers.onehome import _discover_redfin_url
+        with patch("app.parsers.onehome._fetch_via_jina", return_value=body):
+            return _discover_redfin_url("131 Douglas Rd", "Chappaqua", "NY", "10514")
+
+    def test_a_verified_candidate_is_returned(self):
+        body = "junk https://www.redfin.com/NY/Chappaqua/131-Douglas-Rd-10514/home/20087273 junk"
+        assert self._discover(body).endswith("/home/20087273")
+
+    def test_unverified_candidates_are_declined(self):
+        body = "https://www.redfin.com/NY/Somers/98-Maple-Ln-10589/home/999"
+        assert self._discover(body) is None
+
+    def test_the_right_one_is_picked_out_of_several(self):
+        body = (
+            "https://www.redfin.com/NY/Somers/98-Maple-Ln-10589/home/999 "
+            "https://www.redfin.com/NY/Chappaqua/131-Douglas-Rd-10514/home/20087273"
+        )
+        assert self._discover(body).endswith("/home/20087273")
+
+    def test_no_search_body_yields_nothing(self):
+        assert self._discover(None) is None
+
+    def test_missing_address_does_not_search(self):
+        from unittest.mock import patch
+        from app.parsers.onehome import _discover_redfin_url
+        with patch("app.parsers.onehome._fetch_via_jina") as fetch:
+            assert _discover_redfin_url(None, "Chappaqua", "NY", "10514") is None
+            assert _discover_redfin_url("131 Douglas Rd", None, "NY", "10514") is None
+            assert fetch.call_count == 0
+
+    def test_jina_carries_the_key_when_configured(self):
+        """Unauthenticated r.jina.ai is metered per visitor IP, which a Fly app
+        shares with other tenants."""
+        from unittest.mock import MagicMock, patch
+        from app.parsers.onehome import _fetch_via_jina
+        with patch("app.parsers.onehome.settings") as s:
+            s.jina_api_key = "jk-test"
+            client = MagicMock()
+            client.__enter__.return_value = client
+            client.get.return_value = MagicMock(status_code=200, text="ok")
+            with patch("app.parsers.onehome.httpx.Client", return_value=client):
+                _fetch_via_jina("https://example.com")
+            assert client.get.call_args.kwargs["headers"]["Authorization"] == "Bearer jk-test"
+
+    def test_a_failing_jina_fetch_is_not_fatal(self):
+        from unittest.mock import patch
+        from app.parsers.onehome import _fetch_via_jina
+        with patch("app.parsers.onehome.httpx.Client", side_effect=RuntimeError("down")):
+            assert _fetch_via_jina("https://example.com") is None
