@@ -2893,17 +2893,25 @@ class TestScrapeStageTrail:
         assert "discovery: none verified" in last_scrape_trail()
 
     def test_the_trail_resets_between_scrapes(self):
-        """Stale stages from a previous listing would misdirect the next diagnosis."""
+        """Stale stages from a previous listing would misdirect the next
+        diagnosis. One scrape now walks three sources (trulia, zillow, then the
+        Redfin discovery), so the check is that a SECOND scrape does not double
+        what the first recorded."""
         from unittest.mock import patch
         from app.parsers.onehome import last_scrape_trail, scrape_listing_description
-        with patch("app.parsers.onehome._fetch_via_jina", return_value=None), \
-             patch("app.parsers.onehome._try_onekeymls", return_value=(None, [])), \
-             patch("app.parsers.onehome._try_redfin_fallback", return_value=(None, [])):
-            for _ in range(2):
+
+        def _scrape_once():
+            with patch("app.parsers.onehome._fetch_via_jina", return_value=None), \
+                 patch("app.parsers.onehome._try_onekeymls", return_value=(None, [])), \
+                 patch("app.parsers.onehome._try_redfin_fallback", return_value=(None, [])):
                 scrape_listing_description(
                     "https://portal.onehome.com/en-US/listing?token=x",
                     address="1 A St", town="Rye", state="NY", zip_code="10580")
-        assert last_scrape_trail().count("no search body") == 1
+            return last_scrape_trail().count("no search body")
+
+        first = _scrape_once()
+        assert first > 0
+        assert _scrape_once() == first
 
     def test_the_job_error_carries_the_trail(self):
         import inspect
@@ -2919,3 +2927,88 @@ class TestScrapeStageTrail:
                "[jina HTTP 429]")
         out = redact_error(msg)
         assert "token=" not in out and "eyJPU04" not in out
+
+
+class TestPublicListingPageFallback:
+    """Redfin's property pages answer any datacenter-side renderer with an AWS
+    WAF "Human Verification" interstitial — 885 bytes, "Target URL returned
+    error 405" — whether fetched directly or through Jina. That is why the
+    Redfin discovery path shipped in #76 produced ZERO evidence in production:
+    discovery found and verified the right URL, and the page behind it was a
+    CAPTCHA. Nothing gained a description between 2026-08-07 and 2026-09-17.
+
+    Trulia renders fine through the same transport. Measured 7/7 on live,
+    non-Reject, blind listings: real prose and 40 photos each.
+    """
+
+    MD_ACTIVE = (
+        "Title: 2 McGuire Lane, Croton On Hudson, NY 10520 | MLS# 1052438 | Trulia\n"
+        "Markdown Content:\n"
+        "*   [Buy](https://www.trulia.com/NY/)\n"
+        + "Craftsman-quality Arts & Crafts Tudor on a park-like shy 2 acres, set on a "
+          "sought-after quiet cul-de-sac, offering timeless character and gracious "
+          "proportions throughout the home and its serene grounds.\n"
+        + "| Appliances & Utilities Dishwasher Dryer Microwave Refrigerator Washer |\n"
+        + "![Image 3](https://www.trulia.com/pictures/thumbs_5/zillowstatic/fp/abc-full.webp)\n"
+    )
+    MD_STALE = (
+        "Title: 28 Argyle Place, Briarcliff Manor, NY 10510 - See Est. Value, Schools\n"
+        "Markdown Content:\n"
+        + "A charming colonial sold in 2022 with four bedrooms and a large level yard "
+          "in the heart of the village, close to schools and the train station.\n"
+    )
+
+    def test_description_comes_out_of_the_markdown(self):
+        from app.parsers.onehome import _description_from_markdown
+        out = _description_from_markdown(self.MD_ACTIVE)
+        assert out.startswith("Craftsman-quality")
+
+    def test_nav_tables_and_images_are_not_mistaken_for_prose(self):
+        from app.parsers.onehome import _description_from_markdown
+        out = _description_from_markdown(self.MD_ACTIVE)
+        assert "Appliances" not in out and "![Image" not in out and "[Buy]" not in out
+
+    def test_photos_come_out_of_the_markdown(self):
+        from app.parsers.onehome import _images_from_markdown
+        assert _images_from_markdown(self.MD_ACTIVE) == [
+            "https://www.trulia.com/pictures/thumbs_5/zillowstatic/fp/abc-full.webp"]
+
+    def test_an_mls_number_in_the_title_verifies_the_page(self):
+        from app.parsers.onehome import _mls_matches_page
+        assert _mls_matches_page(self.MD_ACTIVE, "1052438") is True
+        assert _mls_matches_page(self.MD_ACTIVE, "9999999") is False
+
+    def test_a_stale_sold_record_has_no_mls_number(self):
+        """These sites keep a page per ADDRESS, not per listing. 28 Argyle Place
+        returns a 2022 sale whose title carries no MLS number — its prose would
+        otherwise be scored as this listing's evidence."""
+        from app.parsers.onehome import _mls_matches_page
+        assert _mls_matches_page(self.MD_STALE, "995261") is None
+
+    def test_a_page_without_a_matching_mls_is_declined(self):
+        """Absent or different both mean decline when we know the MLS number."""
+        from unittest.mock import patch
+        import app.parsers.onehome as O
+        search = "https://www.trulia.com/home/28-argyle-pl-briarcliff-manor-ny-10510-33073246"
+        with patch.object(O, "_fetch_via_jina", side_effect=[search, self.MD_STALE,
+                                                             search, self.MD_STALE]):
+            desc, imgs = O._discover_and_scrape_public_listing(
+                "28 Argyle Place", "Briarcliff Manor", "NY", "10510", "995261")
+        assert desc is None and imgs == []
+
+    def test_a_verified_active_page_is_accepted(self):
+        from unittest.mock import patch
+        import app.parsers.onehome as O
+        search = "https://www.trulia.com/home/2-mcguire-ln-croton-on-hudson-ny-10520-58418135"
+        with patch.object(O, "_fetch_via_jina", side_effect=[search, self.MD_ACTIVE]):
+            desc, imgs = O._discover_and_scrape_public_listing(
+                "2 McGuire Lane", "Croton On Hudson", "NY", "10520", "1052438")
+        assert desc.startswith("Craftsman-quality") and len(imgs) == 1
+
+    def test_it_runs_before_the_redfin_branch(self):
+        """Redfin can discover a verified URL and still return a CAPTCHA, so the
+        fetchable source has to be tried first."""
+        import inspect
+        from app.parsers.onehome import scrape_listing_description
+        src = inspect.getsource(scrape_listing_description)
+        assert src.index("_discover_and_scrape_public_listing") < src.index("_discover_redfin_url")

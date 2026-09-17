@@ -357,6 +357,14 @@ def scrape_listing_description(
         # 2026-08-02 and only 4 of 183 OneHome listings ever got evidence, all
         # in March. So try the path with a demonstrated success rate before the
         # one with a documented failure.
+        # Trulia/Zillow first: Redfin's page is a WAF challenge from any
+        # datacenter renderer, so the Redfin branch below can discover a
+        # verified URL and still come back with nothing.
+        result = _discover_and_scrape_public_listing(
+            address, town, state, zip_code, mls_id)
+        if result and result[0]:
+            return result
+
         discovered = _discover_redfin_url(address, town, state, zip_code, mls_id)
         if discovered:
             result = _scrape_static(discovered)
@@ -768,6 +776,119 @@ def _discover_redfin_url(
         )
         _trail("discovery: none verified")
     return None
+
+
+_TRULIA_URL_RE = re.compile(r"trulia\.com/(?:home|p)/[A-Za-z0-9._-]+", re.IGNORECASE)
+_ZILLOW_URL_RE = re.compile(r"zillow\.com/homedetails/[A-Za-z0-9._-]+/[0-9_zpid]+", re.IGNORECASE)
+_MLS_IN_TITLE_RE = re.compile(r"MLS\s*#\s*([0-9]{5,9})", re.IGNORECASE)
+
+
+def _mls_matches_page(html: str, mls_id: str | None) -> bool | None:
+    """Does this page's MLS number match the listing's?
+
+    Returns True/False when both are known, None when the comparison cannot be
+    made. This is the strongest verification available: Trulia puts
+    "MLS# 1052438" in its title, the MLS number is the one identifier both the
+    alert email and the listing page agree on exactly, and 243 of 245 blind
+    listings have one. An address slug can be ambiguous across town borders;
+    an MLS number cannot.
+    """
+    if not mls_id:
+        return None
+    m = _MLS_IN_TITLE_RE.search(html[:4000])
+    if not m:
+        return None
+    return m.group(1).strip() == str(mls_id).strip()
+
+
+_MD_IMAGE_RE = re.compile(
+    r"https://[^\s\)\"']*(?:zillowstatic|trulia\.com/pictures)[^\s\)\"']*\.(?:jpg|jpeg|webp|png)",
+    re.IGNORECASE,
+)
+
+
+def _description_from_markdown(markdown: str) -> str | None:
+    """Pull the listing prose out of Jina's markdown rendering.
+
+    The HTML extractors find nothing here: Jina returns markdown by default and
+    Trulia's own markup is class-soup, so the reliable signal is shape. Listing
+    prose is a long unbroken line that is not a nav list, a spec table, or an
+    image reference — every one of which is abundant on the page.
+    """
+    best = None
+    for raw in (markdown or "").split("\n"):
+        line = raw.strip()
+        if len(line) < 150 or line.count("](") > 2:
+            continue
+        if line[:1] in ("*", "|", "!", "#", "-", ">"):
+            continue
+        if "|" in line or line.lower().startswith(("skip main", "http")):
+            continue
+        if best is None or len(line) > len(best):
+            best = line
+    return best
+
+
+def _images_from_markdown(markdown: str, limit: int = 40) -> list[str]:
+    """Listing photos from the markdown, de-duplicated and capped."""
+    return list(dict.fromkeys(_MD_IMAGE_RE.findall(markdown or "")))[:limit]
+
+
+def _discover_and_scrape_public_listing(
+    address: str | None, town: str | None, state: str | None,
+    zip_code: str | None, mls_id: str | None = None,
+) -> tuple[str | None, list[str]]:
+    """Find a fetchable public listing page and scrape it.
+
+    Not Redfin. Redfin's property pages answer any datacenter-side renderer
+    with an AWS WAF "Human Verification" interstitial - 885 bytes, "Target URL
+    returned error 405" - whether fetched directly or through Jina. That wall
+    is why the Redfin discovery path shipped in #76 produced zero evidence in
+    production: discovery found and verified the right URL, and the page behind
+    it was a CAPTCHA. Nothing has gained a description since 2026-08-07.
+
+    Trulia and Zillow render fine through the same transport. Trulia is tried
+    first because it carries the full description AND the photo set; Zillow is
+    the fallback and carries description but no usable images.
+    """
+    if not address or not town:
+        return None, []
+    for site, url_re in (("trulia", _TRULIA_URL_RE), ("zillow", _ZILLOW_URL_RE)):
+        query = " ".join(
+            [address, town, state or "NY", str(zip_code or ""), site]
+        ).split()
+        body = _fetch_via_jina(
+            "https://lite.duckduckgo.com/lite/?q=" + "+".join(query))
+        if not body:
+            _trail(f"{site}: no search body")
+            continue
+        seen = list(dict.fromkeys(m.group(0) for m in url_re.finditer(body)))
+        _trail(f"{site}: {len(seen)} candidate(s)")
+        for candidate in seen:
+            full = candidate if candidate.startswith("http") else f"https://www.{candidate}"
+            if not _slug_matches_address(full.split(".com", 1)[1], address, town, zip_code):
+                continue
+            page = _fetch_via_jina(full)
+            if not page:
+                _trail(f"{site}: page fetch failed")
+                continue
+            mls_ok = _mls_matches_page(page, mls_id)
+            if mls_id and mls_ok is not True:
+                # These sites keep a page per ADDRESS, not per listing, so the
+                # same URL may serve a years-old sold record — 28 Argyle Place
+                # returns a 2022 sale whose title carries no MLS number at all.
+                # Its prose would be scored as this listing's evidence. When we
+                # know the MLS number, the page must state the same one;
+                # absent or different means decline.
+                _trail(f"{site}: MLS {'mismatch' if mls_ok is False else 'absent'}")
+                continue
+            desc = _description_from_markdown(page)
+            imgs = _images_from_markdown(page)
+            if desc or imgs:
+                _trail(f"{site}: ok {len(desc or '')}ch {len(imgs)} imgs")
+                return desc, imgs
+            _trail(f"{site}: page had no content")
+    return None, []
 
 
 def _try_redfin_fallback(
