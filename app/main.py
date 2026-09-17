@@ -508,6 +508,18 @@ def _job_health() -> dict:
     }
 
 
+def _scrape_transport_health() -> dict:
+    """Jina's key presence, pacing counters and throttle state.
+
+    key_configured is presence only, never the value — the same posture as the
+    ntfy token. It is here because "is JINA_API_KEY actually set in Fly?" was
+    unanswerable from outside the machine, and the answer decides whether the
+    backfill can run at all.
+    """
+    from app.parsers.onehome import jina_stats
+    return jina_stats()
+
+
 def _safe(fn):
     """Health is dashboard-polled; a broken sub-query reports None, not a 500."""
     try:
@@ -540,6 +552,10 @@ def health(request: Request):
         # that routine stop carrying a copy of the manage key in its prompt.
         "recent_ingest": _safe(db.ingest_summary),
         "jobs": _safe(_job_health),
+        # The scrape transport's own state. Without this, a throttled backfill
+        # is indistinguishable from a working one: jobs complete, failures stay
+        # low, and nothing says that every listing was skipped.
+        "scrape_transport": _safe(_scrape_transport_health),
     }
 
 

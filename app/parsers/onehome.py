@@ -19,6 +19,8 @@ import time
 from typing import NamedTuple
 from urllib.parse import quote, urljoin, urlparse
 
+import threading
+
 import httpx
 
 from app.config import settings
@@ -642,6 +644,47 @@ def last_scrape_trail() -> str:
     return " -> ".join(_LAST_TRAIL) if _LAST_TRAIL else "no stages recorded"
 
 
+# Pacing state for Jina. Anonymous r.jina.ai allows roughly 20 requests per
+# minute per visitor IP — which a Fly app shares with other tenants — and an
+# authenticated key raises that substantially.
+_JINA_MIN_INTERVAL_ANON = 3.2
+_JINA_MIN_INTERVAL_KEYED = 0.5
+_jina_lock = threading.Lock()
+_jina_last_at: float = 0.0
+
+# Counted so the pacing and the throttle are visible on /health rather than
+# inferred from a blindness number that moved the wrong way for ten days.
+_JINA_STATS = {"requests": 0, "throttled": 0, "skipped": 0}
+
+
+def jina_stats() -> dict:
+    return {**_JINA_STATS, "key_configured": bool(settings.jina_api_key),
+            "throttled_now": _JINA_THROTTLED}
+
+
+def note_throttled_skip() -> None:
+    _JINA_STATS["skipped"] += 1
+
+
+def _pace_jina() -> None:
+    """Wait until the next Jina request is due.
+
+    Each blind listing costs TWO Jina calls — one to search, one to fetch the
+    page it finds — so 264 listings is ~528 requests. Bursting those at the
+    drain's own pace exceeded the anonymous quota immediately and every
+    request after the first came back 429. Spread at the quota's rate the same
+    work takes about half an hour and completes.
+    """
+    interval = (_JINA_MIN_INTERVAL_KEYED if settings.jina_api_key
+                else _JINA_MIN_INTERVAL_ANON)
+    global _jina_last_at
+    with _jina_lock:
+        wait = interval - (time.monotonic() - _jina_last_at)
+        if _jina_last_at and wait > 0:
+            time.sleep(wait)
+        _jina_last_at = time.monotonic()
+
+
 def _fetch_via_jina(url: str) -> str | None:
     """Fetch a URL's text through Jina Reader, which requests from its own IPs.
 
@@ -649,7 +692,12 @@ def _fetch_via_jina(url: str) -> str | None:
     bot-blocks its autocomplete API from cloud IPs (403, verified), and
     reaching a search engine directly is unreliable from a datacenter, but
     Jina fetches server-side and returns the rendered result.
+
+    Paced: see _pace_jina. Without it the anonymous quota is spent in seconds
+    and the whole backfill fails.
     """
+    _pace_jina()
+    _JINA_STATS["requests"] += 1
     headers = {"Accept": "text/html"}
     if settings.jina_api_key:
         # Unauthenticated r.jina.ai is metered per visitor IP, which a Fly app
@@ -664,6 +712,7 @@ def _fetch_via_jina(url: str) -> str | None:
             if response.status_code in (429, 402):
                 global _JINA_THROTTLED
                 _JINA_THROTTLED = True
+                _JINA_STATS["throttled"] += 1
                 logger.warning(
                     "Jina returned %s — treating the transport as throttled for the "
                     "rest of this drain rather than spending every listing's retries "
