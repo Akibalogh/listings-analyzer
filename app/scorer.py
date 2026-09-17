@@ -119,17 +119,16 @@ def reconcile_score_arithmetic(result: ScoringResult, address: str = "") -> Scor
     their own sum, median +41). Never substitutes the sum: that would reprice
     the board using arithmetic that was never authoritative.
 
-    What it does do is refuse to call the result confident: a score that
-    contradicts its own published arithmetic is capped at medium confidence,
-    and the contradiction is stated in concerns where the dashboard shows it.
-    Structural, not a string match — two integers disagreeing.
+    What it does is state the contradiction in concerns, where the dashboard
+    shows it, and leave confidence alone — see the note below the log line.
+    Structural, not a string match: two integers disagreeing.
     """
     delta = score_breakdown_delta(result)
     if delta is None or abs(delta) <= ARITHMETIC_TOLERANCE:
         return result
     logger.info(
         "Score %d disagrees with its own breakdown (sums to %d, Δ%+d)%s — "
-        "keeping the score, capping confidence",
+        "keeping the score, flagging the itemisation",
         result.score, implied_score(result.soft_points), delta,
         f" ({address})" if address else "",
     )
@@ -139,10 +138,60 @@ def reconcile_score_arithmetic(result: ScoringResult, address: str = "") -> Scor
         f"(base {base_score()} + soft points). The score stands; treat the "
         "itemisation as unreliable."
     )
-    update = {"concerns": [*result.concerns, note]}
-    if result.confidence == "high":
-        update["confidence"] = "medium"
-    return result.model_copy(update=update)
+    # Deliberately does NOT touch confidence any more.
+    #
+    # It used to demote high->medium, and that conflated two unrelated things.
+    # Confidence answers "how well do we know this house" — it is what tells
+    # the buyer whether to trust the data in front of him. An arithmetic
+    # mismatch says something about the MODEL's bookkeeping, not about the
+    # house: 53 of the 81 fully-scraped listings were marked less certain
+    # while their data was complete and correct, which is precisely the "lots
+    # of score uncertain" complaint.
+    #
+    # The mismatch is not being hidden — it stays in concerns, where the
+    # dashboard shows it, and /scoring-integrity counts it. It simply stops
+    # masquerading as uncertainty about the property.
+    return result.model_copy(update={"concerns": [*result.concerns, note]})
+
+
+_CONFIDENCE_ORDER = ("low", "medium", "high")
+
+
+def cap_confidence_to_evidence(result: ScoringResult, listing_data: dict) -> ScoringResult:
+    """Confidence can be no higher than the evidence supports.
+
+    The other half of making confidence mean one thing. The prompt and the
+    criteria both say to report "low" when nothing was shown, but 41 listings
+    with no description and no images came back "medium" — non-compliance in
+    the dangerous direction, since those are the ones the buyer should trust
+    least.
+
+    Structural, not a string match: evidence_available is counted from the
+    stored images and description before the model is called.
+    """
+    # A MISSING evidence_available means "not stated", which is not the same as
+    # "nothing was found" — only the second justifies overriding the model.
+    # _build_listing_data always sets it, so in production the distinction only
+    # protects callers that build a payload by hand.
+    if not listing_data or "evidence_available" not in listing_data:
+        return result
+    evidence = listing_data.get("evidence_available") or {}
+    if evidence.get("images") or evidence.get("description"):
+        return result
+    if result.confidence == "low":
+        return result
+    note = (
+        "Confidence capped at low: no description and no images were available, "
+        "so everything beyond the listing metadata is unverified."
+    )
+    logger.info(
+        "Capping confidence %s -> low: no evidence available for %s",
+        result.confidence, (listing_data or {}).get("address", "?"),
+    )
+    return result.model_copy(update={
+        "confidence": "low",
+        "concerns": [*result.concerns, note],
+    })
 
 
 def _arithmetic_retry_note(result: ScoringResult) -> str:
@@ -1238,6 +1287,8 @@ def ai_score_listing(
                 result = reconcile_score_arithmetic(
                     result, listing_data.get("address", ""))
 
+        result = cap_confidence_to_evidence(result, listing_data)
+
         logger.info(
             f"AI evaluation: score={result.score}, verdict={result.verdict}, "
             f"confidence={result.confidence}"
@@ -1374,6 +1425,8 @@ def parse_batch_result(
         # accepts above), so a breach goes straight to the keep-score-cap-
         # confidence fallback.
         score_result = reconcile_score_arithmetic(score_result, address)
+        if listing_data is not None:
+            score_result = cap_confidence_to_evidence(score_result, listing_data)
         return score_result, score_result.reasoning
 
     except Exception as e:

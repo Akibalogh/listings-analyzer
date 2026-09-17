@@ -1872,15 +1872,18 @@ class TestScoreArithmeticContract:
         out = reconcile_score_arithmetic(self._result(72, {"a": 19}))
         assert out.score == 72
 
-    def test_a_breach_caps_confidence_at_medium(self):
+    def test_a_breach_leaves_confidence_alone(self):
+        """Superseded: this used to demote high->medium, which marked 53 of 81
+        fully-scraped listings uncertain over the model's bookkeeping rather
+        than anything about the house. See TestConfidenceMeansOneThing."""
         from app.scorer import reconcile_score_arithmetic
-        assert reconcile_score_arithmetic(self._result(99, {"a": 19})).confidence == "medium"
+        assert reconcile_score_arithmetic(self._result(99, {"a": 19})).confidence == "high"
 
-    def test_a_breach_never_raises_confidence(self):
-        """low stays low — the cap is a ceiling, not a target."""
+    def test_a_breach_never_changes_confidence_either_way(self):
         from app.scorer import reconcile_score_arithmetic
-        out = reconcile_score_arithmetic(self._result(99, {"a": 19}, confidence="low"))
-        assert out.confidence == "low"
+        for conf in ("low", "medium", "high"):
+            out = reconcile_score_arithmetic(self._result(99, {"a": 19}, confidence=conf))
+            assert out.confidence == conf, conf
 
     def test_a_breach_is_stated_in_concerns(self):
         from app.scorer import base_score, reconcile_score_arithmetic
@@ -1960,7 +1963,11 @@ class TestArithmeticRetryPath:
     def test_a_still_breaching_retry_falls_back_to_the_original(self):
         result, calls = self._run([self.BAD, self.BAD])
         assert calls == 2
-        assert result.score == self.BAD["score"] and result.confidence == "medium"
+        assert result.score == self.BAD["score"]
+        # Confidence is untouched by the arithmetic outcome — it reports what
+        # is known about the house, not whether the ledger balanced.
+        assert result.confidence == self.BAD["confidence"]
+        assert any("mismatch" in c.lower() for c in result.concerns)
 
     def test_a_consistent_response_is_not_re_asked(self):
         result, calls = self._run([self.GOOD])
@@ -1979,7 +1986,8 @@ class TestArithmeticRetryPath:
         item.result.message.content = [MagicMock()]
         item.result.message.content[0].text = _json.dumps(self.BAD)
         result, _ = parse_batch_result(item, {"address": "T"})
-        assert result.score == self.BAD["score"] and result.confidence == "medium"
+        assert result.score == self.BAD["score"]
+        assert result.confidence == self.BAD["confidence"]
         assert any("mismatch" in c.lower() for c in result.concerns)
 
 
@@ -2157,3 +2165,80 @@ class TestProposedV77CriteriaFile:
         text = self._text()
         assert "Missing data unknown (no floor plans or insufficient images): 0 pts" in text
         assert "absence of evidence is not evidence against the house" in text
+
+
+class TestConfidenceMeansOneThing:
+    """"Lots of score uncertain": 53 of the 81 fully-scraped listings were
+    marked less certain while their data was complete and correct, because an
+    arithmetic mismatch demoted them. Two unrelated questions had been folded
+    into one field.
+
+    Confidence answers "how well do we know this house" — it is what tells the
+    buyer whether to trust what is in front of him. Whether the model's ledger
+    adds up says something about the model's bookkeeping, not the property.
+    """
+
+    @staticmethod
+    def _result(score, soft, confidence="high"):
+        from app.models import ScoringResult
+        return ScoringResult(score=score, verdict="Worth Touring",
+                             soft_points=soft, confidence=confidence)
+
+    def test_an_arithmetic_breach_no_longer_demotes_confidence(self):
+        from app.scorer import reconcile_score_arithmetic
+        out = reconcile_score_arithmetic(self._result(99, {"a": 19}))
+        assert out.confidence == "high"
+
+    def test_the_breach_is_still_reported(self):
+        """Not hidden — it stays in concerns and /scoring-integrity counts it."""
+        from app.scorer import reconcile_score_arithmetic
+        out = reconcile_score_arithmetic(self._result(99, {"a": 19}))
+        assert any("mismatch" in c.lower() for c in out.concerns)
+
+    def test_no_evidence_caps_confidence_at_low(self):
+        """41 listings with nothing scraped came back "medium" — non-compliance
+        in the dangerous direction, since those are the ones to trust least."""
+        from app.scorer import cap_confidence_to_evidence
+        out = cap_confidence_to_evidence(
+            self._result(72, {"a": 5}, confidence="medium"),
+            {"evidence_available": {"images": 0, "description": False}})
+        assert out.confidence == "low"
+        assert any("no description and no images" in c for c in out.concerns)
+
+    def test_images_alone_are_evidence(self):
+        from app.scorer import cap_confidence_to_evidence
+        out = cap_confidence_to_evidence(
+            self._result(72, {"a": 5}, confidence="high"),
+            {"evidence_available": {"images": 12, "description": False}})
+        assert out.confidence == "high"
+
+    def test_a_description_alone_is_evidence(self):
+        from app.scorer import cap_confidence_to_evidence
+        out = cap_confidence_to_evidence(
+            self._result(72, {"a": 5}, confidence="high"),
+            {"evidence_available": {"images": 0, "description": True}})
+        assert out.confidence == "high"
+
+    def test_already_low_is_left_alone(self):
+        """No duplicate concern on a listing that reported low correctly."""
+        from app.scorer import cap_confidence_to_evidence
+        out = cap_confidence_to_evidence(
+            self._result(72, {"a": 5}, confidence="low"),
+            {"evidence_available": {"images": 0, "description": False}})
+        assert out.confidence == "low" and out.concerns == []
+
+    def test_a_well_evidenced_breaching_listing_keeps_high(self):
+        """The exact population that was being mislabelled: complete data, a
+        ledger that does not add up."""
+        from app.scorer import cap_confidence_to_evidence, reconcile_score_arithmetic
+        r = reconcile_score_arithmetic(self._result(99, {"a": 19}))
+        r = cap_confidence_to_evidence(
+            r, {"evidence_available": {"images": 30, "description": True}})
+        assert r.confidence == "high"
+        assert any("mismatch" in c.lower() for c in r.concerns)
+
+    def test_both_paths_apply_the_evidence_cap(self):
+        import inspect
+        from app.scorer import ai_score_listing, parse_batch_result
+        for fn in (ai_score_listing, parse_batch_result):
+            assert "cap_confidence_to_evidence" in inspect.getsource(fn)
