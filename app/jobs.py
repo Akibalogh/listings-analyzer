@@ -260,6 +260,13 @@ def _handle_scrape_desc(listing: dict) -> None:
     # 'done' row a full budget. Returning leaves the data gap in place, so the
     # next scan re-enqueues this listing with its retries intact.
     if transport_throttled():
+        # Counted, because this skip was invisible for ten days: it kept the
+        # retry budget (the point) but also removed the only signal that 245
+        # listings were getting nothing. scrape_desc failures fell from 189 to
+        # 15 while blindness GREW from 189 to 264, and the dashboard looked
+        # quieter while the problem got worse.
+        from app.parsers.onehome import note_throttled_skip
+        note_throttled_skip()
         logger.info(
             f"Skipping scrape for listing {listing['id']} — transport throttled "
             "this drain; the gap scan will re-enqueue it"
