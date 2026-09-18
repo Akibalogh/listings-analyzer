@@ -1322,3 +1322,68 @@ class TestEvidenceIsOnlyChasedForReachableHomes:
         import inspect
         src = inspect.getsource(jobs._wants_evidence)
         assert "meta" in src
+
+
+class TestTheBestListingsAreEnrichedFirst:
+    """Scraping is rate-limited, so queue order decides what is ready when the
+    buyer opens the dashboard. It was purely newest-first, which left the top
+    of the board waiting behind listings nobody will look at — 110 Cypress Ln,
+    the highest-scoring live home at 81, still had no description while lower
+    scorers ahead of it were enriched.
+    """
+
+    def _scored(self, address, score):
+        lid = _make_listing(address=address, listing_status="Active")
+        if not db.get_active_criteria():
+            db.save_criteria("c", created_by="t")
+        db.update_score(
+            listing_id=lid,
+            score=ScoringResult(score=score, verdict="Worth Touring", evaluation_method="ai"),
+            method="ai", criteria_version=db.get_active_criteria()["version"],
+            reasoning="r",
+        )
+        return lid
+
+    def test_higher_scores_are_claimed_first(self, temp_db):
+        low = self._scored("1 Low St", 42)
+        high = self._scored("2 High St", 81)
+        db.enqueue_jobs(low, ["scrape_desc"])
+        db.enqueue_jobs(high, ["scrape_desc"])
+        claimed = db.claim_pending_jobs(limit=2)
+        assert [c["listing_id"] for c in claimed] == [high, low]
+
+    def test_order_beats_recency(self, temp_db):
+        """The newer listing is the lower scorer — score must still win."""
+        high = self._scored("1 High St", 81)
+        low = self._scored("2 Newer Low St", 42)
+        assert low > high  # newer id
+        db.enqueue_jobs(low, ["scrape_desc"])
+        db.enqueue_jobs(high, ["scrape_desc"])
+        assert db.claim_pending_jobs(limit=1)[0]["listing_id"] == high
+
+    def test_an_unscored_listing_is_not_sent_to_the_back(self, temp_db):
+        """A brand-new home has no score yet and is exactly what the buyer
+        wants to see, so it sorts as if it were mid-board."""
+        low = self._scored("1 Low St", 20)
+        fresh = _make_listing(address="2 Fresh St", listing_status="New Listing")
+        db.enqueue_jobs(low, ["scrape_desc"])
+        db.enqueue_jobs(fresh, ["scrape_desc"])
+        assert db.claim_pending_jobs(limit=1)[0]["listing_id"] == fresh
+
+    def test_a_top_listing_still_yields_to_nothing_else(self, temp_db):
+        """Ordering must not break the score-deferral rule."""
+        high = self._scored("1 High St", 81)
+        db.enqueue_jobs(high, ["commute", "score"])
+        claimed = db.claim_pending_jobs(task_order=jobs.TASK_ORDER)
+        assert [c["task_type"] for c in claimed] == ["commute"]
+
+    def test_a_placeholder_score_does_not_bury_a_new_listing(self, temp_db):
+        """Every listing is saved with a placeholder score of 0. Sorting on it
+        would put brand-new homes last — the opposite of what the buyer wants —
+        so only a real evaluation counts."""
+        low = self._scored("1 Low St", 20)
+        fresh = _make_listing(address="2 Fresh St", listing_status="New Listing")
+        assert db.get_all_score_metadata()[fresh]["evaluation_method"] not in ("ai", "deterministic-gate")
+        db.enqueue_jobs(low, ["scrape_desc"])
+        db.enqueue_jobs(fresh, ["scrape_desc"])
+        assert db.claim_pending_jobs(limit=1)[0]["listing_id"] == fresh
