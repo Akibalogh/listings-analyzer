@@ -1156,6 +1156,30 @@ class TestFailedJobReasonsAreRedacted:
 
     def test_errors_are_truncated(self, temp_db):
         assert len(db.redact_error("x" * 500)) <= 160
+    def test_scrape_failures_group_instead_of_vanishing(self, temp_db):
+        """Each scrape error quotes its own listing URL, so 179 identical
+        failures counted 1 apiece, sorted below a handful of count-8 commute
+        errors, and fell off the end of the list — leaving "no scrape_desc
+        reason", which reads as "no scrape_desc failures"."""
+        for token in ("aaa", "bbb", "ccc"):
+            self._fail("scrape_desc",
+                       f"scrape returned no description or images for "
+                       f"https://portal.onehome.com/en-US/listing?token={token} "
+                       f"[trulia: MLS absent]")
+        for i in range(2):
+            self._fail("commute", "commute lookup returned nothing")
+        reasons = db.failed_job_reasons()
+        top = reasons[0]
+        assert top["task"] == "scrape_desc" and top["count"] == 3
+        assert "MLS absent" in top["error"]
+
+    def test_the_host_and_trail_survive_generalisation(self, temp_db):
+        """The host says which source failed and the trail says which stage —
+        only the per-listing path is dropped."""
+        out = db._generalize_error(
+            "failed for https://portal.onehome.com/en-US/listing?token=x [jina HTTP 429]")
+        assert "portal.onehome.com" in out and "jina HTTP 429" in out
+
 
     def test_the_stage_trail_survives_truncation(self, temp_db):
         """The trail is appended at the END of a scrape error and its last
