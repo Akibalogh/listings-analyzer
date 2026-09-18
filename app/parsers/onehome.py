@@ -349,6 +349,19 @@ def scrape_listing_description(
     _LAST_TRAIL.clear()
     url_lower = url.lower()
 
+    # Trulia/Zillow first, for EVERY source. This used to sit inside the
+    # OneHome branch only, so the 19 listings whose URL is a Redfin link went
+    # straight down the Redfin path into the WAF and failed with an empty
+    # trail — including 110 Cypress Ln, the highest-scoring live home on the
+    # board. Redfin's page is unreachable from a datacenter whether we arrive
+    # at it from a OneHome listing or from a Redfin one, so the source of the
+    # URL was never the thing that mattered.
+    if address and town:
+        result = _discover_and_scrape_public_listing(
+            address, town, state, zip_code, mls_id)
+        if result and result[0]:
+            return result
+
     # --- OneHome URLs: Angular SPA, static + Jina always return empty shell ---
     if "onehome.com" in url_lower:
         logger.info(f"OneHome URL detected, no page to scrape: {url[:80]}")
@@ -357,14 +370,6 @@ def scrape_listing_description(
         # 2026-08-02 and only 4 of 183 OneHome listings ever got evidence, all
         # in March. So try the path with a demonstrated success rate before the
         # one with a documented failure.
-        # Trulia/Zillow first: Redfin's page is a WAF challenge from any
-        # datacenter renderer, so the Redfin branch below can discover a
-        # verified URL and still come back with nothing.
-        result = _discover_and_scrape_public_listing(
-            address, town, state, zip_code, mls_id)
-        if result and result[0]:
-            return result
-
         discovered = _discover_redfin_url(address, town, state, zip_code, mls_id)
         if discovered:
             result = _scrape_static(discovered)

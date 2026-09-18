@@ -3012,3 +3012,63 @@ class TestPublicListingPageFallback:
         from app.parsers.onehome import scrape_listing_description
         src = inspect.getsource(scrape_listing_description)
         assert src.index("_discover_and_scrape_public_listing") < src.index("_discover_redfin_url")
+
+
+class TestEveryUrlTypeUsesTheFetchableSource:
+    """The Trulia/Zillow path was wired inside the OneHome branch only, so the
+    19 listings whose URL is a Redfin link went straight down the Redfin path
+    into the AWS WAF and failed with an EMPTY stage trail — including
+    110 Cypress Ln, the highest-scoring live home on the board at 81.
+
+    The trail is what exposed it: "[no stages recorded]" means the public-page
+    path was never entered. Redfin's page is unreachable from a datacenter
+    whether we arrive from a OneHome listing or a Redfin one, so the source of
+    the URL was never the thing that mattered.
+    """
+
+    MD = (
+        "Title: 110 Cypress Ln, Briarcliff Manor, NY 10510 | MLS# 900111 | Trulia\n"
+        "Markdown Content:\n"
+        + "A handsome center-hall colonial set well back from the road on a level "
+          "acre, with a renovated kitchen, generous principal rooms and a level "
+          "rear yard framed by mature plantings.\n"
+        + "![Image 1](https://www.trulia.com/pictures/thumbs_5/zillowstatic/fp/x-full.webp)\n"
+    )
+
+    def _scrape(self, url):
+        from unittest.mock import patch
+        import app.parsers.onehome as O
+        search = "https://www.trulia.com/home/110-cypress-ln-briarcliff-manor-ny-10510-1"
+        with patch.object(O, "_fetch_via_jina", side_effect=[search, self.MD]):
+            return O.scrape_listing_description(
+                url, address="110 Cypress Ln", town="Briarcliff Manor",
+                state="NY", zip_code="10510", mls_id="900111")
+
+    def test_a_redfin_url_reaches_the_public_page_path(self):
+        desc, imgs = self._scrape(
+            "https://www.redfin.com/NY/Briarcliff-Manor/110-Cypress-Ln-10510/home/1")
+        assert desc.startswith("A handsome center-hall") and len(imgs) == 1
+
+    def test_a_onehome_url_still_does(self):
+        desc, imgs = self._scrape("https://portal.onehome.com/en-US/listing?token=x")
+        assert desc.startswith("A handsome center-hall")
+
+    def test_an_unknown_source_url_does_too(self):
+        desc, _ = self._scrape("https://www.compass.com/listing/110-cypress-ln/123")
+        assert desc.startswith("A handsome center-hall")
+
+    def test_the_trail_records_the_attempt(self):
+        """An empty trail was the symptom — it must never be empty again when
+        an address is known."""
+        from app.parsers.onehome import last_scrape_trail
+        self._scrape("https://www.redfin.com/NY/Briarcliff-Manor/110-Cypress-Ln-10510/home/1")
+        assert "no stages recorded" not in last_scrape_trail()
+
+    def test_it_is_skipped_without_an_address(self):
+        """Discovery is address-based; nothing to search on."""
+        from unittest.mock import patch
+        import app.parsers.onehome as O
+        with patch.object(O, "_fetch_via_jina") as fetch, \
+             patch.object(O, "_scrape_static", return_value=("d", [])):
+            O.scrape_listing_description("https://www.redfin.com/NY/X/1/home/1")
+            assert fetch.call_count == 0
