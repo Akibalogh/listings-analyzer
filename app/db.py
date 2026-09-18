@@ -1659,7 +1659,22 @@ def claim_pending_jobs(
                      -- scrape kept failing.)
                      OR (j2.status = 'pending' AND j2.attempts = 0))
             ))
-            ORDER BY listing_id DESC, id LIMIT {ph}""",
+            -- Best-scoring listings first, then newest. The queue used to be
+            -- purely newest-first, which left the top of the board waiting
+            -- behind listings nobody will look at: 110 Cypress Ln, the
+            -- highest-scoring live home at 81, still had no description while
+            -- lower scorers ahead of it were enriched. Scraping is
+            -- rate-limited, so the order decides what is ready when the buyer
+            -- opens the dashboard. COALESCE keeps unscored listings in the
+            -- mix rather than last. That fallback has to ignore the PLACEHOLDER
+            -- score every listing is saved with, which is 0: sorting on it
+            -- would bury brand-new homes at the back of the queue, and those
+            -- are exactly what the buyer wants to see.
+            ORDER BY COALESCE((
+                SELECT CASE WHEN s.evaluation_method IN ('ai', 'deterministic-gate')
+                            THEN s.score ELSE NULL END
+                FROM scores s WHERE s.listing_id = jobs.listing_id
+            ), 60) DESC, listing_id DESC, id LIMIT {ph}""",
             (JOB_MAX_ATTEMPTS, *exclude, limit),
         )
         rows = cur.fetchall()
