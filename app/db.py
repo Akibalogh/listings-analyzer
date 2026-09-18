@@ -1847,6 +1847,24 @@ def redact_error(text: str | None, limit: int = 160) -> str:
     return cleaned[:limit]
 
 
+_URL_IN_ERROR = re.compile(r"https?://([^/\s]+)\S*")
+
+
+def _generalize_error(text: str | None) -> str:
+    """Reduce an error to its shape so like failures group together.
+
+    Scrape errors quote the listing URL they failed on, which is unique per
+    listing — so 179 identical failures counted 1 apiece, sorted below a
+    handful of count-8 commute errors, and fell off the end of the list. The
+    scrape failures were invisible for the whole of this debugging session
+    while I read "no scrape_desc reason" as "no scrape_desc failures".
+
+    The host still identifies the source, and the stage trail in brackets is
+    the diagnostic part; only the per-listing path goes.
+    """
+    return _URL_IN_ERROR.sub(lambda m: f"{m.group(1)}/...", str(text or ""))
+
+
 def failed_job_reasons(limit: int = 6) -> list[dict]:
     """The distinct reasons jobs are failing, commonest first.
 
@@ -1867,7 +1885,7 @@ def failed_job_reasons(limit: int = 6) -> list[dict]:
         # a scrape error, and that last stage is the diagnostic part —
         # "discovery: none verified" truncated to "discovery: none" says the
         # opposite of what happened.
-        key = (task_type or "?", redact_error(err, limit=240))
+        key = (task_type or "?", redact_error(_generalize_error(err), limit=240))
         tally[key] = tally.get(key, 0) + 1
     ordered = sorted(tally.items(), key=lambda kv: -kv[1])[:limit]
     return [{"task": t, "count": n, "error": e} for (t, e), n in ordered]
