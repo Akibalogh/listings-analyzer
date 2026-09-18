@@ -42,6 +42,32 @@ from app.listing_status import is_unknown
 from app.scorer import deterministic_gate, score_input_fingerprint
 
 
+def _wants_evidence(listing: dict, meta: dict | None = None) -> bool:
+    """Is this a home the buyer could still go and see?
+
+    Scraping is rate-limited and every call spent on a sold house is a call
+    the live ones do not get. A Reject cannot be un-rejected by prose, and an
+    off-market home has no active listing page to find. If either changes —
+    a status correction, a re-listing — the gap scan picks it up on the next
+    pass, because this is evaluated per scan and not stored.
+    """
+    from app.listing_status import is_live, is_unknown
+    status = listing.get("listing_status")
+    # Definitively off-market: no active page exists to find.
+    if not is_live(status) and not is_unknown(status):
+        return False
+    # A real Reject - gated on sold, commute, price, size - cannot be undone by
+    # prose. The verdict comes from score_meta because get_listing_by_id does
+    # not join the scores table, and the evaluation_method check matters: every
+    # listing is saved with a PLACEHOLDER Reject before it is scored, so
+    # trusting the verdict alone would refuse to scrape anything new.
+    m = meta or {}
+    if (m.get("verdict") == "Reject"
+            and m.get("evaluation_method") in ("ai", "deterministic-gate")):
+        return False
+    return True
+
+
 def _gate_view(listing: dict) -> dict:
     """The raw fields the deterministic gate reads, straight off the DB row.
 
@@ -164,8 +190,19 @@ def enqueue_missing(force: bool = False) -> dict:
         listing = db.get_listing_by_id(lid)
         if not listing:
             continue
+        meta = score_meta.get(lid)
         tasks = []
-        if not listing.get("description") or not _has_images(listing):
+        # Only chase evidence for a home that can still be toured. A sold or
+        # rejected listing needs no description: nobody will read it, and the
+        # scrape is the scarcest thing in the pipeline — an unfindable listing
+        # costs ~5 rate-limited Jina calls (two sites, search + page, then the
+        # Redfin discovery) before it gives up, and off-market homes have no
+        # active page to find, so they fail every time. 173 of 216 blind
+        # listings were Rejects or off-market and were consuming the budget
+        # that the 43 live ones needed.
+        if _wants_evidence(listing, meta) and (
+            not listing.get("description") or not _has_images(listing)
+        ):
             tasks.append("scrape_desc")
         # Core fields only — year_built/list_date are often unpublished, and
         # re-scanning for them every tick would refetch pages for nothing
@@ -193,7 +230,6 @@ def enqueue_missing(force: bool = False) -> dict:
         # A fingerprint of the scored fields states the real condition. Enrichment
         # that lands changes the fingerprint and earns its rescore; a gap that
         # cannot be filled changes nothing and gets nothing.
-        meta = score_meta.get(lid)
         # A stored verdict that contradicts the code gate also forces a rescore,
         # fingerprint match or not. This is how a WIDENED gate reaches listings
         # scored before it existed: the five Sold houses the v76 rescore ranked

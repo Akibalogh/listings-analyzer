@@ -1248,3 +1248,77 @@ class TestAThrottleDoesNotBurnEveryListingsRetries:
         monkeypatch.setattr(onehome, "_JINA_THROTTLED", True)
         jobs.drain()
         assert onehome.transport_throttled() is False
+
+
+class TestEvidenceIsOnlyChasedForReachableHomes:
+    """Scraping is the scarcest thing in the pipeline: rate-limited, and an
+    unfindable listing costs ~5 Jina calls (two sites, search + page, then the
+    Redfin discovery) before giving up. 173 of 216 blind listings were Rejects
+    or off-market — they have no active page to find, so they failed every scan
+    while consuming the budget the 43 live ones needed.
+    """
+
+    def _listing(self, status, verdict, score=72):
+        lid = _make_listing(address=f"{status}-{verdict} St", listing_status=status)
+        db.save_criteria("c", created_by="t") if not db.get_active_criteria() else None
+        version = db.get_active_criteria()["version"]
+        db.update_score(
+            listing_id=lid,
+            score=ScoringResult(score=score, verdict=verdict, evaluation_method="ai"),
+            method="ai", criteria_version=version, reasoning="r",
+            input_fingerprint=score_input_fingerprint(db.get_listing_by_id(lid)),
+        )
+        return lid
+
+    def test_a_live_listing_is_scraped(self, temp_db):
+        self._listing("Active", "Worth Touring")
+        assert jobs.enqueue_missing()["scrape_desc"] == 1
+
+    def test_a_sold_listing_is_not(self, temp_db):
+        self._listing("Sold", "Reject", score=0)
+        assert jobs.enqueue_missing()["scrape_desc"] == 0
+
+    def test_a_live_reject_is_not(self, temp_db):
+        """A commute or price Reject cannot be un-rejected by prose."""
+        self._listing("Active", "Reject", score=0)
+        assert jobs.enqueue_missing()["scrape_desc"] == 0
+
+    def test_a_brand_new_unscored_listing_is_still_scraped(self, temp_db):
+        """Every listing is saved with a PLACEHOLDER Reject before it is
+        scored. Trusting the verdict alone would refuse to scrape anything new
+        — which is the whole pipeline."""
+        _make_listing(address="1 Brand New St", listing_status="New Listing")
+        assert jobs.enqueue_missing()["scrape_desc"] == 1
+
+    def test_an_unknown_status_listing_is_still_scraped(self, temp_db):
+        """Unknown is not off-market; it may well be live, and the evidence is
+        what the status job and the scorer both need."""
+        _make_listing(address="2 Unknown St", listing_status=None)
+        assert jobs.enqueue_missing()["scrape_desc"] == 1
+
+    def test_a_live_low_priority_listing_still_is(self, temp_db):
+        """Not a Reject — the buyer may still want to look at it."""
+        self._listing("Active", "Low Priority", score=45)
+        assert jobs.enqueue_missing()["scrape_desc"] == 1
+
+    def test_pending_is_not_scraped(self, temp_db):
+        self._listing("Pending", "Worth Touring")
+        assert jobs.enqueue_missing()["scrape_desc"] == 0
+
+    def test_it_reverses_when_a_listing_comes_back_on_market(self, temp_db):
+        """Evaluated per scan and never stored, so a status correction or a
+        re-listing is picked up on the next pass."""
+        lid = self._listing("Sold", "Worth Touring")
+        assert jobs.enqueue_missing()["scrape_desc"] == 0
+        with db.get_connection() as conn:
+            conn.cursor().execute(
+                f"UPDATE listings SET listing_status = 'Active' WHERE id = {db._placeholder()}",
+                (lid,))
+        assert jobs.enqueue_missing()["scrape_desc"] == 1
+
+    def test_the_verdict_comes_from_score_metadata(self, temp_db):
+        """get_listing_by_id does not join scores, so reading listing["verdict"]
+        alone would silently never match."""
+        import inspect
+        src = inspect.getsource(jobs._wants_evidence)
+        assert "meta" in src
