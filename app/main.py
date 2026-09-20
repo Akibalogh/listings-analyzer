@@ -160,11 +160,17 @@ _EMPTY_VALUES = (None, "", "[]", "null", "{}")
 def _is_enrichable(listing: dict) -> bool:
     """Whether the app promises to fill this listing's gaps.
 
-    Exactly the population jobs._wants_evidence() will spend a scrape on. A
-    sold house is not a data gap, it is a closed file — and 230 of them
-    averaged into the headline is why "62% data" kept coming back as a
+    The same predicate jobs._wants_evidence() uses to decide whether to spend
+    a scrape. A sold house is not a data gap, it is a closed file — and 230 of
+    them averaged into the headline is why "62% data" kept coming back as a
     complaint that something was broken. Nothing was: the number was measuring
     work the app had correctly decided not to do.
+
+    Narrower than what the app actually attempts: enqueue_missing() gates only
+    scrape_desc on _wants_evidence, so stats, commute, schools and status are
+    still enqueued for closed files. That is a separate thing to fix (it is
+    also where most of the failed commute jobs come from); this metric reports
+    the homes the buyer can act on, which is the question being asked.
     """
     status = listing.get("listing_status")
     if not is_live(status) and not is_unknown(status):
@@ -175,9 +181,12 @@ def _is_enrichable(listing: dict) -> bool:
     )
 
 
-def data_quality_report() -> dict:
+def data_quality_report(listings: list[dict] | None = None) -> dict:
     """Weighted completeness over the listings the app is trying to enrich."""
-    population = [l for l in db.get_all_listings() if _is_enrichable(l)]
+    population = [
+        l for l in (db.get_all_listings() if listings is None else listings)
+        if _is_enrichable(l)
+    ]
     if not population:
         return {"pct": 100.0, "listings": 0, "by_field": {}}
 
@@ -741,7 +750,7 @@ def list_listings():
     return {
         "count": len(listings),
         "listings": listings,
-        "data_quality": data_quality_report(),
+        "data_quality": data_quality_report(listings),
     }
 
 

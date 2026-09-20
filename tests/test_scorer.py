@@ -2262,11 +2262,52 @@ class TestConfidenceMeansOneThing:
         assert r.confidence == "high"
         assert any("derived" in c.lower() for c in r.concerns)
 
-    def test_both_paths_apply_the_evidence_cap(self):
+    def test_every_ai_path_runs_the_same_post_processing(self):
+        """Three call sites, one pipeline. The JSON-retry path had grown to
+        skip all of it — reject validation, ledger derivation and the evidence
+        cap — so a first malformed response followed by a good one stored the
+        model's own number with nothing checked."""
         import inspect
         from app.scorer import ai_score_listing, parse_batch_result
-        for fn in (ai_score_listing, parse_batch_result):
-            assert "cap_confidence_to_evidence" in inspect.getsource(fn)
+        source = inspect.getsource(ai_score_listing)
+        assert source.count("finalize_ai_result") == 2, "first attempt and retry"
+        assert "finalize_ai_result" in inspect.getsource(parse_batch_result)
+
+    def test_the_pipeline_covers_all_three_steps(self):
+        import inspect
+        from app.scorer import finalize_ai_result
+        source = inspect.getsource(finalize_ai_result)
+        for step in ("invalid_reject", "derive_score_from_ledger",
+                     "cap_confidence_to_evidence"):
+            assert step in source, step
+
+    def test_a_retried_response_is_derived_not_taken_raw(self):
+        """The regression this path had: retry succeeds, score stored raw."""
+        import json as _json
+        from unittest.mock import MagicMock, patch
+        from app.config import settings as real_settings
+        from app.scorer import ai_score_listing, base_score
+        good = {"score": base_score() + 42, "verdict": "Worth Touring",
+                "hard_results": [], "soft_points": {"a": 10}, "concerns": [],
+                "confidence": "high", "reasoning": "r", "property_summary": "p"}
+        broken = MagicMock()
+        broken.content = [MagicMock()]
+        broken.content[0].text = "not json at all"
+        ok = MagicMock()
+        ok.content = [MagicMock()]
+        ok.content[0].text = _json.dumps(good)
+        with patch("app.scorer.settings") as ms:
+            ms.anthropic_api_key = "sk-test"
+            ms.ai_eval_model = "m"
+            ms.score_base_points = real_settings.score_base_points
+            with patch("app.scorer._build_user_message", return_value=[]), \
+                 patch("app.scorer._build_system_prompt", return_value=[]):
+                client = MagicMock()
+                client.messages.create.side_effect = [broken, ok]
+                with patch("app.scorer.anthropic.Anthropic", return_value=client):
+                    result, _ = ai_score_listing({"address": "T"}, "C")
+        assert result.score == base_score() + 10
+        assert result.reported_score == good["score"]
 
 
 class TestDeterministicLedgerEntriesArePinned:
@@ -2343,11 +2384,39 @@ class TestDeterministicLedgerEntriesArePinned:
             self._listing(commute=98))
         assert out.soft_points["station_drive_penalty"] == -4
 
-    def test_an_unknown_commute_leaves_the_model_s_entry(self):
+    def test_an_unknown_commute_costs_nothing_like_an_unranked_school(self):
+        """Both pins follow the criteria's standing rule — missing data never
+        deducts — and they follow it the same way. Zeroing schools on a null
+        percentile while leaving the model's commute guess in place was two
+        rules for one situation."""
         from app.scorer import pin_deterministic_ledger_entries
         out = pin_deterministic_ledger_entries(
             self._result({"commute_curve": -5}), self._listing())
-        assert out.soft_points["commute_curve"] == -5
+        assert out.soft_points["commute_curve"] == 0
+
+    def test_an_override_is_stated_in_concerns_not_just_logged(self):
+        """The buyer audits the ledger now. Code-written values under
+        model-written keys, with nothing saying so, is a worse kind of opaque
+        than the number this replaced."""
+        from app.scorer import pin_deterministic_ledger_entries
+        out = pin_deterministic_ledger_entries(
+            self._result({"school_district": -10}), self._listing(percentile=27))
+        assert any("overriding the model" in c for c in out.concerns)
+        assert any("-10 -> -30" in c for c in out.concerns)
+
+    def test_an_unchanged_ledger_gets_no_concern(self):
+        from app.scorer import pin_deterministic_ledger_entries
+        out = pin_deterministic_ledger_entries(
+            self._result({"school_district": -30}), self._listing(percentile=27))
+        assert out.concerns == []
+
+    def test_the_parking_note_is_not_the_commute_curve(self):
+        from app.scorer import pin_deterministic_ledger_entries
+        out = pin_deterministic_ledger_entries(
+            self._result({"commute_curve": -2, "commute_parking_buffer_note": 0}),
+            self._listing(commute=98))
+        assert out.soft_points["commute_parking_buffer_note"] == 0
+        assert out.soft_points["commute_curve"] == -8
 
     def test_a_missing_entry_is_never_invented(self):
         """An absent line means the model folded the factor in somewhere
@@ -2404,3 +2473,26 @@ class TestProposedV78CriteriaFile:
         lift 47 homes across the alert threshold and rank nothing."""
         text = self._text()
         assert "no penalty and no bonus" in text
+
+    def test_the_pinned_bands_block_matches_the_code(self):
+        """The pin reverts whatever the model wrote, so prose that disagrees
+        with _SCHOOL_BANDS/_COMMUTE_BANDS is not a softer weight — it is a
+        number that does nothing. /health has to say so."""
+        from app.scorer import hard_gate_drift
+        checks = hard_gate_drift(self._text())["checks"]
+        assert checks["school_bands"]["in_sync"] is True
+        assert checks["commute_bands"]["in_sync"] is True
+
+    def test_a_moved_band_is_flagged(self):
+        from app.scorer import hard_gate_drift
+        text = self._text().replace("school: 95:+18, 80:+8, 50:-10, 0:-30",
+                                    "school: 95:+18, 80:+8, 50:-15, 0:-30")
+        assert "school_bands" in hard_gate_drift(text)["drifted"]
+
+    def test_criteria_with_no_pinned_block_count_as_in_sync(self):
+        """Same rule as every other threshold: dropping the wording should
+        raise a parser warning, not silently flip enforcement."""
+        from app.scorer import hard_gate_drift
+        drift = hard_gate_drift("Base score: 50")
+        assert drift["checks"]["school_bands"]["criteria"] is None
+        assert "school_bands" not in drift["drifted"]

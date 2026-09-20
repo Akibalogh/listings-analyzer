@@ -673,3 +673,34 @@ class TestStreetNamesAreNotRoomCounts:
             )
             assert listing.bedrooms == beds, text
             assert listing.bathrooms == baths, text
+
+    def test_a_large_but_real_room_count_survives(self):
+        """139 Scarborough Rd has 14 bedrooms in 15,000 sqft. A flat
+        plausibility cap would erase it, which is the mistake the DB repair
+        deliberately avoids — so the parser uses the same street-number rule."""
+        listing = self._one(
+            "139 Scarborough Rd\nBriarcliff Manor, New York 10510\n$2,000,000\n"
+            "14 bd, 7 ba, 15,000 sqft\nMLS #123461\n"
+        )
+        assert listing.bedrooms == 14
+        assert listing.bathrooms == 7
+
+    def test_a_small_count_matching_the_street_number_is_kept(self):
+        """"4 bd" at "4 Bianca Way" is a real four-bedroom house, and
+        production has that exact listing. Matching on the street number alone
+        would erase it, so the number must ALSO be too large to be a room
+        count before it is treated as a parse artifact."""
+        listing = self._one(
+            "4 Bianca Way\nAmawalk, New York 10501\n$1,500,000\n"
+            "4 bd, 3 ba\nMLS #123462\n"
+        )
+        assert listing.bedrooms == 4
+        assert listing.bathrooms == 3
+
+    def test_an_absurd_count_is_dropped_even_without_a_street_match(self):
+        listing = self._one(
+            "7 Sample St\nArmonk, New York 10504\n$1,500,000\n"
+            "80 bd, 3 ba\nMLS #123463\n"
+        )
+        assert listing.bedrooms is None
+        assert listing.bathrooms == 3

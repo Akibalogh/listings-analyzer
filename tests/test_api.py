@@ -2681,3 +2681,29 @@ class TestFailureReasonsReconcile:
         from app.db import _generalize_error
         assert _generalize_error("x https://a.com/1 [discovery: none verified]") != \
             _generalize_error("x https://a.com/2 [trulia: MLS absent]")
+
+
+class TestClampedAndUnreadableLedgersReportHonestly:
+    def test_the_concern_shows_the_raw_sum_not_the_clamped_one(self):
+        """A ledger summing to -60 read "50 base -50 adjustments = 0", which
+        is arithmetic that does not work — on the one number meant to be
+        auditable."""
+        from app.models import ScoringResult
+        from app.scorer import derive_score_from_ledger
+        out = derive_score_from_ledger(ScoringResult(
+            score=52, verdict="Low Priority",
+            soft_points={"school_district": -30, "price": -30}))
+        assert out.score == 0
+        assert any("-60 adjustments = 0" in c and "clamped" in c for c in out.concerns)
+
+    def test_an_unreadable_ledger_entry_is_reported_not_swallowed(self):
+        """Dropping it cost nothing while the ledger was advisory. Now
+        "ground_floor_bedroom": "-25 (confirmed absent)" is a 25-point gift."""
+        from app.scorer import _validate_ai_response
+        out = _validate_ai_response({
+            "score": 70, "verdict": "Worth Touring",
+            "soft_points": {"school_district": 8,
+                            "ground_floor_bedroom": "-25 (confirmed absent)"},
+        })
+        assert "ground_floor_bedroom" not in out.soft_points
+        assert any("could not be read as points" in c for c in out.concerns)

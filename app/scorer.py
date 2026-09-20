@@ -124,7 +124,13 @@ _COMMUTE_BANDS = ((65, 6), (75, 3), (85, -2), (95, -5), (105, -8), (1000, -12))
 
 
 def _school_band(percentile: float | None) -> int:
-    """The criteria's school adjustment for a percentile, or 0 if unranked."""
+    """The criteria's school adjustment for a percentile.
+
+    Unranked is 0, not a penalty: the criteria's standing rule is that missing
+    data never deducts, and 31 of 216 listings have no percentile on any
+    elementary (the Hendrick Hudson and Hartsdale districts). The model charged
+    -10 on 18 of them anyway, which is a penalty for a gap in our own data.
+    """
     if percentile is None:
         return 0
     for floor, points in _SCHOOL_BANDS:
@@ -133,10 +139,10 @@ def _school_band(percentile: float | None) -> int:
     return 0
 
 
-def _commute_band(minutes: float | None) -> int | None:
-    """The criteria's commute adjustment, or None when the time is unknown."""
+def _commute_band(minutes: float | None) -> int:
+    """The criteria's commute adjustment. Unknown is 0, same rule as schools."""
     if minutes is None:
-        return None
+        return 0
     for ceiling, points in _COMMUTE_BANDS:
         if minutes <= ceiling:
             return points
@@ -144,9 +150,10 @@ def _commute_band(minutes: float | None) -> int | None:
 
 
 def _is_commute_curve_key(key: str) -> bool:
-    """The door-to-door entry, not the station-drive penalty that stacks on it."""
+    """The door-to-door entry, not the station-drive or parking line."""
     lowered = key.lower()
-    return "commute" in lowered and "station" not in lowered
+    return "commute" in lowered and not any(
+        word in lowered for word in ("station", "parking"))
 
 
 def pin_deterministic_ledger_entries(
@@ -169,27 +176,21 @@ def pin_deterministic_ledger_entries(
     points = dict(result.soft_points)
     changes = []
 
-    school_keys = [k for k in points if _SCHOOL_CRITERIA.search(k)]
-    if school_keys:
-        band = _school_band(best_elementary_percentile(listing_data))
-        primary, *extra = school_keys
+    def pin(keys: list[str], band: int, label: str) -> None:
+        if not keys:
+            return
+        primary, *extra = keys
         if points[primary] != band:
-            changes.append(f"{primary} {points[primary]:+d}->{band:+d}")
+            changes.append(f"{label} {points[primary]:+d} -> {band:+d}")
         points[primary] = band
         for key in extra:
-            changes.append(f"dropped stacked {key} {points[key]:+d}")
+            changes.append(f"dropped stacked {label} entry {key} ({points[key]:+d})")
             del points[key]
 
-    commute_keys = [k for k in points if _is_commute_curve_key(k)]
-    band = _commute_band(listing_data.get("commute_minutes"))
-    if commute_keys and band is not None:
-        primary, *extra = commute_keys
-        if points[primary] != band:
-            changes.append(f"{primary} {points[primary]:+d}->{band:+d}")
-        points[primary] = band
-        for key in extra:
-            changes.append(f"dropped stacked {key} {points[key]:+d}")
-            del points[key]
+    pin([k for k in points if _SCHOOL_CRITERIA.search(k)],
+        _school_band(best_elementary_percentile(listing_data)), "school district")
+    pin([k for k in points if _is_commute_curve_key(k)],
+        _commute_band(listing_data.get("commute_minutes")), "commute")
 
     if not changes:
         return result
@@ -197,9 +198,22 @@ def pin_deterministic_ledger_entries(
         "Pinned ledger entries for %s: %s",
         listing_data.get("address", "?"), "; ".join(changes),
     )
-    return result.model_copy(update={"soft_points": points})
+    # Stated, not just logged. The whole point of deriving the score from the
+    # ledger is that the buyer can audit the arithmetic; a ledger carrying
+    # code-written values under model-written keys, with nothing saying so, is
+    # a worse kind of opaque than the one this replaced.
+    note = (
+        "Corrected from the listing data, overriding the model: "
+        + "; ".join(changes) + "."
+    )
+    return result.model_copy(update={
+        "soft_points": points,
+        "concerns": [*result.concerns, note],
+    })
 
 
+_ACADEMIC_SCORE_NOTE = re.compile(
+    r"\s*\((?:Hard requirement failed[;,]?\s*)?score is academic\)", re.IGNORECASE)
 _SUMMARY_HEADLINE_RE = re.compile(
     r"^(Strong Match|Worth Touring|Low Priority|Weak Match|Reject)\s*[—-]\s*\d+/100")
 
@@ -213,6 +227,30 @@ def verdict_for_score(score: int) -> str:
     if score >= 40:
         return "Low Priority"
     return "Weak Match"
+
+
+def finalize_ai_result(
+    result: ScoringResult, listing_data: dict, reasoning: str | None = None
+) -> tuple[ScoringResult, str | None]:
+    """Everything that must happen to an AI response before it is stored.
+
+    One function because there are three call sites and the JSON-retry path
+    had silently grown to skip all of it: a first malformed response followed
+    by a good one (a common Haiku pattern) stored the model's advisory number
+    as the score, with no reject validation and no evidence cap. That row then
+    read about 11 points above its neighbours and showed up as the only kind
+    of arithmetic breach the new contract can still produce.
+    """
+    if invalid_reject(result, listing_data):
+        logger.warning(
+            "AI returned a Reject it isn't entitled to make for %s — overriding",
+            listing_data.get("address", "?"),
+        )
+        result = strip_invalid_reject(result, listing_data)
+        reasoning = result.reasoning
+    result = derive_score_from_ledger(result, listing_data)
+    result = cap_confidence_to_evidence(result, listing_data)
+    return result, reasoning
 
 
 def derive_score_from_ledger(
@@ -255,10 +293,14 @@ def derive_score_from_ledger(
 
     concerns = list(result.concerns)
     if abs(reported - score) > ARITHMETIC_TOLERANCE:
+        # The RAW sum, not the clamped score: a ledger summing to -60 reported
+        # "50 base -50 adjustments = 0", which is arithmetic that does not work
+        # and makes the one auditable number look wrong.
+        raw = sum(v for v in result.soft_points.values() if isinstance(v, (int, float)))
+        clamped = " (clamped)" if base_score() + raw != score else ""
         concerns.append(
             f"Model reported {reported}; score derived from its own breakdown "
-            f"({base_score()} base {implied_score(result.soft_points) - base_score():+d} "
-            f"adjustments = {score})."
+            f"({base_score()} base {int(raw):+d} adjustments = {score}){clamped}."
         )
 
     # The summary's first line republishes the score in prose, so leaving it
@@ -266,6 +308,9 @@ def derive_score_from_ledger(
     summary = result.property_summary
     if summary:
         summary = _SUMMARY_HEADLINE_RE.sub(f"{verdict} — {score}/100", summary, count=1)
+        # A withdrawn Reject leaves "(Hard requirement failed; score is
+        # academic)" attached to a headline that now shows a real score.
+        summary = _ACADEMIC_SCORE_NOTE.sub("", summary, count=1)
 
     if reported != score:
         logger.info(
@@ -369,6 +414,47 @@ _CRITERIA_SCHOOL_FLOOR_RE = re.compile(
 
 _CRITERIA_BASE_SCORE_RE = re.compile(r"base\s+score:?\s*(\d{1,3})", re.IGNORECASE)
 
+# The two band tables the scorer pins in code. They are enforced from
+# _SCHOOL_BANDS/_COMMUTE_BANDS, so a criteria edit that moves a band would be
+# followed by the model and silently reverted by the pin on every score —
+# exactly the failure the rest of this drift machinery exists to catch.
+#
+# Read from a canonical PINNED BANDS block rather than the prose tables. The
+# prose states them as ranges and mixes them with the station-drive table, and
+# a heuristic that reads "80th-94th percentile" as a floor of 94 would report
+# drift that is not there — a drift check that cries wolf gets ignored, which
+# is worse than not having one. The block also tells whoever edits the
+# criteria that these particular numbers are enforced in code.
+_PINNED_BLOCK_RE = re.compile(
+    r"^\s*(school|commute):\s*(.+)$", re.IGNORECASE | re.MULTILINE)
+_PINNED_PAIR_RE = re.compile(r"(-?\d+)\s*:\s*([+-]\d+)")
+
+
+def criteria_pinned_bands(text: str, name: str) -> list[tuple[int, int]] | None:
+    """The (threshold, points) pairs the criteria's PINNED BANDS block states."""
+    if "PINNED BANDS" not in (text or ""):
+        return None
+    block = text[text.index("PINNED BANDS"):]
+    for m in _PINNED_BLOCK_RE.finditer(block):
+        if m.group(1).lower() != name:
+            continue
+        pairs = [(int(a), int(b)) for a, b in _PINNED_PAIR_RE.findall(m.group(2))]
+        return pairs or None
+    return None
+
+
+def _render_bands(bands) -> str:
+    return ", ".join(f"{a}:{b:+d}" for a, b in bands)
+
+
+def _band_drift(stated, pinned) -> tuple[str | None, str]:
+    """(criteria value, config value) for a band table, as drift-check strings.
+
+    Rendered as strings because hard_gate_drift() compares scalars, and a band
+    table's whole shape has to match — one moved threshold is drift.
+    """
+    return (_render_bands(stated) if stated else None), _render_bands(pinned)
+
 
 def _first_int(pattern: re.Pattern, text: str, group: int = 1) -> int | None:
     m = pattern.search(text or "")
@@ -398,6 +484,12 @@ def hard_gate_drift(instructions: str) -> dict:
         "min_bedrooms": (_first_int(_CRITERIA_MIN_BEDS_RE, text), settings.min_bedrooms),
         "min_school_percentile": (
             _first_int(_CRITERIA_SCHOOL_FLOOR_RE, text), settings.min_school_percentile),
+        # Not gates either, but pinned in code on every score, so prose that
+        # disagrees with them is silently overridden rather than applied.
+        "school_bands": _band_drift(
+            criteria_pinned_bands(text, "school"), _SCHOOL_BANDS),
+        "commute_bands": _band_drift(
+            criteria_pinned_bands(text, "commute"), _COMMUTE_BANDS),
         # Not a gate, but drift here corrupts every arithmetic check: the
         # validator judges score-vs-ledger deltas against settings, and a
         # criteria text stating a different base makes the model and the
@@ -416,15 +508,10 @@ def hard_gate_drift(instructions: str) -> dict:
     return {"checks": out, "drifted": drifted, "in_sync": not drifted}
 
 
-def _verdict_for_score(score: int) -> str:
-    """The verdict a score implies, mirroring _validate_ai_response's ladder."""
-    if score >= 80:
-        return "Strong Match"
-    if score >= 60:
-        return "Worth Touring"
-    if score >= 40:
-        return "Low Priority"
-    return "Weak Match"
+# One ladder. verdict_for_score() is defined above and this name is kept
+# because callers use it; two copies of the same four thresholds is how they
+# drift apart.
+_verdict_for_score = verdict_for_score
 
 
 def _gate_reject(criterion: str, value: str, reason: str) -> ScoringResult:
@@ -1209,13 +1296,23 @@ def _validate_ai_response(data: dict) -> ScoringResult:
 
     # Build soft points (validate it's a dict of str->int)
     soft_points = {}
+    dropped = []
     raw_soft = data.get("soft_points", {})
     if isinstance(raw_soft, dict):
         for k, v in raw_soft.items():
             try:
                 soft_points[str(k)] = int(v)
             except (TypeError, ValueError):
+                # Silently dropping this used to cost nothing — the ledger was
+                # advisory. Now it IS the score, so "ground_floor_bedroom":
+                # "-25 (confirmed absent)" is a 25-point gift with no trace.
+                dropped.append(f"{k}={v!r}")
                 continue
+    if dropped:
+        logger.warning(
+            "Dropped %d unparseable ledger entr(ies): %s",
+            len(dropped), ", ".join(dropped),
+        )
 
     # Concerns list
     concerns = []
@@ -1229,6 +1326,13 @@ def _validate_ai_response(data: dict) -> ScoringResult:
         note = f"{d.criterion}: {d.reason}".strip(": ").strip()
         if note and note not in concerns:
             concerns.append(note)
+
+    if dropped:
+        concerns.append(
+            "Score breakdown incomplete: "
+            + ", ".join(dropped)
+            + " could not be read as points and were left out of the score."
+        )
 
     # Reasoning
     reasoning = str(data.get("reasoning", "")) or None
@@ -1377,9 +1481,7 @@ def ai_score_listing(
         # failed on both attempts for 136 of 216 stored listings — the model
         # anchors near 65 and will not follow its own ledger down. Runs after
         # the reject machinery so it sees the settled verdict.
-        result = derive_score_from_ledger(result, listing_data)
-
-        result = cap_confidence_to_evidence(result, listing_data)
+        result, reasoning = finalize_ai_result(result, listing_data, reasoning)
 
         logger.info(
             f"AI evaluation: score={result.score}, verdict={result.verdict}, "
@@ -1391,6 +1493,10 @@ def ai_score_listing(
         logger.warning(f"AI evaluation returned invalid JSON (attempt 1): {e} — retrying once")
         try:
             result, reasoning = _call_ai()
+            # Same post-processing as the first-attempt path. This used to
+            # return raw, so a retry that succeeded was the one way a score
+            # could still be the model's own number.
+            result, reasoning = finalize_ai_result(result, listing_data, reasoning)
             logger.info(
                 f"AI evaluation retry succeeded: score={result.score}, verdict={result.verdict}"
             )
@@ -1507,19 +1613,13 @@ def parse_batch_result(
         log_self_contradicting_failures(score_result, address)
         if listing_data is not None:
             log_uncertainty_penalties(score_result, listing_data, address)
-        if listing_data is not None and invalid_reject(score_result, listing_data):
-            logger.warning(
-                f"Batch item {result.custom_id} returned a Reject it isn't entitled "
-                "to make — overriding the rejection"
-            )
-            score_result = strip_invalid_reject(score_result, listing_data)
-        # The score is computed from the ledger here exactly as on the
-        # interactive path. The batch used to be the weaker of the two —
-        # no re-ask was possible, so a breach just stood. Now there is
-        # nothing to re-ask: the arithmetic is done in code either way.
-        score_result = derive_score_from_ledger(score_result, listing_data)
+        # Same pipeline as the interactive path. The batch used to be the
+        # weaker of the two — no re-ask was possible, so a breach just stood.
+        # Now there is nothing to re-ask: the arithmetic is done in code.
         if listing_data is not None:
-            score_result = cap_confidence_to_evidence(score_result, listing_data)
+            score_result, _ = finalize_ai_result(score_result, listing_data)
+        else:
+            score_result = derive_score_from_ledger(score_result, None)
         return score_result, score_result.reasoning
 
     except Exception as e:

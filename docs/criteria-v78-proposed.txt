@@ -279,6 +279,22 @@ Soft Concerns (never reject)
 -6  4,500+ sqft (significantly oversized)
 -3  6+ bedrooms
 
+PINNED BANDS — ENFORCED IN CODE, EDIT BOTH TOGETHER
+The school-district and commute-curve entries are not left to the model: it
+wrote a school adjustment that disagreed with the ranking data on 18% of
+listings and a commute adjustment that disagreed on 36%, and since the score
+is now the sum of this ledger, a wrong line item is a wrong score. The scorer
+overwrites those two entries with the bands below and says so in concerns.
+Changing a number in the prose tables above WITHOUT changing it here does
+nothing — the pin reverts it on every score. /health reports the mismatch as
+school_bands / commute_bands drift.
+Format is threshold:points. School thresholds are percentile floors (highest
+first); commute thresholds are door-to-door minute ceilings (lowest first).
+  school: 95:+18, 80:+8, 50:-10, 0:-30
+  commute: 65:+6, 75:+3, 85:-2, 95:-5, 105:-8, 1000:-12
+An unranked district or an unknown commute scores 0, never a penalty: the
+criteria's standing rule is that missing data never deducts.
+
 Clamp final score between 0 and 100.
 
 Verdict

@@ -1898,7 +1898,11 @@ def redact_error(text: str | None, limit: int = 160) -> str:
 _URL_IN_ERROR = re.compile(r"https?://([^/\s]+)\S*")
 # Counts inside a stage trail: "6033ch", "1 candidate(s)", "40 imgs". Not
 # \d{3} HTTP codes, which are the diagnostic part and must survive.
-_TRAIL_COUNTS = re.compile(r"\b\d+(?=ch\b|\s+candidate\(s\)|\s+imgs\b)")
+# [1-9] on purpose: zero is the diagnosis, not noise. "trulia: 0 candidate(s)"
+# (the search found nothing) and "trulia: 3 candidate(s)" (three found, none
+# matched the address) are different failures, as are "jina ok 0ch" (a 200 with
+# an empty body) and "jina ok 6033ch" (a full page nothing could be read from).
+_TRAIL_COUNTS = re.compile(r"\b[1-9]\d*(?=ch\b|\s+candidate\(s\)|\s+imgs\b)")
 
 
 def _generalize_error(text: str | None) -> str:
@@ -1930,6 +1934,9 @@ def failed_job_reasons(limit: int = 6) -> list[dict]:
     A count of failures says something is broken; the reason says what. 189
     failed scrape_desc jobs could be a bot block, a dead URL format, a quota,
     or a timeout, and those want four different fixes.
+
+    `limit` is per task type, not overall, plus one remainder row per task —
+    so the result can exceed it, and the counts reconcile with failed_by_task.
     """
     with get_connection() as conn:
         cur = conn.cursor()
