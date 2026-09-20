@@ -11,8 +11,27 @@ from app.models import ParsedListing
 from app.parsers.base import EmailParser
 
 PRICE_RE = re.compile(r"\$\s*([\d,]+(?:\.\d{2})?)")
-BEDS_RE = re.compile(r"(\d+)\s*(?:bd|bed|bedroom)s?", re.IGNORECASE)
-BATHS_RE = re.compile(r"(\d+)\s*(?:ba|bath|bathroom)s?", re.IGNORECASE)
+# The unit token has to END on a word boundary. Without the \b these matched
+# inside street names: "406 Bedford Rd" parsed as 406 bedrooms (the "Bed" of
+# Bedford) and "1203 Baldwin Rd" as 1203 bathrooms (the "Ba" of Baldwin). Both
+# survived into scoring, and 406 Bedford Rd is a home the buyer is actively
+# bidding on. Any street starting Bed-, Bd-, Ba-, Bath- hits this.
+BEDS_RE = re.compile(r"(\d+)\s*(?:bd|bed|bedroom)s?\b", re.IGNORECASE)
+BATHS_RE = re.compile(r"(\d+)\s*(?:ba|bath|bathroom)s?\b", re.IGNORECASE)
+
+# Belt and braces for the next street name nobody predicted. A house with more
+# than a dozen bedrooms or bathrooms is not this buyer's market, so a number
+# that large is a parse artifact rather than a listing: drop it and leave the
+# field unknown. Unknown costs no points (the criteria never penalize missing
+# data); a wrong number scores a fiction.
+_MAX_PLAUSIBLE_ROOMS = 12
+
+
+def _plausible_room_count(value: int | None) -> int | None:
+    """None unless the count could belong to a real single-family home."""
+    if value is None:
+        return None
+    return value if 1 <= value <= _MAX_PLAUSIBLE_ROOMS else None
 SQFT_RE = re.compile(r"([\d,]+)\s*(?:sq\s*\.?\s*ft|sqft|SF)", re.IGNORECASE)
 MLS_RE = re.compile(r"MLS\s*#?\s*(\d+)", re.IGNORECASE)
 ZIP_RE = re.compile(r"\b(\d{5})(?:-\d{4})?\b")
@@ -359,11 +378,11 @@ class PlainTextParser(EmailParser):
 
         beds_match = BEDS_RE.search(block)
         if beds_match:
-            listing.bedrooms = int(beds_match.group(1))
+            listing.bedrooms = _plausible_room_count(int(beds_match.group(1)))
 
         baths_match = BATHS_RE.search(block)
         if baths_match:
-            listing.bathrooms = int(baths_match.group(1))
+            listing.bathrooms = _plausible_room_count(int(baths_match.group(1)))
 
         sqft_match = SQFT_RE.search(block)
         if sqft_match:

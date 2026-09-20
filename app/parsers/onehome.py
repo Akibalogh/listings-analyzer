@@ -1100,8 +1100,10 @@ _ONEKEYMLS_URL_RE = re.compile(
 # Regex patterns for extracting property stats from visible page text
 # Price: allow optional space after $, require 6+ digit/comma chars (matches $1,275,000 and $ 1,275,000)
 _PRICE_RE = re.compile(r"\$\s?[\d,]{6,}", re.IGNORECASE)
-_STATS_BEDS_RE = re.compile(r"(\d+)\s*(?:bed(?:room)?s?|bd)", re.IGNORECASE)
-_STATS_BATHS_RE = re.compile(r"(\d+)\s*(?:bath(?:room)?s?|ba)", re.IGNORECASE)
+# \b for the same reason as the plaintext parser: scraped page text carries the
+# street address, so "406 Bedford Rd" read as 406 bedrooms without it.
+_STATS_BEDS_RE = re.compile(r"(\d+)\s*(?:bed(?:room)?s?|bd)\b", re.IGNORECASE)
+_STATS_BATHS_RE = re.compile(r"(\d+)\s*(?:bath(?:room)?s?|ba)\b", re.IGNORECASE)
 _STATS_SQFT_RE = re.compile(r"([\d,]+)\s*(?:sq\.?\s*ft|sqft|square\s*f(?:eet|oot))", re.IGNORECASE)
 _MIN_HOME_PRICE = 50_000  # ignore prices below this (taxes, fees, etc.)
 _YEAR_BUILT_RE = re.compile(r"(?:year\s*built|built\s*in|constructed)\s*:?\s*(\d{4})", re.IGNORECASE)

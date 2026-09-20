@@ -244,6 +244,12 @@ async def lifespan(app: FastAPI):
     # neither of which belongs in a startup path that a health check is waiting on.
     def _boot_repair() -> None:
         try:
+            # Before the gap scan: a bed/bath count that is really the street
+            # number changes the score fingerprint when it clears, so the scan
+            # that follows picks these listings up for rescore on its own.
+            repaired = db.repair_street_number_room_counts()
+            if repaired:
+                logger.warning(f"Repaired street-number room counts on {repaired}")
             enqueued = jobs.enqueue_missing()
             if any(enqueued.values()):
                 logger.info(f"Boot gap scan enqueued: {enqueued}")

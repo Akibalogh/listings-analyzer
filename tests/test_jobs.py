@@ -1411,3 +1411,50 @@ class TestTheBestListingsAreEnrichedFirst:
         db.enqueue_jobs(low, ["scrape_desc"])
         db.enqueue_jobs(fresh, ["scrape_desc"])
         assert db.claim_pending_jobs(limit=1)[0]["listing_id"] == fresh
+
+
+class TestStreetNumberRoomCountsAreRepaired:
+    """The parser no longer reads "406 Bedford Rd" as 406 bedrooms, but rows
+    written before the fix keep the wrong number, and a stored number is
+    scored as fact. 406 Bedford Rd is a home the buyer is actively bidding on.
+    """
+
+    def test_a_count_matching_the_street_number_is_cleared(self, temp_db):
+        lid = _make_listing(address="406 Bedford Rd", bedrooms=406, bathrooms=3)
+        assert db.repair_street_number_room_counts() == [lid]
+        row = db.get_listing_by_id(lid)
+        assert row["bedrooms"] is None
+        assert row["bathrooms"] == 3
+
+    def test_both_fields_are_repairable(self, temp_db):
+        lid = _make_listing(address="1203 Baldwin Rd", bedrooms=1203, bathrooms=1203)
+        assert db.repair_street_number_room_counts() == [lid]
+        row = db.get_listing_by_id(lid)
+        assert row["bedrooms"] is None and row["bathrooms"] is None
+
+    def test_a_legitimate_outlier_is_left_alone(self, temp_db):
+        """139 Scarborough Rd really does have 14 bedrooms in 15,000 sqft. A
+        blanket plausibility cap would have erased it, so the rule is that the
+        count must EQUAL the street number."""
+        lid = _make_listing(address="139 Scarborough Rd", bedrooms=14, bathrooms=7)
+        assert db.repair_street_number_room_counts() == []
+        assert db.get_listing_by_id(lid)["bedrooms"] == 14
+
+    def test_ordinary_listings_are_untouched(self, temp_db):
+        lid = _make_listing(address="11 Jennifer Lane", bedrooms=4, bathrooms=3)
+        assert db.repair_street_number_room_counts() == []
+        assert db.get_listing_by_id(lid)["bedrooms"] == 4
+
+    def test_the_repair_is_idempotent(self, temp_db):
+        _make_listing(address="406 Bedford Rd", bedrooms=406, bathrooms=3)
+        db.repair_street_number_room_counts()
+        assert db.repair_street_number_room_counts() == []
+
+    def test_clearing_the_count_changes_the_score_fingerprint(self, temp_db):
+        """The repair has to reach the score, not just the displayed field.
+        bedrooms is a scored input, so the boot gap scan picks the listing up
+        for rescore on its own once the fiction clears."""
+        lid = _make_listing(address="406 Bedford Rd", bedrooms=406, bathrooms=3)
+        before = score_input_fingerprint(db.get_listing_by_id(lid))
+        db.repair_street_number_room_counts()
+        assert score_input_fingerprint(db.get_listing_by_id(lid)) != before
