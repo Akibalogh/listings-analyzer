@@ -2601,3 +2601,83 @@ class TestBootRunsTheGapScan:
         assert db.claim_pending_jobs() == []          # a drain sees nothing
         db.enqueue_jobs(lid, ["commute"], requeue=True)
         assert db.claim_pending_jobs() != []          # the scan resurrects it
+
+
+class TestDataCompletenessMeasuresWhatTheAppEnriches:
+    """"62% data" kept coming back as a complaint that something was broken.
+    Nothing was: the number averaged in ~230 sold and rejected listings the
+    app deliberately never enriches, so it was measuring work it had correctly
+    decided not to do. It now covers exactly jobs._wants_evidence()'s
+    population — the homes still in play.
+    """
+
+    def test_sold_listings_are_not_counted(self, monkeypatch):
+        from app import main
+        rows = [
+            {"listing_status": "Active", "description": "x", "price": 1,
+             "sqft": 1, "image_urls_json": '["a"]', "school_data_json": '{"elementary": []}',
+             "commute_minutes": 40, "year_built": 1990, "lot_acres": 1.0,
+             "has_basement": True, "property_tax_json": '{"annual": 1}',
+             "garage_count": 2},
+            {"listing_status": "Sold"},
+        ]
+        monkeypatch.setattr(main.db, "get_all_listings", lambda: rows)
+        report = main.data_quality_report()
+        assert report["listings"] == 1
+        assert report["pct"] == 100.0
+
+    def test_a_confirmed_reject_is_not_counted(self):
+        from app.main import _is_enrichable
+        assert not _is_enrichable({
+            "listing_status": "Active", "verdict": "Reject",
+            "evaluation_method": "deterministic-gate"})
+
+    def test_an_unknown_status_listing_still_counts(self):
+        """Unknown means a pre-listing the app will try to enrich, not a
+        closed file."""
+        from app.main import _is_enrichable
+        assert _is_enrichable({"listing_status": None})
+
+    def test_a_placeholder_reject_still_counts(self):
+        """Every listing is saved with a score=0 Reject placeholder before it
+        is evaluated. Treating those as closed would exclude every new home."""
+        from app.main import _is_enrichable
+        assert _is_enrichable({
+            "listing_status": "Active", "verdict": "Reject",
+            "evaluation_method": "deterministic"})
+
+    def test_the_string_null_does_not_count_as_data(self):
+        """The dashboard's own version counted it, which is one of the two
+        reasons the client and server numbers disagreed."""
+        from app import main
+        assert main._EMPTY_VALUES.__contains__("null")
+
+
+class TestFailureReasonsReconcile:
+    """/health reported 54 failed scrape_desc jobs and 3 reasons for them.
+    The stage trail added to scrape errors carries per-listing counts, so every
+    listing got its own bucket and the grouping that _generalize_error() exists
+    to provide was undone the moment it was added.
+    """
+
+    def test_trail_counts_collapse_so_like_failures_group(self):
+        from app.db import _generalize_error
+        a = _generalize_error(
+            "scrape returned nothing for https://x.com/a [jina ok 6033ch -> "
+            "trulia: 1 candidate(s) -> jina ok 616ch 40 imgs]")
+        b = _generalize_error(
+            "scrape returned nothing for https://x.com/b [jina ok 91ch -> "
+            "trulia: 3 candidate(s) -> jina ok 1204ch 12 imgs]")
+        assert a == b
+
+    def test_http_status_codes_survive(self):
+        """The counts are noise for grouping; the status code is the whole
+        diagnosis."""
+        from app.db import _generalize_error
+        out = _generalize_error("scrape failed for https://x.com/a [jina HTTP 405]")
+        assert "405" in out
+
+    def test_different_stages_still_group_apart(self):
+        from app.db import _generalize_error
+        assert _generalize_error("x https://a.com/1 [discovery: none verified]") != \
+            _generalize_error("x https://a.com/2 [trulia: MLS absent]")

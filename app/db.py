@@ -1896,6 +1896,9 @@ def redact_error(text: str | None, limit: int = 160) -> str:
 
 
 _URL_IN_ERROR = re.compile(r"https?://([^/\s]+)\S*")
+# Counts inside a stage trail: "6033ch", "1 candidate(s)", "40 imgs". Not
+# \d{3} HTTP codes, which are the diagnostic part and must survive.
+_TRAIL_COUNTS = re.compile(r"\b\d+(?=ch\b|\s+candidate\(s\)|\s+imgs\b)")
 
 
 def _generalize_error(text: str | None) -> str:
@@ -1909,8 +1912,16 @@ def _generalize_error(text: str | None) -> str:
 
     The host still identifies the source, and the stage trail in brackets is
     the diagnostic part; only the per-listing path goes.
+
+    The trail re-fragmented the grouping the moment it was added: it carries
+    per-listing counts ("jina ok 6033ch", "trulia: 1 candidate(s)"), so every
+    listing got its own bucket again and /health reported 3 reasons against 54
+    failures. The counts are noise for grouping and the stage NAMES are the
+    signal, so the counts collapse to N and everything diagnostic — HTTP
+    status codes, exception class names, site names — stays.
     """
-    return _URL_IN_ERROR.sub(lambda m: f"{m.group(1)}/...", str(text or ""))
+    generalized = _URL_IN_ERROR.sub(lambda m: f"{m.group(1)}/...", str(text or ""))
+    return _TRAIL_COUNTS.sub("N", generalized)
 
 
 def failed_job_reasons(limit: int = 6) -> list[dict]:
@@ -1935,8 +1946,28 @@ def failed_job_reasons(limit: int = 6) -> list[dict]:
         # opposite of what happened.
         key = (task_type or "?", redact_error(_generalize_error(err), limit=240))
         tally[key] = tally.get(key, 0) + 1
-    ordered = sorted(tally.items(), key=lambda kv: -kv[1])[:limit]
-    return [{"task": t, "count": n, "error": e} for (t, e), n in ordered]
+    # Top reasons PER TASK, not globally. A global top-N let a task with many
+    # distinct reasons vanish entirely behind a task with few, which is how 54
+    # scrape_desc failures showed up as 3. The remainder row per task means the
+    # counts here reconcile with failed_by_task instead of quietly not adding up.
+    by_task: dict[str, list[tuple[str, int]]] = {}
+    for (task_type, err), count in tally.items():
+        by_task.setdefault(task_type, []).append((err, count))
+
+    out: list[dict] = []
+    for task_type, reasons in by_task.items():
+        reasons.sort(key=lambda re_: -re_[1])
+        for err, count in reasons[:limit]:
+            out.append({"task": task_type, "count": count, "error": err})
+        remainder = reasons[limit:]
+        if remainder:
+            out.append({
+                "task": task_type,
+                "count": sum(c for _, c in remainder),
+                "error": f"({len(remainder)} other reason(s))",
+            })
+    out.sort(key=lambda row: -row["count"])
+    return out
 
 
 def job_counts() -> dict:
