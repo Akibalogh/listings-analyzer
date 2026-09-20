@@ -45,3 +45,7 @@ class ScoringResult(BaseModel):
     # withdrawn rejection can land on the merit score the AI actually assigned
     # instead of a flat 0 — 29 Appleby Dr's 42 was otherwise unrecoverable.
     pre_reject_score: int | None = None
+    # The number the model asked for, before the ledger overrode it. The score
+    # is now computed as base + sum(soft_points), so this is advisory only —
+    # kept because a large gap is a signal worth showing, not a secret.
+    reported_score: int | None = None
