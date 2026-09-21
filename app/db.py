@@ -407,6 +407,54 @@ def _strip_redfin_url_params() -> int:
         return cleaned
 
 
+def repair_street_number_room_counts() -> list[int]:
+    """Null out bed/bath counts that are really the address's street number.
+
+    "406 Bedford Rd" was stored as 406 bedrooms and "1203 Baldwin Rd" as 1203
+    bathrooms: the plaintext parser let the unit token match inside the street
+    name. The parser no longer does that, but rows written before the fix keep
+    the wrong number, and a stored number is scored as fact.
+
+    The rule is deliberately narrow — the count must EQUAL the leading number
+    of the address — so it cannot touch a legitimate outlier. 139 Scarborough
+    Rd really does have 14 bedrooms in 15,000 sqft; a blanket plausibility cap
+    would have erased that.
+
+    Returns the listing ids repaired, so the caller can requeue them: their
+    stored score was computed against the fiction.
+    """
+    ph = _placeholder()
+    repaired = []
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, address, bedrooms, bathrooms FROM listings "
+            "WHERE bedrooms > 12 OR bathrooms > 12"
+        )
+        for lid, address, beds, baths in cur.fetchall():
+            m = re.match(r"\s*(\d+)", address or "")
+            if not m:
+                continue
+            street_number = int(m.group(1))
+            sets = []
+            if beds == street_number:
+                sets.append("bedrooms = NULL")
+            if baths == street_number:
+                sets.append("bathrooms = NULL")
+            if not sets:
+                continue
+            cur.execute(
+                f"UPDATE listings SET {', '.join(sets)} WHERE id = {ph}", (lid,))
+            repaired.append(lid)
+            logger.warning(
+                f"Repaired listing {lid} ({address}): street number {street_number} "
+                f"was stored as {'bedrooms' if beds == street_number else ''}"
+                f"{' and ' if beds == street_number and baths == street_number else ''}"
+                f"{'bathrooms' if baths == street_number else ''}"
+            )
+    return repaired
+
+
 def save_processed_email(
     gmail_id: str,
     message_id: str,
@@ -1848,6 +1896,13 @@ def redact_error(text: str | None, limit: int = 160) -> str:
 
 
 _URL_IN_ERROR = re.compile(r"https?://([^/\s]+)\S*")
+# Counts inside a stage trail: "6033ch", "1 candidate(s)", "40 imgs". Not
+# \d{3} HTTP codes, which are the diagnostic part and must survive.
+# [1-9] on purpose: zero is the diagnosis, not noise. "trulia: 0 candidate(s)"
+# (the search found nothing) and "trulia: 3 candidate(s)" (three found, none
+# matched the address) are different failures, as are "jina ok 0ch" (a 200 with
+# an empty body) and "jina ok 6033ch" (a full page nothing could be read from).
+_TRAIL_COUNTS = re.compile(r"\b[1-9]\d*(?=ch\b|\s+candidate\(s\)|\s+imgs\b)")
 
 
 def _generalize_error(text: str | None) -> str:
@@ -1861,8 +1916,16 @@ def _generalize_error(text: str | None) -> str:
 
     The host still identifies the source, and the stage trail in brackets is
     the diagnostic part; only the per-listing path goes.
+
+    The trail re-fragmented the grouping the moment it was added: it carries
+    per-listing counts ("jina ok 6033ch", "trulia: 1 candidate(s)"), so every
+    listing got its own bucket again and /health reported 3 reasons against 54
+    failures. The counts are noise for grouping and the stage NAMES are the
+    signal, so the counts collapse to N and everything diagnostic — HTTP
+    status codes, exception class names, site names — stays.
     """
-    return _URL_IN_ERROR.sub(lambda m: f"{m.group(1)}/...", str(text or ""))
+    generalized = _URL_IN_ERROR.sub(lambda m: f"{m.group(1)}/...", str(text or ""))
+    return _TRAIL_COUNTS.sub("N", generalized)
 
 
 def failed_job_reasons(limit: int = 6) -> list[dict]:
@@ -1871,6 +1934,9 @@ def failed_job_reasons(limit: int = 6) -> list[dict]:
     A count of failures says something is broken; the reason says what. 189
     failed scrape_desc jobs could be a bot block, a dead URL format, a quota,
     or a timeout, and those want four different fixes.
+
+    `limit` is per task type, not overall, plus one remainder row per task —
+    so the result can exceed it, and the counts reconcile with failed_by_task.
     """
     with get_connection() as conn:
         cur = conn.cursor()
@@ -1887,8 +1953,28 @@ def failed_job_reasons(limit: int = 6) -> list[dict]:
         # opposite of what happened.
         key = (task_type or "?", redact_error(_generalize_error(err), limit=240))
         tally[key] = tally.get(key, 0) + 1
-    ordered = sorted(tally.items(), key=lambda kv: -kv[1])[:limit]
-    return [{"task": t, "count": n, "error": e} for (t, e), n in ordered]
+    # Top reasons PER TASK, not globally. A global top-N let a task with many
+    # distinct reasons vanish entirely behind a task with few, which is how 54
+    # scrape_desc failures showed up as 3. The remainder row per task means the
+    # counts here reconcile with failed_by_task instead of quietly not adding up.
+    by_task: dict[str, list[tuple[str, int]]] = {}
+    for (task_type, err), count in tally.items():
+        by_task.setdefault(task_type, []).append((err, count))
+
+    out: list[dict] = []
+    for task_type, reasons in by_task.items():
+        reasons.sort(key=lambda re_: -re_[1])
+        for err, count in reasons[:limit]:
+            out.append({"task": task_type, "count": count, "error": err})
+        remainder = reasons[limit:]
+        if remainder:
+            out.append({
+                "task": task_type,
+                "count": sum(c for _, c in remainder),
+                "error": f"({len(remainder)} other reason(s))",
+            })
+    out.sort(key=lambda row: -row["count"])
+    return out
 
 
 def job_counts() -> dict:

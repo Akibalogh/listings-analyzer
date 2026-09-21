@@ -17,7 +17,7 @@ on:
       criteria_file:
         description: "Path to the criteria text file in the repo"
         required: true
-        default: "docs/criteria-v76-proposed.txt"
+        default: "docs/criteria-v78-proposed.txt"
       created_by:
         description: "Recorded as the author of the new criteria version"
         required: true

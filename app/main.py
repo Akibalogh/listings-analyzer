@@ -20,6 +20,7 @@ from app.auth import (
     verify_session_cookie,
 )
 from app.config import settings
+from app.listing_status import is_live, is_unknown
 from app.poller import poll_once
 from app.scorer import (
     ai_score_listing,
@@ -145,16 +146,71 @@ _QUALITY_FIELDS = (
 )
 
 
-def _data_quality_pct() -> float:
-    """Share of quality fields populated across all listings (0-100)."""
-    listings = db.get_all_listings()
-    if not listings:
-        return 100.0
-    have = sum(
-        1 for l in listings for f in _QUALITY_FIELDS
-        if l.get(f) not in (None, "", "[]", "null")
+# The weights the dashboard has always used, moved server-side so there is one
+# definition of "data completeness" instead of two that disagree.
+_QUALITY_WEIGHTS = {
+    "description": 0.18, "image_urls_json": 0.13, "school_data_json": 0.13,
+    "commute_minutes": 0.13, "year_built": 0.09, "lot_acres": 0.07,
+    "has_basement": 0.06, "property_tax_json": 0.06, "garage_count": 0.05,
+    "price": 0.05, "sqft": 0.05,
+}
+_EMPTY_VALUES = (None, "", "[]", "null", "{}")
+
+
+def _is_enrichable(listing: dict) -> bool:
+    """Whether the app promises to fill this listing's gaps.
+
+    The same predicate jobs._wants_evidence() uses to decide whether to spend
+    a scrape. A sold house is not a data gap, it is a closed file — and 230 of
+    them averaged into the headline is why "62% data" kept coming back as a
+    complaint that something was broken. Nothing was: the number was measuring
+    work the app had correctly decided not to do.
+
+    Narrower than what the app actually attempts: enqueue_missing() gates only
+    scrape_desc on _wants_evidence, so stats, commute, schools and status are
+    still enqueued for closed files. That is a separate thing to fix (it is
+    also where most of the failed commute jobs come from); this metric reports
+    the homes the buyer can act on, which is the question being asked.
+    """
+    status = listing.get("listing_status")
+    if not is_live(status) and not is_unknown(status):
+        return False
+    return not (
+        listing.get("verdict") == "Reject"
+        and listing.get("evaluation_method") in ("ai", "deterministic-gate")
     )
-    return have / (len(listings) * len(_QUALITY_FIELDS)) * 100
+
+
+def data_quality_report(listings: list[dict] | None = None) -> dict:
+    """Weighted completeness over the listings the app is trying to enrich."""
+    population = [
+        l for l in (db.get_all_listings() if listings is None else listings)
+        if _is_enrichable(l)
+    ]
+    if not population:
+        return {"pct": 100.0, "listings": 0, "by_field": {}}
+
+    def present(listing: dict, field: str) -> bool:
+        return listing.get(field) not in _EMPTY_VALUES
+
+    total = sum(
+        weight for l in population
+        for field, weight in _QUALITY_WEIGHTS.items() if present(l, field)
+    )
+    return {
+        "pct": round(total / len(population) * 100, 1),
+        "listings": len(population),
+        "by_field": {
+            field: round(
+                sum(1 for l in population if present(l, field)) * 100 / len(population))
+            for field in _QUALITY_WEIGHTS
+        },
+    }
+
+
+def _data_quality_pct() -> float:
+    """Share of quality fields populated across the enrichable listings (0-100)."""
+    return data_quality_report()["pct"]
 
 
 def _log_commute_gate_drift() -> dict | None:
@@ -244,6 +300,12 @@ async def lifespan(app: FastAPI):
     # neither of which belongs in a startup path that a health check is waiting on.
     def _boot_repair() -> None:
         try:
+            # Before the gap scan: a bed/bath count that is really the street
+            # number changes the score fingerprint when it clears, so the scan
+            # that follows picks these listings up for rescore on its own.
+            repaired = db.repair_street_number_room_counts()
+            if repaired:
+                logger.warning(f"Repaired street-number room counts on {repaired}")
             enqueued = jobs.enqueue_missing()
             if any(enqueued.values()):
                 logger.info(f"Boot gap scan enqueued: {enqueued}")
@@ -556,6 +618,9 @@ def health(request: Request):
         # is indistinguishable from a working one: jobs complete, failures stay
         # low, and nothing says that every listing was skipped.
         "scrape_transport": _safe(_scrape_transport_health),
+        # data_quality deliberately does NOT ride here: it reads every listing,
+        # and the dashboard polls /health every few seconds. It ships on
+        # /listings instead, which already loads the whole corpus.
     }
 
 
@@ -675,9 +740,18 @@ def filtered_dashboard():
 
 @app.get("/listings")
 def list_listings():
-    """Get all scored listings. Public — no auth required."""
+    """Get all scored listings. Public — no auth required.
+
+    data_quality ships with the rows so the dashboard stops recomputing its
+    own version over a different population with a different rule for what
+    counts as present (its school check treated the string "null" as data).
+    """
     listings = db.get_all_listings()
-    return {"count": len(listings), "listings": listings}
+    return {
+        "count": len(listings),
+        "listings": listings,
+        "data_quality": data_quality_report(listings),
+    }
 
 
 @app.get("/alerts")

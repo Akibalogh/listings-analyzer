@@ -1817,9 +1817,10 @@ class TestScoreArithmeticContract:
     matched its own breakdown (median gap +41, reported higher in 99). "72 /
     Worth Touring" was a vibe wearing an itemisation.
 
-    The contract is now stated in the prompt and enforced in code: one
-    corrective re-ask, then keep the score but cap confidence — never substitute
-    the sum, which is the sloppier channel and would silently reprice the board.
+    Two rounds of reweighting and a corrective re-ask all failed: over 216
+    stored scores the model anchored near 65 and honoured its own itemisation
+    at about 43% strength, and both attempts failed on 136 of them. So the
+    score is no longer asked for — it is computed from the ledger.
     """
 
     @staticmethod
@@ -1858,52 +1859,75 @@ class TestScoreArithmeticContract:
         from app.scorer import score_breakdown_delta
         assert score_breakdown_delta(self._result(72, {})) is None
 
-    def test_within_tolerance_passes_untouched(self):
-        from app.scorer import base_score, reconcile_score_arithmetic
-        r = self._result(base_score() + 19, {"a": 19})  # delta 0
-        assert reconcile_score_arithmetic(r) is r
-        r5 = self._result(base_score() + 24, {"a": 19})  # delta +5, on the line
-        assert reconcile_score_arithmetic(r5) is r5
+    def test_the_score_is_the_ledger_sum(self):
+        from app.scorer import base_score, derive_score_from_ledger
+        out = derive_score_from_ledger(self._result(72, {"a": 19}))
+        assert out.score == base_score() + 19
 
-    def test_a_breach_keeps_the_score(self):
-        """Substituting the sum would reprice the board with arithmetic that was
-        never authoritative — 41 of 112 breakdowns summed outside 0-100."""
-        from app.scorer import reconcile_score_arithmetic
-        out = reconcile_score_arithmetic(self._result(72, {"a": 19}))
-        assert out.score == 72
+    def test_an_agreeing_score_is_unchanged(self):
+        from app.scorer import base_score, derive_score_from_ledger
+        out = derive_score_from_ledger(self._result(base_score() + 19, {"a": 19}))
+        assert out.score == base_score() + 19
+        assert not any("derived" in c.lower() for c in out.concerns)
 
-    def test_a_breach_leaves_confidence_alone(self):
-        """Superseded: this used to demote high->medium, which marked 53 of 81
-        fully-scraped listings uncertain over the model's bookkeeping rather
-        than anything about the house. See TestConfidenceMeansOneThing."""
-        from app.scorer import reconcile_score_arithmetic
-        assert reconcile_score_arithmetic(self._result(99, {"a": 19})).confidence == "high"
+    def test_the_model_s_number_is_kept_as_reported_score(self):
+        """Advisory, not secret. A large gap is worth showing."""
+        from app.scorer import derive_score_from_ledger
+        assert derive_score_from_ledger(self._result(72, {"a": 19})).reported_score == 72
 
-    def test_a_breach_never_changes_confidence_either_way(self):
-        from app.scorer import reconcile_score_arithmetic
-        for conf in ("low", "medium", "high"):
-            out = reconcile_score_arithmetic(self._result(99, {"a": 19}, confidence=conf))
-            assert out.confidence == conf, conf
+    def test_the_verdict_follows_the_derived_score(self):
+        """The whole point: a ledger that says Low Priority must not be
+        published as Worth Touring because the model preferred the label."""
+        from app.scorer import base_score, derive_score_from_ledger
+        out = derive_score_from_ledger(
+            self._result(72, {"school_district": -10}, verdict="Worth Touring"))
+        assert out.score == base_score() - 10
+        assert out.verdict == "Low Priority"
+
+    def test_the_summary_headline_is_rewritten_to_match(self):
+        """Two different numbers on one card is worse than either alone."""
+        from app.models import ScoringResult
+        from app.scorer import base_score, derive_score_from_ledger
+        r = ScoringResult(score=72, verdict="Worth Touring", soft_points={"a": -30},
+                          property_summary="Worth Touring — 72/100\n\nSchools: fine")
+        out = derive_score_from_ledger(r)
+        assert out.property_summary.startswith(f"Weak Match — {base_score() - 30}/100")
+        assert "Schools: fine" in out.property_summary
 
     def test_a_breach_is_stated_in_concerns(self):
-        from app.scorer import base_score, reconcile_score_arithmetic
-        out = reconcile_score_arithmetic(self._result(99, {"a": 19}))
-        assert any("mismatch" in c.lower() for c in out.concerns)
-        assert any(str(base_score() + 19) in c for c in out.concerns)
+        from app.scorer import base_score, derive_score_from_ledger
+        out = derive_score_from_ledger(self._result(99, {"a": 19}))
+        assert any("99" in c and str(base_score() + 19) in c for c in out.concerns)
 
-    def test_the_retry_note_shows_the_model_its_own_numbers(self):
-        from app.scorer import _arithmetic_retry_note, base_score
-        note = _arithmetic_retry_note(self._result(99, {"a": 19}))
-        assert "99" in note and str(base_score() + 19) in note
-        assert "EXACTLY ONE school-district" in note
+    def test_a_breach_never_changes_confidence(self):
+        """Confidence reports what is known about the HOUSE, not whether the
+        model's bookkeeping balanced."""
+        from app.scorer import derive_score_from_ledger
+        for conf in ("low", "medium", "high"):
+            out = derive_score_from_ledger(self._result(99, {"a": 19}, confidence=conf))
+            assert out.confidence == conf, conf
 
-    def test_the_prompt_states_the_contract(self):
-        """The old contract asked for score and soft_points as independent
-        fields — that's the root cause, so its absence must fail loudly."""
+    def test_a_reject_keeps_its_forced_zero(self):
+        from app.scorer import derive_score_from_ledger
+        out = derive_score_from_ledger(self._result(0, {"a": 19}, verdict="Reject"))
+        assert out.score == 0 and out.verdict == "Reject"
+
+    def test_an_empty_ledger_keeps_the_model_s_number_and_says_so(self):
+        """An empty ledger is not a statement of arithmetic that could be
+        honoured — deriving from it would publish a bare base score."""
+        from app.scorer import derive_score_from_ledger
+        out = derive_score_from_ledger(self._result(72, {}))
+        assert out.score == 72
+        assert any("no score breakdown" in c.lower() for c in out.concerns)
+
+    def test_the_prompt_tells_the_model_its_number_is_advisory(self):
+        """If the model still believes it is setting the score, it keeps
+        optimising the number instead of the ledger."""
         from app.scorer import _build_system_prompt, base_score
         text = "".join(b["text"] for b in _build_system_prompt())
         assert f"{base_score()} + the sum of soft_points" in text
-        assert f"score = {base_score()} (base) + sum" in text
+        assert "advisory" in text
+        assert "rejected and re-asked" not in text
         assert "{base}" not in text  # the placeholder must be substituted
         assert "EXACTLY ONE school-district adjustment" in text
 
@@ -1919,7 +1943,11 @@ class TestScoreArithmeticContract:
 
 
 class TestArithmeticRetryPath:
-    """One corrective re-ask on breach, then the keep-score fallback."""
+    """There is no re-ask any more: the arithmetic is done in code.
+
+    The re-ask cost a second Haiku call on 64% of scores and failed on both
+    attempts for 136 of 216 stored listings.
+    """
 
     def _run(self, responses):
         import json as _json
@@ -1955,40 +1983,36 @@ class TestArithmeticRetryPath:
             "soft_points": {"a": 12}, "concerns": [], "confidence": "high",
             "reasoning": "r", "property_summary": "p"}
 
-    def test_a_reconciled_retry_is_adopted(self):
-        result, calls = self._run([self.BAD, self.GOOD])
-        assert calls == 2
-        assert result.score == self.GOOD["score"] and result.confidence == "high"
+    def test_a_breach_costs_one_call_not_two(self):
+        from app.scorer import base_score
+        result, calls = self._run([self.BAD])
+        assert calls == 1
+        assert result.score == base_score() + 10  # the ledger, not the 42
 
-    def test_a_still_breaching_retry_falls_back_to_the_original(self):
-        result, calls = self._run([self.BAD, self.BAD])
-        assert calls == 2
-        assert result.score == self.BAD["score"]
-        # Confidence is untouched by the arithmetic outcome — it reports what
-        # is known about the house, not whether the ledger balanced.
-        assert result.confidence == self.BAD["confidence"]
-        assert any("mismatch" in c.lower() for c in result.concerns)
-
-    def test_a_consistent_response_is_not_re_asked(self):
+    def test_a_consistent_response_is_also_one_call(self):
         result, calls = self._run([self.GOOD])
         assert calls == 1
         assert result.score == self.GOOD["score"]
 
-    def test_batch_results_get_the_fallback(self):
-        """No re-ask is possible in a batch — breach goes straight to
-        keep-score-cap-confidence."""
+    def test_confidence_survives_the_derivation(self):
+        """Confidence is about the house, not the model's bookkeeping."""
+        result, _ = self._run([self.BAD])
+        assert result.confidence == self.BAD["confidence"]
+
+    def test_the_batch_path_derives_too(self):
+        """The batch writes the most scores — a full criteria rescore runs
+        only here — and used to be the weaker of the two paths."""
         import json as _json
         from unittest.mock import MagicMock
-        from app.scorer import parse_batch_result
+        from app.scorer import base_score, parse_batch_result
         item = MagicMock()
         item.custom_id = "listing_1"
         item.result.type = "succeeded"
         item.result.message.content = [MagicMock()]
         item.result.message.content[0].text = _json.dumps(self.BAD)
         result, _ = parse_batch_result(item, {"address": "T"})
-        assert result.score == self.BAD["score"]
-        assert result.confidence == self.BAD["confidence"]
-        assert any("mismatch" in c.lower() for c in result.concerns)
+        assert result.score == base_score() + 10
+        assert result.reported_score == self.BAD["score"]
 
 
 class TestProposedV76CriteriaFile:
@@ -2185,15 +2209,16 @@ class TestConfidenceMeansOneThing:
                              soft_points=soft, confidence=confidence)
 
     def test_an_arithmetic_breach_no_longer_demotes_confidence(self):
-        from app.scorer import reconcile_score_arithmetic
-        out = reconcile_score_arithmetic(self._result(99, {"a": 19}))
+        from app.scorer import derive_score_from_ledger
+        out = derive_score_from_ledger(self._result(99, {"a": 19}))
         assert out.confidence == "high"
 
     def test_the_breach_is_still_reported(self):
-        """Not hidden — it stays in concerns and /scoring-integrity counts it."""
-        from app.scorer import reconcile_score_arithmetic
-        out = reconcile_score_arithmetic(self._result(99, {"a": 19}))
-        assert any("mismatch" in c.lower() for c in out.concerns)
+        """Not hidden — the model's own number stays in concerns, and
+        /scoring-integrity still counts score-vs-ledger as a tripwire."""
+        from app.scorer import derive_score_from_ledger
+        out = derive_score_from_ledger(self._result(99, {"a": 19}))
+        assert any("99" in c for c in out.concerns)
 
     def test_no_evidence_caps_confidence_at_low(self):
         """41 listings with nothing scraped came back "medium" — non-compliance
@@ -2230,15 +2255,244 @@ class TestConfidenceMeansOneThing:
     def test_a_well_evidenced_breaching_listing_keeps_high(self):
         """The exact population that was being mislabelled: complete data, a
         ledger that does not add up."""
-        from app.scorer import cap_confidence_to_evidence, reconcile_score_arithmetic
-        r = reconcile_score_arithmetic(self._result(99, {"a": 19}))
+        from app.scorer import cap_confidence_to_evidence, derive_score_from_ledger
+        r = derive_score_from_ledger(self._result(99, {"a": 19}))
         r = cap_confidence_to_evidence(
             r, {"evidence_available": {"images": 30, "description": True}})
         assert r.confidence == "high"
-        assert any("mismatch" in c.lower() for c in r.concerns)
+        assert any("derived" in c.lower() for c in r.concerns)
 
-    def test_both_paths_apply_the_evidence_cap(self):
+    def test_every_ai_path_runs_the_same_post_processing(self):
+        """Three call sites, one pipeline. The JSON-retry path had grown to
+        skip all of it — reject validation, ledger derivation and the evidence
+        cap — so a first malformed response followed by a good one stored the
+        model's own number with nothing checked."""
         import inspect
         from app.scorer import ai_score_listing, parse_batch_result
-        for fn in (ai_score_listing, parse_batch_result):
-            assert "cap_confidence_to_evidence" in inspect.getsource(fn)
+        source = inspect.getsource(ai_score_listing)
+        assert source.count("finalize_ai_result") == 2, "first attempt and retry"
+        assert "finalize_ai_result" in inspect.getsource(parse_batch_result)
+
+    def test_the_pipeline_covers_all_three_steps(self):
+        import inspect
+        from app.scorer import finalize_ai_result
+        source = inspect.getsource(finalize_ai_result)
+        for step in ("invalid_reject", "derive_score_from_ledger",
+                     "cap_confidence_to_evidence"):
+            assert step in source, step
+
+    def test_a_retried_response_is_derived_not_taken_raw(self):
+        """The regression this path had: retry succeeds, score stored raw."""
+        import json as _json
+        from unittest.mock import MagicMock, patch
+        from app.config import settings as real_settings
+        from app.scorer import ai_score_listing, base_score
+        good = {"score": base_score() + 42, "verdict": "Worth Touring",
+                "hard_results": [], "soft_points": {"a": 10}, "concerns": [],
+                "confidence": "high", "reasoning": "r", "property_summary": "p"}
+        broken = MagicMock()
+        broken.content = [MagicMock()]
+        broken.content[0].text = "not json at all"
+        ok = MagicMock()
+        ok.content = [MagicMock()]
+        ok.content[0].text = _json.dumps(good)
+        with patch("app.scorer.settings") as ms:
+            ms.anthropic_api_key = "sk-test"
+            ms.ai_eval_model = "m"
+            ms.score_base_points = real_settings.score_base_points
+            with patch("app.scorer._build_user_message", return_value=[]), \
+                 patch("app.scorer._build_system_prompt", return_value=[]):
+                client = MagicMock()
+                client.messages.create.side_effect = [broken, ok]
+                with patch("app.scorer.anthropic.Anthropic", return_value=client):
+                    result, _ = ai_score_listing({"address": "T"}, "C")
+        assert result.score == base_score() + 10
+        assert result.reported_score == good["score"]
+
+
+class TestDeterministicLedgerEntriesArePinned:
+    """Two ledger lines are decided by data we already hold, not judgement.
+
+    While the ledger was advisory this barely mattered. Now the ledger IS the
+    score, so a wrong line item is a wrong score — and measured over the stored
+    corpus the model's school entry disagreed with the ranking data on 39 of
+    216 listings (18%) and its commute entry on 76 of 211 (36%). The school
+    ones are the dangerous half: several homes in sub-50th-percentile districts
+    were written down as -10 (mediocre) instead of -30, which is precisely the
+    "quietly restoring homes the buyer ruled out" case.
+    """
+
+    @staticmethod
+    def _result(soft, score=70):
+        from app.models import ScoringResult
+        return ScoringResult(score=score, verdict="Worth Touring", soft_points=soft)
+
+    @staticmethod
+    def _listing(percentile=None, commute=None):
+        data = {"address": "T"}
+        if percentile is not None:
+            data["school_data"] = {"elementary": [{"rank_percentile": percentile}]}
+        if commute is not None:
+            data["commute_minutes"] = commute
+        return data
+
+    def test_an_understated_school_penalty_is_corrected(self):
+        from app.scorer import pin_deterministic_ledger_entries
+        out = pin_deterministic_ledger_entries(
+            self._result({"school_district": -10}), self._listing(percentile=27))
+        assert out.soft_points["school_district"] == -30
+
+    def test_each_school_band_maps_to_the_criteria_table(self):
+        from app.scorer import _school_band
+        assert _school_band(96) == 18
+        assert _school_band(95) == 18
+        assert _school_band(85) == 8
+        assert _school_band(60) == -10
+        assert _school_band(27) == -30
+
+    def test_an_unranked_district_costs_nothing(self):
+        """Absence of evidence is not evidence against the house — the
+        criteria are explicit that missing data never deducts."""
+        from app.scorer import pin_deterministic_ledger_entries
+        out = pin_deterministic_ledger_entries(
+            self._result({"school_district_unknown": -10}), self._listing())
+        assert out.soft_points["school_district_unknown"] == 0
+
+    def test_stacked_school_entries_collapse_to_one(self):
+        """Scoring elementary, middle and high separately triples the
+        adjustment and breaks the 0-100 scale."""
+        from app.scorer import pin_deterministic_ledger_entries
+        out = pin_deterministic_ledger_entries(
+            self._result({"elementary_school": 18, "middle_school": 18,
+                          "high_school": 18}),
+            self._listing(percentile=96))
+        school_keys = [k for k in out.soft_points if "school" in k]
+        assert len(school_keys) == 1
+        assert out.soft_points[school_keys[0]] == 18
+
+    def test_the_commute_curve_is_pinned_to_the_measured_time(self):
+        from app.scorer import pin_deterministic_ledger_entries
+        out = pin_deterministic_ledger_entries(
+            self._result({"commute_curve": -2}), self._listing(commute=98))
+        assert out.soft_points["commute_curve"] == -8
+
+    def test_the_station_drive_penalty_is_left_alone(self):
+        """It stacks on top of the door-to-door curve; it is not the curve."""
+        from app.scorer import pin_deterministic_ledger_entries
+        out = pin_deterministic_ledger_entries(
+            self._result({"commute_curve": -2, "station_drive_penalty": -4}),
+            self._listing(commute=98))
+        assert out.soft_points["station_drive_penalty"] == -4
+
+    def test_an_unknown_commute_costs_nothing_like_an_unranked_school(self):
+        """Both pins follow the criteria's standing rule — missing data never
+        deducts — and they follow it the same way. Zeroing schools on a null
+        percentile while leaving the model's commute guess in place was two
+        rules for one situation."""
+        from app.scorer import pin_deterministic_ledger_entries
+        out = pin_deterministic_ledger_entries(
+            self._result({"commute_curve": -5}), self._listing())
+        assert out.soft_points["commute_curve"] == 0
+
+    def test_an_override_is_stated_in_concerns_not_just_logged(self):
+        """The buyer audits the ledger now. Code-written values under
+        model-written keys, with nothing saying so, is a worse kind of opaque
+        than the number this replaced."""
+        from app.scorer import pin_deterministic_ledger_entries
+        out = pin_deterministic_ledger_entries(
+            self._result({"school_district": -10}), self._listing(percentile=27))
+        assert any("overriding the model" in c for c in out.concerns)
+        assert any("-10 -> -30" in c for c in out.concerns)
+
+    def test_an_unchanged_ledger_gets_no_concern(self):
+        from app.scorer import pin_deterministic_ledger_entries
+        out = pin_deterministic_ledger_entries(
+            self._result({"school_district": -30}), self._listing(percentile=27))
+        assert out.concerns == []
+
+    def test_the_parking_note_is_not_the_commute_curve(self):
+        from app.scorer import pin_deterministic_ledger_entries
+        out = pin_deterministic_ledger_entries(
+            self._result({"commute_curve": -2, "commute_parking_buffer_note": 0}),
+            self._listing(commute=98))
+        assert out.soft_points["commute_parking_buffer_note"] == 0
+        assert out.soft_points["commute_curve"] == -8
+
+    def test_a_missing_entry_is_never_invented(self):
+        """An absent line means the model folded the factor in somewhere
+        unknowable; adding one would double-count it."""
+        from app.scorer import pin_deterministic_ledger_entries
+        out = pin_deterministic_ledger_entries(
+            self._result({"garage": 2}), self._listing(percentile=27, commute=98))
+        assert out.soft_points == {"garage": 2}
+
+    def test_pinning_happens_before_the_score_is_derived(self):
+        """The corrected entry has to reach the arithmetic, not just the
+        displayed breakdown."""
+        from app.scorer import base_score, derive_score_from_ledger
+        out = derive_score_from_ledger(
+            self._result({"school_district": -10}), self._listing(percentile=27))
+        assert out.score == base_score() - 30
+
+
+class TestProposedV78CriteriaFile:
+    """docs/criteria-v78-proposed.txt is v77 with the price curve recalibrated
+    to the buyer's real budget: the penalty ramp starts at $1.65M instead of
+    $2.0M, because "target range $1.5M-$2M, no penalty inside it" ranked a
+    $1.95M home level with a $1.55M one and he cannot pay that.
+    """
+
+    @staticmethod
+    def _text():
+        from pathlib import Path
+        path = Path(__file__).resolve().parent.parent / "docs" / "criteria-v78-proposed.txt"
+        return path.read_text()
+
+    def test_every_gate_and_the_base_still_parse_in_sync(self):
+        """A price-curve edit must not move a hard gate. The band in the hard
+        requirements is deliberately wider than the budget so the curve does
+        the ranking and nothing is hidden from the board."""
+        from app.scorer import hard_gate_drift
+        drift = hard_gate_drift(self._text())
+        assert drift["drifted"] == [], drift["drifted"]
+        assert drift["in_sync"] is True
+
+    def test_the_hard_band_is_unchanged_from_v77(self):
+        from app.scorer import hard_gate_drift
+        checks = hard_gate_drift(self._text())["checks"]
+        assert checks["price_min"]["criteria"] == 850000
+        assert checks["price_max"]["criteria"] == 2250000
+
+    def test_the_penalty_ramp_starts_at_1_65m(self):
+        text = self._text()
+        assert "$1.65M" in text
+        assert "the target range is $1.5M-$2M" not in text
+
+    def test_being_under_budget_still_earns_no_bonus(self):
+        """Half the live board sits under $1.4M, so paying for cheapness would
+        lift 47 homes across the alert threshold and rank nothing."""
+        text = self._text()
+        assert "no penalty and no bonus" in text
+
+    def test_the_pinned_bands_block_matches_the_code(self):
+        """The pin reverts whatever the model wrote, so prose that disagrees
+        with _SCHOOL_BANDS/_COMMUTE_BANDS is not a softer weight — it is a
+        number that does nothing. /health has to say so."""
+        from app.scorer import hard_gate_drift
+        checks = hard_gate_drift(self._text())["checks"]
+        assert checks["school_bands"]["in_sync"] is True
+        assert checks["commute_bands"]["in_sync"] is True
+
+    def test_a_moved_band_is_flagged(self):
+        from app.scorer import hard_gate_drift
+        text = self._text().replace("school: 95:+18, 80:+8, 50:-10, 0:-30",
+                                    "school: 95:+18, 80:+8, 50:-15, 0:-30")
+        assert "school_bands" in hard_gate_drift(text)["drifted"]
+
+    def test_criteria_with_no_pinned_block_count_as_in_sync(self):
+        """Same rule as every other threshold: dropping the wording should
+        raise a parser warning, not silently flip enforcement."""
+        from app.scorer import hard_gate_drift
+        drift = hard_gate_drift("Base score: 50")
+        assert drift["checks"]["school_bands"]["criteria"] is None
+        assert "school_bands" not in drift["drifted"]

@@ -11,8 +11,40 @@ from app.models import ParsedListing
 from app.parsers.base import EmailParser
 
 PRICE_RE = re.compile(r"\$\s*([\d,]+(?:\.\d{2})?)")
-BEDS_RE = re.compile(r"(\d+)\s*(?:bd|bed|bedroom)s?", re.IGNORECASE)
-BATHS_RE = re.compile(r"(\d+)\s*(?:ba|bath|bathroom)s?", re.IGNORECASE)
+# The unit token has to END on a word boundary. Without the \b these matched
+# inside street names: "406 Bedford Rd" parsed as 406 bedrooms (the "Bed" of
+# Bedford) and "1203 Baldwin Rd" as 1203 bathrooms (the "Ba" of Baldwin). Both
+# survived into scoring, and 406 Bedford Rd is a home the buyer is actively
+# bidding on. Any street starting Bed-, Bd-, Ba-, Bath- hits this.
+BEDS_RE = re.compile(r"(\d+)\s*(?:bd|bed|bedroom)s?\b", re.IGNORECASE)
+BATHS_RE = re.compile(r"(\d+)\s*(?:ba|bath|bathroom)s?\b", re.IGNORECASE)
+
+# Belt and braces for the next street name nobody predicted. Two rules, and
+# neither is a plausibility cap on its own: 139 Scarborough Rd really does have
+# 14 bedrooms in 15,000 sqft, and a cap at a dozen would erase it — which is
+# the same mistake the DB repair deliberately avoids.
+#   1. A count above 30 is not a single-family listing at all.
+#   2. A count that BOTH equals the address's street number AND is too large
+#      to be a room count is the bug this file just fixed.
+# Both conditions are needed on rule 2. "4 bd" at "4 Bianca Way" is a real
+# four-bedroom house and matching on the street number alone would erase it —
+# production has that exact listing. Either way the field is left unknown
+# rather than wrong: unknown costs no points, a wrong number scores a fiction.
+_MAX_PLAUSIBLE_ROOMS = 30
+_SUSPICIOUS_ABOVE = 12
+_LEADING_NUMBER_RE = re.compile(r"\s*(\d+)")
+
+
+def _plausible_room_count(value: int | None, address: str | None = None) -> int | None:
+    """None unless the count could belong to a real single-family home."""
+    if value is None:
+        return None
+    if not 1 <= value <= _MAX_PLAUSIBLE_ROOMS:
+        return None
+    if value <= _SUSPICIOUS_ABOVE:
+        return value
+    match = _LEADING_NUMBER_RE.match(address or "")
+    return None if match and int(match.group(1)) == value else value
 SQFT_RE = re.compile(r"([\d,]+)\s*(?:sq\s*\.?\s*ft|sqft|SF)", re.IGNORECASE)
 MLS_RE = re.compile(r"MLS\s*#?\s*(\d+)", re.IGNORECASE)
 ZIP_RE = re.compile(r"\b(\d{5})(?:-\d{4})?\b")
@@ -424,6 +456,12 @@ class PlainTextParser(EmailParser):
                 if redfin_match.group(4):
                     listing.zip_code = listing.zip_code or redfin_match.group(4)
                 listing.address = addr_slug.title()
+
+        # Sanity-check the room counts now that the address is known — the
+        # street number is what they get confused with, so the check cannot run
+        # before the address is parsed.
+        listing.bedrooms = _plausible_room_count(listing.bedrooms, listing.address)
+        listing.bathrooms = _plausible_room_count(listing.bathrooms, listing.address)
 
         # Last resort: just grab the zip code
         if not listing.town and not listing.address:

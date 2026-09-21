@@ -607,3 +607,100 @@ $1,200,000 4 Beds 2.5 Baths 3,034 sqft
         listings = self.parser.parse(None, text)
         assert len(listings) == 1
         assert listings[0].lot_acres is None
+
+
+class TestStreetNamesAreNotRoomCounts:
+    """A street name must never be read as a bed or bath count.
+
+    "406 Bedford Rd" parsed as 406 bedrooms and "1203 Baldwin Rd" as 1203
+    bathrooms, because the unit token was allowed to match inside the street
+    name. Both reached production and were scored. 406 Bedford Rd is a home
+    the buyer is actively bidding on, so the board showed a fiction for the
+    one listing that mattered most.
+    """
+
+    def setup_method(self):
+        self.parser = PlainTextParser()
+
+    def _one(self, text):
+        listings = self.parser.parse(None, text)
+        assert len(listings) == 1
+        return listings[0]
+
+    def test_bedford_is_a_street_not_four_hundred_bedrooms(self):
+        listing = self._one(
+            "406 Bedford Rd\nChappaqua, New York 10514\n$1,800,000\n"
+            "4 bd, 3 ba, 2,907 sqft\nMLS #123456\n"
+        )
+        assert listing.address == "406 Bedford Rd"
+        assert listing.bedrooms == 4
+        assert listing.bathrooms == 3
+
+    def test_baldwin_is_a_street_not_twelve_hundred_bathrooms(self):
+        listing = self._one(
+            "1203 Baldwin Rd\nYorktown Heights, New York 10598\n$1,200,000\n"
+            "4 bd, 3 ba, 3,166 sqft\nMLS #123457\n"
+        )
+        assert listing.address == "1203 Baldwin Rd"
+        assert listing.bathrooms == 3
+
+    def test_a_street_name_alone_yields_no_room_counts(self):
+        listing = self._one(
+            "406 Bedford Rd\nChappaqua, New York 10514\n$1,800,000\n"
+            "MLS #123458\n"
+        )
+        assert listing.bedrooms is None
+        assert listing.bathrooms is None
+
+    def test_an_implausible_count_is_dropped_not_stored(self):
+        """Unknown costs no points; a wrong number scores a fiction."""
+        listing = self._one(
+            "7 Sample St\nArmonk, New York 10504\n$1,500,000\n"
+            "406 bd, 1203 ba, 2,907 sqft\nMLS #123459\n"
+        )
+        assert listing.bedrooms is None
+        assert listing.bathrooms is None
+
+    def test_ordinary_spellings_still_parse(self):
+        for text, beds, baths in [
+            ("4 bd, 3 ba", 4, 3),
+            ("4 beds, 3 baths", 4, 3),
+            ("4 bedrooms, 3 bathrooms", 4, 3),
+        ]:
+            listing = self._one(
+                f"7 Sample St\nArmonk, New York 10504\n$1,500,000\n{text}\n"
+                "MLS #123460\n"
+            )
+            assert listing.bedrooms == beds, text
+            assert listing.bathrooms == baths, text
+
+    def test_a_large_but_real_room_count_survives(self):
+        """139 Scarborough Rd has 14 bedrooms in 15,000 sqft. A flat
+        plausibility cap would erase it, which is the mistake the DB repair
+        deliberately avoids — so the parser uses the same street-number rule."""
+        listing = self._one(
+            "139 Scarborough Rd\nBriarcliff Manor, New York 10510\n$2,000,000\n"
+            "14 bd, 7 ba, 15,000 sqft\nMLS #123461\n"
+        )
+        assert listing.bedrooms == 14
+        assert listing.bathrooms == 7
+
+    def test_a_small_count_matching_the_street_number_is_kept(self):
+        """"4 bd" at "4 Bianca Way" is a real four-bedroom house, and
+        production has that exact listing. Matching on the street number alone
+        would erase it, so the number must ALSO be too large to be a room
+        count before it is treated as a parse artifact."""
+        listing = self._one(
+            "4 Bianca Way\nAmawalk, New York 10501\n$1,500,000\n"
+            "4 bd, 3 ba\nMLS #123462\n"
+        )
+        assert listing.bedrooms == 4
+        assert listing.bathrooms == 3
+
+    def test_an_absurd_count_is_dropped_even_without_a_street_match(self):
+        listing = self._one(
+            "7 Sample St\nArmonk, New York 10504\n$1,500,000\n"
+            "80 bd, 3 ba\nMLS #123463\n"
+        )
+        assert listing.bedrooms is None
+        assert listing.bathrooms == 3
