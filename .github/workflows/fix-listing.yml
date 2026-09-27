@@ -1,0 +1,85 @@
+name: Fix listing fields
+
+# Corrects stored fields on one listing via POST /manage/update-listing.
+#
+# Why this exists: the same reason apply-criteria does. The endpoint needs
+# MANAGE_KEY, sessions that find a bad row do not hold that key (deliberately —
+# it belongs in secret stores, not chat transcripts or containers), so fixing a
+# misparsed field was a manual curl. This makes it a button.
+#
+# The parser bugs that produce these rows get fixed in code; this is for the
+# rows already written, where the source email is gone or the value can only
+# come from a human. 406 Bedford Rd is the case it was built for: stored at
+# $1,175,000 against an actual $1.8M list, on a home Aki was bidding on.
+#
+# Uses the same MANAGE_KEY Actions secret as apply-criteria.
+
+on:
+  workflow_dispatch:
+    inputs:
+      listing_id:
+        description: "Listing ID to correct (the id field from /listings)"
+        required: true
+      fields:
+        description: 'JSON object of fields to set, e.g. {"price": 1800000}'
+        required: true
+        default: '{"price": 1800000}'
+      force:
+        description: "Overwrite values that are already set (leave false to fill only blanks)"
+        required: true
+        default: "true"
+        type: choice
+        options: ["true", "false"]
+
+jobs:
+  fix:
+    name: Correct listing fields
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: POST the correction
+        env:
+          MANAGE_KEY: ${{ secrets.MANAGE_KEY }}
+          LISTING_ID: ${{ inputs.listing_id }}
+          FIELDS: ${{ inputs.fields }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          if [ -z "$MANAGE_KEY" ]; then
+            echo "The MANAGE_KEY Actions secret is not set. Add it under" >&2
+            echo "Settings → Secrets and variables → Actions (same value as the Fly secret)." >&2
+            exit 1
+          fi
+          python3 - <<'PY'
+          import json, os, urllib.error, urllib.request
+
+          try:
+              fields = json.loads(os.environ["FIELDS"])
+          except json.JSONDecodeError as e:
+              raise SystemExit(f"`fields` is not valid JSON: {e}")
+          if not isinstance(fields, dict) or not fields:
+              raise SystemExit("`fields` must be a non-empty JSON object")
+
+          body = dict(fields)
+          body["listing_id"] = int(os.environ["LISTING_ID"])
+          body["force"] = os.environ["FORCE"] == "true"
+
+          req = urllib.request.Request(
+              "https://listings-analyzer.fly.dev/manage/update-listing",
+              data=json.dumps(body).encode(),
+              headers={
+                  "x-manage-key": os.environ["MANAGE_KEY"],
+                  "content-type": "application/json",
+              },
+              method="POST",
+          )
+          try:
+              with urllib.request.urlopen(req, timeout=60) as resp:
+                  out = json.loads(resp.read().decode())
+          except urllib.error.HTTPError as e:
+              raise SystemExit(f"HTTP {e.code}: {e.read().decode()[:400]}")
+          print(f"Updated listing {out.get('listing_id')}: {out.get('updated')}")
+          print(
+              "The scored inputs changed, so the next gap scan will requeue this "
+              "listing for rescore on its fingerprint."
+          )
+          PY
