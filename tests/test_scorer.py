@@ -2496,3 +2496,54 @@ class TestProposedV78CriteriaFile:
         drift = hard_gate_drift("Base score: 50")
         assert drift["checks"]["school_bands"]["criteria"] is None
         assert "school_bands" not in drift["drifted"]
+
+
+class TestProposedV79CriteriaFile:
+    """v79 moves the price curve down again and reprices the pool.
+
+    Aki bid $1.725M on an $1.8M listing, stepped back from it as too high, and
+    said he would prefer around $1.5M — so the flat no-penalty zone that ran to
+    $1.65M is gone. And he rejected that same house over its in-ground pool,
+    which v78 priced at -4, roughly the weight of a deck.
+    """
+
+    @staticmethod
+    def _text():
+        from pathlib import Path
+        path = Path(__file__).resolve().parent.parent / "docs" / "criteria-v79-proposed.txt"
+        return path.read_text()
+
+    def test_every_gate_and_band_still_parses_in_sync(self):
+        """A soft-weight edit must not move a gate or a pinned band."""
+        from app.scorer import hard_gate_drift
+        drift = hard_gate_drift(self._text())
+        assert drift["drifted"] == [], drift["drifted"]
+
+    def test_the_hard_band_is_unchanged(self):
+        """The gate stays wide so the curve ranks and nothing is hidden — a
+        home listed above the ceiling can still sell below it."""
+        from app.scorer import hard_gate_drift
+        checks = hard_gate_drift(self._text())["checks"]
+        assert checks["price_min"]["criteria"] == 850000
+        assert checks["price_max"]["criteria"] == 2250000
+
+    def test_the_flat_zone_now_ends_at_the_ideal(self):
+        text = self._text()
+        assert "at or below $1.5M (the ideal" in text
+        assert "at or below $1.65M" not in text
+
+    def test_the_pool_is_priced_as_a_near_dealbreaker(self):
+        text = self._text()
+        assert "-25 in-ground pool" in text
+        assert "-4 in-ground pool" not in text
+
+    def test_the_pool_still_costs_nothing_when_unknown(self):
+        """It carries near-dealbreaker weight now and is unknown on 102 of 142
+        live listings, so the standing rule has to be restated where someone
+        editing this section will see it."""
+        text = self._text()
+        assert "deduct nothing" in text
+        assert "missing data never costs points" in text
+
+    def test_being_under_budget_still_earns_no_bonus(self):
+        assert "no penalty and no bonus" in self._text()
