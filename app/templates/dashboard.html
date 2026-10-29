@@ -1107,6 +1107,11 @@
   }
 
   /* Pending badge */
+  .leverage-badge {
+    display: inline-block; padding: 2px 7px; border-radius: 4px;
+    font-size: 11px; font-weight: 600; background: #78350f; color: #fed7aa;
+    white-space: nowrap;
+  }
   .pending-badge {
     display: inline-flex;
     align-items: center;
@@ -2222,6 +2227,17 @@ function buildCard(l) {
       : 'AI confidence is low due to missing data — score may not be reliable. Use \u21bb Retry to re-score.';
     badgeRow.appendChild(el('span', {className: 'uncertain-badge', title: uncertainTitle}, '\u2753 Score uncertain'));
   }
+  /* What this listing has done over time. A home cut twice and sitting four
+     months is a different negotiation from one listed last week, and the board
+     used to show both identically — which is the position the $1.725M offer on
+     406 Bedford was made from. Only rendered when there is something to say. */
+  if (l.leverage_note) {
+    badgeRow.appendChild(el('span', {
+      className: 'leverage-badge',
+      title: 'Observed price history. The app sees a listing when an alert ' +
+             'email arrives, so days tracked is a floor on true days on market.'
+    }, '\u2193 ' + l.leverage_note));
+  }
   if (badgeRow.children.length > 0) {
     info.appendChild(badgeRow);
   }
@@ -2554,6 +2570,39 @@ function buildEnrichmentSection(commuteMinutes, commuteData, schoolData) {
  * HOA: use stored hoa_monthly directly.
  */
 function estimateMonthlyCosts(l) {
+  /* The server computes this now (carrying_cost on /listings), with the real
+     tax bill when the listing page published one and the mortgage included.
+     What follows is the old client-side estimate, kept only as a fallback for
+     listings the server could not price. It guessed 2.2% of price for tax,
+     which overstated every listing by about a quarter against the 1.72-1.79%
+     the pages actually report, and it left the mortgage out entirely — so its
+     "total" was never the number the decision turns on. */
+  var cc = l.carrying_cost;
+  if (cc) {
+    return {
+      taxMonthly: cc.tax_monthly,
+      taxNote: cc.sources && cc.sources.tax === 'assumed'
+        ? 'Tax estimated at 1.74% of price (no figure published for this home)'
+        : 'Tax as published on the listing page',
+      utilMonthly: cc.utilities_monthly,
+      sqftIsEst: false,
+      ageNote: '',
+      maintMonthly: cc.maintenance_monthly,
+      hoaMonthly: cc.hoa_monthly,
+      mortgageMonthly: cc.monthly_payment,
+      mortgageRate: cc.mortgage_rate,
+      rateAssumed: !cc.sources || cc.sources.rate === 'assumed',
+      allIn: cc.cash_monthly,
+      economic: cc.economic_monthly,
+      vsRent: cc.vs_rent_monthly,
+      breakEven: cc.appreciation_needed_pct,
+      capital: cc.capital_required,
+      measuredInputs: cc.measured_inputs,
+      total: cc.cash_monthly,
+      fromServer: true,
+      hasData: true
+    };
+  }
   var taxData = parseJSON(l.property_tax_json, null);
 
   /* --- Property tax --- */
@@ -2652,15 +2701,43 @@ function buildMonthlyCosts(l) {
     addRow('HOA', '$' + c.hoaMonthly.toLocaleString() + '/mo');
   }
 
-  addRow('Total (excl. mortgage)', '$' + c.total.toLocaleString() + '/mo', 'cost-total-row');
+  if (c.fromServer && c.mortgageMonthly != null) {
+    addRow('Mortgage (P&I @ ' + c.mortgageRate + '%)',
+           '$' + c.mortgageMonthly.toLocaleString() + '/mo');
+    addRow('Total all-in', '$' + c.allIn.toLocaleString() + '/mo', 'cost-total-row');
+    /* The two figures the decision actually turns on. Everything above is
+       bookkeeping; these say whether the house beats staying put. */
+    if (c.vsRent != null) {
+      addRow('vs. renting at $5,000',
+             (c.vsRent >= 0 ? '+$' : '-$') + Math.abs(c.vsRent).toLocaleString() + '/mo',
+             'cost-total-row');
+    }
+    if (c.breakEven != null) {
+      addRow('Needs appreciation of', c.breakEven + '%/yr to break even');
+    }
+  } else {
+    addRow('Total (excl. mortgage)', '$' + c.total.toLocaleString() + '/mo', 'cost-total-row');
+  }
 
   section.appendChild(grid);
 
   // Footnote
-  var noteText = 'Rough estimates only. ';
-  if (c.taxNote) noteText += c.taxNote + '. ';
-  if (c.ageNote) noteText += 'Utilities adjusted for ' + c.ageNote + '. ';
-  noteText += 'Maintenance = 1% of price/yr.';
+  var noteText = '';
+  if (c.fromServer) {
+    noteText += c.measuredInputs > 0
+      ? c.measuredInputs + ' of the inputs come from the listing page; the rest are assumptions. '
+      : 'Every input is an assumption — this listing page published no payment figures. ';
+    if (c.rateAssumed) noteText += 'Mortgage rate assumed. ';
+    if (c.taxNote) noteText += c.taxNote + '. ';
+    noteText += 'Economic cost (interest only, plus the return given up on $' +
+      (c.capital ? c.capital.toLocaleString() : '0') + ' of capital) is $' +
+      (c.economic ? c.economic.toLocaleString() : '0') + '/mo.';
+  } else {
+    noteText = 'Rough estimates only. ';
+    if (c.taxNote) noteText += c.taxNote + '. ';
+    if (c.ageNote) noteText += 'Utilities adjusted for ' + c.ageNote + '. ';
+    noteText += 'Maintenance = 1% of price/yr.';
+  }
   section.appendChild(el('div', {className: 'cost-note'}, noteText));
 
   return section;
