@@ -134,6 +134,81 @@ def carrying_cost(listing: dict, *, rate: float | None = None) -> dict | None:
     }
 
 
+def offer_for_ceiling(listing: dict, ceiling: int | None = None) -> dict | None:
+    """The purchase price whose all-in monthly cost hits the buyer's ceiling.
+
+    The ceiling is a PURCHASE price, not a search filter. The buyer's position
+    is "list can run a bit above $1.5M, we offer $1.5M" — so the useful number
+    is not whether the ask fits the budget but what offer would make it fit,
+    and whether that discount is one anyone actually gets.
+
+    No assumed discount goes into the score. The score prices the ask, because
+    the ask is the only price that exists yet. This is reported alongside it.
+
+    Returns None without a price. `achievable` is deliberately conservative:
+    the buyer's one observed negotiation was $1.8M -> $1.725M, 4.2% off ask.
+    """
+    price = listing.get("price")
+    if not price or price < 100_000:
+        return None
+    ceiling = ceiling or settings.monthly_cost_ceiling
+    if not ceiling:
+        return None
+
+    # Bisect on price: every cost component is monotonic in it.
+    lo, hi = 100_000, price
+    at_ask = carrying_cost(listing)
+    if not at_ask:
+        return None
+    if at_ask["cash_monthly"] <= ceiling:
+        return {
+            "ceiling_monthly": ceiling,
+            "offer_needed": price,
+            "discount_pct": 0.0,
+            "within_budget_at_ask": True,
+            "achievable": True,
+        }
+    for _ in range(40):
+        mid = (lo + hi) / 2
+        probe = dict(listing)
+        probe["price"] = int(mid)
+        # A published tax bill belongs to the house at its assessed value, not
+        # to a hypothetical purchase price; scale it so the probe is coherent.
+        if listing.get("tax_monthly"):
+            probe["tax_monthly"] = round(listing["tax_monthly"] * mid / price)
+        c = carrying_cost(probe)
+        if not c:
+            break
+        if c["cash_monthly"] > ceiling:
+            hi = mid
+        else:
+            lo = mid
+    offer = int(lo)
+    discount = round((price - offer) / price * 100, 1)
+    return {
+        "ceiling_monthly": ceiling,
+        "offer_needed": offer,
+        "discount_pct": discount,
+        "within_budget_at_ask": False,
+        "achievable": discount <= settings.achievable_discount_pct,
+    }
+
+
+def offer_summary(listing: dict) -> str | None:
+    """One line about the gap between the ask and what the buyer would pay."""
+    o = offer_for_ceiling(listing)
+    if not o:
+        return None
+    if o["within_budget_at_ask"]:
+        return f"Within budget at the ${listing['price']:,} ask"
+    verdict = "a realistic cut" if o["achievable"] else "more than anyone usually gets off ask"
+    return (
+        f"Needs an offer near ${o['offer_needed']:,} "
+        f"({o['discount_pct']:g}% off ask) to stay under "
+        f"${o['ceiling_monthly']:,}/mo — {verdict}"
+    )
+
+
 def cost_summary(listing: dict) -> str | None:
     """One line for a listing card."""
     c = carrying_cost(listing)

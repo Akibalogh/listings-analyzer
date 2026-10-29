@@ -3184,3 +3184,50 @@ class TestCarryingCostSeparatesCashFromEconomicCost:
         cheap = carrying_cost({"price": 1_200_000})["economic_monthly"]
         dear = carrying_cost({"price": 1_725_000})["economic_monthly"]
         assert cheap < dear
+
+
+class TestOfferNeededToHitTheCeiling:
+    """The ceiling is a PURCHASE price, not a search filter. The buyer's
+    position is "list can run a bit above $1.5M, we offer $1.5M", so the useful
+    number is not whether the ask fits the budget but what offer would make it
+    fit, and whether that discount is one anyone actually gets.
+    """
+
+    def test_a_listing_inside_budget_says_so(self):
+        from app.carrying_cost import offer_for_ceiling
+        o = offer_for_ceiling({"price": 1_250_000})
+        assert o["within_budget_at_ask"] is True
+        assert o["discount_pct"] == 0.0
+
+    def test_the_offer_needed_is_computed_from_the_ceiling(self):
+        from app.carrying_cost import offer_for_ceiling
+        o = offer_for_ceiling({"price": 1_650_000})
+        assert o["within_budget_at_ask"] is False
+        assert 1_450_000 <= o["offer_needed"] <= 1_600_000
+        assert 5 <= o["discount_pct"] <= 12
+
+    def test_an_unreachable_discount_is_flagged_as_such(self):
+        """The buyer's one observed negotiation was 4.2% off ask, so a 15%
+        ask-to-offer gap is a different house, not a harder negotiation."""
+        from app.carrying_cost import offer_for_ceiling
+        assert offer_for_ceiling({"price": 1_800_000})["achievable"] is False
+        assert offer_for_ceiling({"price": 1_560_000})["achievable"] is True
+
+    def test_a_published_tax_bill_is_scaled_to_the_probe_price(self):
+        """A bill belongs to the house at its assessed value, not to a
+        hypothetical purchase price; leaving it fixed makes the probe
+        incoherent."""
+        from app.carrying_cost import offer_for_ceiling
+        with_tax = offer_for_ceiling({"price": 1_800_000, "tax_monthly": 2_600})
+        assert with_tax["offer_needed"] > 0
+        assert with_tax["within_budget_at_ask"] is False
+
+    def test_no_price_means_no_answer(self):
+        from app.carrying_cost import offer_for_ceiling
+        assert offer_for_ceiling({"price": None}) is None
+
+    def test_the_score_still_prices_the_ask_not_the_hoped_for_offer(self):
+        """No assumed discount may reach the score. The ask is the only price
+        that exists yet."""
+        from app.carrying_cost import carrying_cost
+        assert carrying_cost({"price": 1_650_000})["price"] == 1_650_000

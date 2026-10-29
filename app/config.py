@@ -143,6 +143,14 @@ class Settings(BaseSettings):
     # quoting 6.38% while the analysis assumed 7.32%, which moved the monthly
     # economic cost by about $1,100.
     mortgage_rate_assumed: float = 0.0638
+    # The all-in monthly cost of a $1.5M purchase, which is the price the buyer
+    # intends to OFFER. It is a purchase ceiling, not a search filter: list
+    # price can run above it, since the ask is only an opening position.
+    monthly_cost_ceiling: int = 12_000
+    # The largest discount off ask worth calling realistic. The buyer's one
+    # observed negotiation was $1.8M -> $1.725M, 4.2% off, so anything much
+    # beyond this is a different house, not a harder negotiation.
+    achievable_discount_pct: float = 6.0
 
     # Redfin saved-search filter. Redfin CAPTCHA-gates the scrape, so this no
     # longer feeds a scheduled sync — it's used only by the pending-detection
