@@ -303,6 +303,10 @@ async def lifespan(app: FastAPI):
             # Before the gap scan: a bed/bath count that is really the street
             # number changes the score fingerprint when it clears, so the scan
             # that follows picks these listings up for rescore on its own.
+            # Seed a baseline ask for listings that predate price history, so
+            # the first cut after this ships is measurable instead of needing a
+            # second cut to compare against.
+            db.backfill_price_history()
             repaired = db.repair_street_number_room_counts()
             if repaired:
                 logger.warning(f"Repaired street-number room counts on {repaired}")
@@ -738,6 +742,33 @@ def filtered_dashboard():
     return HTMLResponse(content=html_path.read_text())
 
 
+def _attach_market_history(listings: list[dict]) -> None:
+    """Add negotiating history and carrying cost to every listing.
+
+    One query for the whole board rather than one per listing: the dashboard
+    renders this as a badge on every card, and 485 round trips for a badge is
+    not a trade worth making.
+    """
+    from app.carrying_cost import carrying_cost
+    from app.market_history import leverage_note, market_history
+
+    try:
+        history = db.price_history_by_listing()
+    except Exception:
+        logger.exception("Could not load price history")
+        history = {}
+    for l in listings:
+        h = market_history(
+            l.get("created_at"), history.get(l.get("id")), l.get("price"))
+        l["market_history"] = h
+        l["leverage_note"] = leverage_note(h)
+        try:
+            l["carrying_cost"] = carrying_cost(l)
+        except Exception:
+            logger.exception("Carrying cost failed for listing %s", l.get("id"))
+            l["carrying_cost"] = None
+
+
 @app.get("/listings")
 def list_listings():
     """Get all scored listings. Public — no auth required.
@@ -747,6 +778,7 @@ def list_listings():
     counts as present (its school check treated the string "null" as data).
     """
     listings = db.get_all_listings()
+    _attach_market_history(listings)
     return {
         "count": len(listings),
         "listings": listings,

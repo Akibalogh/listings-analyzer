@@ -101,6 +101,14 @@ CREATE TABLE IF NOT EXISTS alerts (
     delivered BOOLEAN,
     sent_at TEXT DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS price_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    listing_id INTEGER NOT NULL REFERENCES listings(id) ON DELETE CASCADE,
+    price INTEGER NOT NULL,
+    seen_at TEXT DEFAULT (datetime('now')),
+    source TEXT
+);
 """
 
 # Postgres-compatible schema (uses SERIAL, TIMESTAMP, etc.)
@@ -188,6 +196,14 @@ CREATE TABLE IF NOT EXISTS alerts (
     channel TEXT,
     delivered BOOLEAN,
     sent_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS price_history (
+    id SERIAL PRIMARY KEY,
+    listing_id INTEGER NOT NULL REFERENCES listings(id) ON DELETE CASCADE,
+    price INTEGER NOT NULL,
+    seen_at TIMESTAMP DEFAULT NOW(),
+    source TEXT
 );
 """
 
@@ -453,6 +469,133 @@ def repair_street_number_room_counts() -> list[int]:
                 f"{'bathrooms' if baths == street_number else ''}"
             )
     return repaired
+
+
+_PAYMENT_COLUMNS = (
+    "tax_monthly", "insurance_monthly", "hoa_monthly_page",
+    "payment_total_monthly", "page_mortgage_rate", "payment_source",
+)
+
+
+def save_payment_breakdown(listing_id: int, payment: dict | None) -> bool:
+    """Store the payment figures a listing page published. No-op when empty.
+
+    Overwrites on every successful scrape rather than filling blanks only: a
+    tax bill and a quoted mortgage rate both move, and a stale figure here
+    would be scored as a current one.
+    """
+    if not payment:
+        return False
+    fields = {k: payment[k] for k in _PAYMENT_COLUMNS if payment.get(k) is not None}
+    if not fields:
+        return False
+    ph = _placeholder()
+    assignments = ", ".join(f"{k} = {ph}" for k in fields)
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            f"UPDATE listings SET {assignments} WHERE id = {ph}",
+            (*fields.values(), listing_id),
+        )
+    logger.info(f"Listing {listing_id} payment data: {fields}")
+    return True
+
+
+def record_price(listing_id: int, price: int | None, source: str = "email") -> bool:
+    """Append a price observation, unless it repeats the last one.
+
+    The poller has always DETECTED price changes — _update_duplicate applies
+    them and re-scores — but nothing recorded that a change happened. So the
+    board could say a home costs $1.69M and not that it was listed at $1.85M
+    in March and cut twice. That history is the whole of a buyer's negotiating
+    position, and it was being thrown away on arrival.
+
+    Deduped against the latest row so repeated alert emails about an unchanged
+    listing do not fill the table.
+    """
+    if not price or price < 100_000:
+        return False
+    ph = _placeholder()
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            f"SELECT price FROM price_history WHERE listing_id = {ph} "
+            f"ORDER BY seen_at DESC, id DESC LIMIT 1",
+            (listing_id,),
+        )
+        row = cur.fetchone()
+        if row and row[0] == price:
+            return False
+        cur.execute(
+            f"INSERT INTO price_history (listing_id, price, source) "
+            f"VALUES ({ph}, {ph}, {ph})",
+            (listing_id, price, source),
+        )
+    return True
+
+
+def get_price_history(listing_id: int) -> list[dict]:
+    """Every recorded price for one listing, oldest first."""
+    ph = _placeholder()
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            f"SELECT price, seen_at, source FROM price_history "
+            f"WHERE listing_id = {ph} ORDER BY seen_at ASC, id ASC",
+            (listing_id,),
+        )
+        return [
+            {"price": r[0], "seen_at": str(r[1]), "source": r[2]}
+            for r in cur.fetchall()
+        ]
+
+
+def price_history_by_listing() -> dict[int, list[tuple[int, str]]]:
+    """Every listing's price observations in one query, oldest first.
+
+    One query, because the dashboard needs this for the whole board and 485
+    round trips to render a badge is not a trade worth making.
+    """
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT listing_id, price, seen_at FROM price_history "
+            "ORDER BY listing_id, seen_at ASC, id ASC"
+        )
+        out: dict[int, list[tuple[int, str]]] = {}
+        for listing_id, price, seen_at in cur.fetchall():
+            out.setdefault(listing_id, []).append((price, str(seen_at)))
+        return out
+
+
+def backfill_price_history() -> int:
+    """Seed one row per listing that has a price and no history yet.
+
+    The table starts empty against a board of 485 listings whose current price
+    is the only one anyone recorded. Seeding gives every listing a baseline so
+    the FIRST cut after this ships is measurable, instead of waiting for a
+    second cut to have something to compare against. Marked 'seed' so it is
+    never mistaken for an observed listing price.
+    """
+    ph = _placeholder()
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT l.id, l.price FROM listings l "
+            "LEFT JOIN price_history p ON p.listing_id = l.id "
+            "WHERE l.price IS NOT NULL AND p.id IS NULL"
+        )
+        rows = cur.fetchall()
+        for listing_id, price in rows:
+            if price and price >= 100_000:
+                cur.execute(
+                    f"INSERT INTO price_history (listing_id, price, source) "
+                    f"VALUES ({ph}, {ph}, 'seed')",
+                    (listing_id, price),
+                )
+    if rows:
+        logger.info(f"Seeded price history for {len(rows)} listing(s)")
+    return len(rows)
 
 
 def save_processed_email(
@@ -767,6 +910,17 @@ def save_listing(listing: ParsedListing, score: ScoringResult, email_id: int, en
             (listing_id, score.score, score.verdict, hard_json, soft_json, concerns_json, score.confidence),
         )
 
+        # The opening ask, on the same cursor as the listing itself. There are
+        # four save_listing() call sites and this must never be the one someone
+        # forgets: without a first observation there is nothing for a later cut
+        # to be measured against.
+        if listing.price and listing.price >= 100_000:
+            cur.execute(
+                f"INSERT INTO price_history (listing_id, price, source) "
+                f"VALUES ({ph}, {ph}, 'listed')",
+                (listing_id, listing.price),
+            )
+
         return listing_id
 
 
@@ -918,6 +1072,15 @@ def _migrate_add_columns():
         ("listings", "agent_name", "TEXT"),
         ("listings", "sqft_source", "TEXT"),
         ("listings", "sqft_verified", "BOOLEAN"),
+        # The listing page's own payment breakdown. tax_monthly is the first
+        # real tax figure in this project: ORPTS gives fractional assessments
+        # with no millage rate, from which no bill can be derived.
+        ("listings", "tax_monthly", "INTEGER"),
+        ("listings", "insurance_monthly", "INTEGER"),
+        ("listings", "hoa_monthly_page", "INTEGER"),
+        ("listings", "payment_total_monthly", "INTEGER"),
+        ("listings", "page_mortgage_rate", "REAL"),
+        ("listings", "payment_source", "TEXT"),
         ("scores", "evaluation_method", "TEXT DEFAULT 'deterministic'"),
         ("scores", "criteria_version", "INTEGER"),
         ("scores", "ai_reasoning", "TEXT"),

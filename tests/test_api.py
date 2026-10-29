@@ -2707,3 +2707,90 @@ class TestClampedAndUnreadableLedgersReportHonestly:
         })
         assert "ground_floor_bedroom" not in out.soft_points
         assert any("could not be read as points" in c for c in out.concerns)
+
+
+class TestPriceHistoryIsRecorded:
+    """_update_duplicate() always DETECTED price changes — it applies them and
+    re-scores. Nothing recorded that a change happened, so the board could say
+    a home costs $1.69M and not that it was listed at $1.85M and cut twice.
+    That history is the whole of a buyer's negotiating position.
+    """
+
+    def test_a_repeat_price_is_not_recorded_twice(self, tmp_path, monkeypatch):
+        from app import db
+        from app.config import settings
+        monkeypatch.setattr(settings, "database_url", f"sqlite:///{tmp_path/'t.db'}")
+        db.init_db()
+        from app.models import ParsedListing, ScoringResult
+        eid = db.save_processed_email(gmail_id="g1", message_id="", sender="s",
+                                      subject="s", parser_used="t", listings_found=1)
+        lid = db.save_listing(
+            ParsedListing(source_format="t", address="1 A St", town="T", state="NY",
+                          zip_code="10000", price=1_850_000),
+            ScoringResult(score=0, verdict="Reject"), eid)
+        assert db.record_price(lid, 1_850_000) is False      # unchanged
+        assert db.record_price(lid, 1_780_000) is True
+        assert db.record_price(lid, 1_780_000) is False
+        assert [r["price"] for r in db.get_price_history(lid)] == [1_850_000, 1_780_000]
+
+    def test_the_opening_ask_is_recorded_on_save(self, tmp_path, monkeypatch):
+        """Four save_listing() call sites; without a first observation there is
+        nothing for a later cut to be measured against."""
+        from app import db
+        from app.config import settings
+        monkeypatch.setattr(settings, "database_url", f"sqlite:///{tmp_path/'t2.db'}")
+        db.init_db()
+        from app.models import ParsedListing, ScoringResult
+        eid = db.save_processed_email(gmail_id="g2", message_id="", sender="s",
+                                      subject="s", parser_used="t", listings_found=1)
+        lid = db.save_listing(
+            ParsedListing(source_format="t", address="2 B St", town="T", state="NY",
+                          zip_code="10000", price=1_400_000),
+            ScoringResult(score=0, verdict="Reject"), eid)
+        assert db.get_price_history(lid)[0]["price"] == 1_400_000
+
+    def test_a_nonsense_price_is_refused(self, tmp_path, monkeypatch):
+        from app import db
+        from app.config import settings
+        monkeypatch.setattr(settings, "database_url", f"sqlite:///{tmp_path/'t3.db'}")
+        db.init_db()
+        assert db.record_price(1, None) is False
+        assert db.record_price(1, 500) is False
+
+
+class TestMarketHistoryReportsOnlyWhatWasObserved:
+    def test_cuts_and_reduction_are_derived(self):
+        from datetime import datetime, timezone
+        from app.market_history import leverage_note, market_history
+        h = market_history(
+            "2026-07-01T00:00:00+00:00",
+            [(1_850_000, "2026-07-01T00:00:00+00:00"),
+             (1_780_000, "2026-08-15T00:00:00+00:00"),
+             (1_690_000, "2026-09-20T00:00:00+00:00")],
+            1_690_000, now=datetime(2026, 10, 29, tzinfo=timezone.utc))
+        assert h["price_cuts"] == 2
+        assert h["reduction_pct"] == 8.6
+        assert h["days_tracked"] == 120
+        assert "cut 2x" in leverage_note(h)
+
+    def test_a_rounding_wobble_is_not_a_cut(self):
+        from app.market_history import market_history
+        h = market_history("2026-10-01T00:00:00+00:00",
+                           [(1_500_000, "2026-10-01T00:00:00+00:00")], 1_499_000)
+        assert h["price_cuts"] == 0
+
+    def test_a_fresh_listing_has_no_leverage_note(self):
+        """Silence beats a sentence that says nothing."""
+        from datetime import datetime, timezone
+        from app.market_history import leverage_note, market_history
+        h = market_history("2026-10-25T00:00:00+00:00",
+                           [(1_690_000, "2026-10-25T00:00:00+00:00")], 1_690_000,
+                           now=datetime(2026, 10, 29, tzinfo=timezone.utc))
+        assert leverage_note(h) is None
+
+    def test_it_is_called_days_tracked_not_days_on_market(self):
+        """The app only knows when an alert email first arrived, which is a
+        floor on days-on-market, not the list date. Naming it days_on_market
+        would claim a date nobody here has."""
+        from app.market_history import market_history
+        assert "days_tracked" in market_history("2026-01-01T00:00:00+00:00", [], 1)

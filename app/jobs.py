@@ -283,6 +283,7 @@ def _has_images(listing: dict) -> bool:
 def _handle_scrape_desc(listing: dict) -> None:
     from app.parsers.onehome import (
         _search_redfin_url,
+        last_payment_breakdown,
         last_scrape_trail,
         scrape_listing_description,
         transport_throttled,
@@ -345,6 +346,11 @@ def _handle_scrape_desc(listing: dict) -> None:
     )
     if image_urls:
         db.add_listing_images(listing["id"], image_urls)
+    # The page's own payment breakdown, if it published one. This is the only
+    # real tax figure in the system: the ORPTS assessments are fractional with
+    # no millage rate, so no bill can be computed from them, and the dashboard
+    # was guessing 2.2% of price against the 1.72-1.79% these pages report.
+    db.save_payment_breakdown(listing["id"], last_payment_breakdown())
     if not description and not image_urls and not listing.get("description"):
         # Name the stage that failed. The bare message said only that the
         # scrape came back empty, which is equally true of a metered Jina

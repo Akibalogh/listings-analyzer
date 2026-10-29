@@ -3072,3 +3072,115 @@ class TestEveryUrlTypeUsesTheFetchableSource:
              patch.object(O, "_scrape_static", return_value=("d", [])):
             O.scrape_listing_description("https://www.redfin.com/NY/X/1/home/1")
             assert fetch.call_count == 0
+
+
+class TestPaymentBreakdownFromListingPages:
+    """Trulia and Zillow publish a payment calculator on every listing page and
+    the scraper discarded it. Two listings captured it by accident, inside the
+    description paragraph, which is how it was found. It carries the only real
+    tax figures in the system: the ORPTS data is fractional assessments with no
+    millage rate, so no bill can be computed from it, and the dashboard fell
+    back to guessing 2.2% of price against the 1.72-1.79% these pages report.
+    """
+
+    WIDGET = (
+        "Provided by Walk Score and Local Logic Payment calculator $9,149 per "
+        "month Reset Principal and interest $6,937 Property taxes $1,992 HOA "
+        "dues $0 Home insurance $220 Utilities Add Down payment 20% ($278,000) "
+        "Home price $1,390,000 Loan details 30-yr fixed, 6.38% Takes about"
+    )
+
+    def test_the_whole_breakdown_is_extracted(self):
+        from app.parsers.onehome import payment_from_markdown
+        out = payment_from_markdown(self.WIDGET)
+        assert out["tax_monthly"] == 1992
+        assert out["insurance_monthly"] == 220
+        assert out["hoa_monthly_page"] == 0
+        assert out["payment_total_monthly"] == 9149
+        assert out["page_home_price"] == 1390000
+        assert out["payment_source"] == "page-widget"
+
+    def test_the_market_mortgage_rate_comes_with_it(self):
+        """The analysis assumed 7.32% while pages were quoting 6.38%, worth
+        about $1,100/mo of economic cost at $1.725M."""
+        from app.parsers.onehome import payment_from_markdown
+        assert payment_from_markdown(self.WIDGET)["page_mortgage_rate"] == 6.38
+
+    def test_an_annual_figure_in_prose_is_converted_to_monthly(self):
+        """"with only $21,452 in taxes" is a yearly bill. Storing it as a
+        monthly one would understate the house by a factor of twelve."""
+        from app.parsers.onehome import payment_from_markdown
+        out = payment_from_markdown("3-bedroom home, with only $21,452 in taxes, shows pride")
+        assert out["tax_monthly"] == 1788
+        assert out["payment_source"] == "description-annual"
+
+    def test_a_page_with_no_payment_block_yields_nothing(self):
+        from app.parsers.onehome import payment_from_markdown
+        assert payment_from_markdown("Charming colonial with a new roof.") == {}
+        assert payment_from_markdown("") == {}
+
+    def test_an_absurd_effective_rate_is_discarded(self):
+        """A wrong tax number is worse than no tax number once the score
+        depends on it."""
+        from app.parsers.onehome import payment_from_markdown
+        out = payment_from_markdown("Property taxes $99,000 Home price $1,390,000")
+        assert "tax_monthly" not in out
+
+    def test_a_plausible_rate_survives_the_check(self):
+        from app.parsers.onehome import payment_from_markdown
+        out = payment_from_markdown("Property taxes $2,088 Home price $1,400,000")
+        assert out["tax_monthly"] == 2088
+
+
+class TestCarryingCostSeparatesCashFromEconomicCost:
+    """Reporting one as the other is how "$9,300/mo more" gets quoted: that
+    figure counts principal as a cost and ignores opportunity cost on ~$395k,
+    two errors in opposite directions.
+    """
+
+    MEASURED = {"price": 1_390_000, "tax_monthly": 1992, "insurance_monthly": 220,
+                "page_mortgage_rate": 6.38, "payment_source": "page-widget"}
+
+    def test_principal_is_savings_not_cost(self):
+        from app.carrying_cost import carrying_cost
+        c = carrying_cost(self.MEASURED)
+        assert c["monthly_interest"] < c["monthly_payment"]
+        assert c["economic_monthly"] < c["cash_monthly"] + c["monthly_interest"]
+
+    def test_the_page_rate_beats_the_assumption(self):
+        from app.carrying_cost import carrying_cost
+        assert carrying_cost(self.MEASURED)["mortgage_rate"] == 6.38
+        assert carrying_cost(self.MEASURED)["sources"]["rate"] == "listing page"
+
+    def test_a_measured_tax_beats_the_default(self):
+        from app.carrying_cost import carrying_cost
+        measured = carrying_cost(self.MEASURED)
+        assumed = carrying_cost({"price": 1_390_000})
+        assert measured["tax_monthly"] == 1992
+        assert measured["sources"]["tax"] == "page-widget"
+        assert assumed["sources"]["tax"] == "assumed"
+
+    def test_how_many_inputs_were_measured_is_reported(self):
+        """A number built from one measured figure and four assumptions should
+        not be presented as confidently as one built from five."""
+        from app.carrying_cost import carrying_cost
+        assert carrying_cost(self.MEASURED)["measured_inputs"] == 3
+        assert carrying_cost({"price": 1_390_000})["measured_inputs"] == 0
+
+    def test_the_break_even_appreciation_is_reported(self):
+        """The number the whole decision turns on: at $1.725M and 6.38% the
+        house must appreciate about 6%/yr to match a $5,000 rent."""
+        from app.carrying_cost import carrying_cost
+        c = carrying_cost({"price": 1_725_000})
+        assert 5.5 <= c["appreciation_needed_pct"] <= 6.5
+
+    def test_no_price_means_no_number(self):
+        from app.carrying_cost import carrying_cost
+        assert carrying_cost({"price": None}) is None
+        assert carrying_cost({"price": 500}) is None
+
+    def test_a_cheaper_house_always_costs_less(self):
+        from app.carrying_cost import carrying_cost
+        cheap = carrying_cost({"price": 1_200_000})["economic_monthly"]
+        dear = carrying_cost({"price": 1_725_000})["economic_monthly"]
+        assert cheap < dear

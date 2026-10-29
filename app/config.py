@@ -131,6 +131,19 @@ class Settings(BaseSettings):
     # catching but could not cure).
     score_base_points: int = 50
 
+    # --- Carrying cost (app/carrying_cost.py) ---
+    # The buyer's alternative, and the terms a purchase would be made on. These
+    # are his circumstances, not market facts: a rent capped at 3% to 2032 is
+    # why almost nothing on the board clears the bar, and the opportunity cost
+    # is a founder's judgement about holding cash for runway.
+    current_rent_monthly: int = 5_000
+    down_payment_fraction: float = 0.20
+    opportunity_cost_rate: float = 0.05
+    # Only used when a listing page published no rate of its own. Pages were
+    # quoting 6.38% while the analysis assumed 7.32%, which moved the monthly
+    # economic cost by about $1,100.
+    mortgage_rate_assumed: float = 0.0638
+
     # Redfin saved-search filter. Redfin CAPTCHA-gates the scrape, so this no
     # longer feeds a scheduled sync — it's used only by the pending-detection
     # presence check (best-effort) and the manual /manage/sync-search endpoint.

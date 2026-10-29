@@ -379,6 +379,9 @@ def _update_duplicate(existing: tuple[int, str | None], listing: ParsedListing):
             )
         else:
             db.update_listing_fields_by_id(existing_id, force=True, price=new_price)
+            # Record it as well as apply it. The change was always detected
+            # here; only the fact that it happened was discarded.
+            db.record_price(existing_id, new_price, source="email")
             direction = "drop" if new_price < old_price else "increase"
             logger.info(
                 f"Listing #{existing_id} price {direction}: ${old_price:,} → ${new_price:,}"
@@ -392,6 +395,7 @@ def _update_duplicate(existing: tuple[int, str | None], listing: ParsedListing):
                 logger.exception(f"Could not queue re-score for listing #{existing_id}")
     elif new_price and not old_price:
         db.update_listing_fields_by_id(existing_id, price=new_price)
+        db.record_price(existing_id, new_price, source="email")
 
     # --- Status ---
     if listing.listing_status and listing.listing_status != existing_status:

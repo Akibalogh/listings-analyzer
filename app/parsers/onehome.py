@@ -347,6 +347,7 @@ def scrape_listing_description(
         return None, []
 
     _LAST_TRAIL.clear()
+    _LAST_PAYMENT.clear()
     url_lower = url.lower()
 
     # Trulia/Zillow first, for EVERY source. This used to sit inside the
@@ -647,10 +648,19 @@ def clear_transport_throttle() -> None:
 # has one signature used from four call sites; the alternative was threading an
 # out-param through all of them for telemetry.
 _LAST_TRAIL: list[str] = []
+# The payment breakdown from the page the description came from. Captured the
+# same way as the trail rather than threaded through the return signature,
+# which nine call sites share.
+_LAST_PAYMENT: dict = {}
 
 
 def _trail(stage: str) -> None:
     _LAST_TRAIL.append(stage)
+
+
+def last_payment_breakdown() -> dict:
+    """The payment figures from the last page scraped, if it published any."""
+    return dict(_LAST_PAYMENT)
 
 
 def last_scrape_trail() -> str:
@@ -834,6 +844,93 @@ def _description_from_markdown(markdown: str) -> str | None:
     return best
 
 
+# Trulia and Zillow publish a payment calculator on every listing page, and
+# the scraper was discarding it. Two listings captured it by accident, inside
+# the description paragraph, which is how it was found:
+#
+#   Payment calculator $9,149 per month Reset Principal and interest $6,937
+#   Property taxes $1,992 HOA dues $0 Home insurance $220 Utilities Add
+#   Down payment 20% ($278,000) Home price $1,390,000
+#   Loan details 30-yr fixed, 6.38%
+#
+# That is the monthly tax bill, HOA, insurance and the CURRENT market mortgage
+# rate, per listing, from a page already being fetched. It matters because the
+# app's only tax data is NY ORPTS fractional assessments with no millage rate,
+# from which no tax bill can be computed — the dashboard fell back to guessing
+# 2.2% of price, against the 1.72-1.79% these pages actually report.
+_PAY_FIELDS = {
+    "tax_monthly": r"Property\s+taxes?\s*\$\s*([\d,]+)",
+    "insurance_monthly": r"Home\s+insurance\s*\$\s*([\d,]+)",
+    "hoa_monthly_page": r"HOA\s+dues?\s*\$\s*([\d,]+)",
+    "principal_interest_monthly": r"Principal\s+and\s+interest\s*\$\s*([\d,]+)",
+    "payment_total_monthly": r"Payment\s+calculator\s*\$\s*([\d,]+)",
+    "page_home_price": r"Home\s+price\s*\$\s*([\d,]+)",
+}
+_PAY_RATE_RE = re.compile(r"Loan\s+details[^%]{0,40}?([\d.]{3,5})\s*%", re.IGNORECASE)
+# The widget quotes a monthly figure. An annual bill in a description reads
+# "$21,452 in taxes" instead, and must never be stored as a monthly number.
+_ANNUAL_TAX_RE = re.compile(
+    r"\$\s*([\d,]{5,9})\s*(?:/|\s+)?(?:in\s+)?(?:annual\s+|yearly\s+)?tax(?:es)?\b",
+    re.IGNORECASE)
+
+
+def payment_from_markdown(markdown: str) -> dict:
+    """Pull the page's payment breakdown. Empty dict when there is none.
+
+    Every value is cross-checked against the page's own stated home price
+    before it is trusted: a tax figure that implies an absurd effective rate is
+    a mis-parse, and a wrong tax number is worse than no tax number once the
+    score depends on it.
+    """
+    text = markdown or ""
+    out: dict[str, int | float | str] = {}
+    for field, pattern in _PAY_FIELDS.items():
+        m = re.search(pattern, text, re.IGNORECASE)
+        if not m:
+            continue
+        try:
+            out[field] = int(m.group(1).replace(",", ""))
+        except ValueError:
+            continue
+
+    m = _PAY_RATE_RE.search(text)
+    if m:
+        try:
+            rate = float(m.group(1))
+            if 0.5 <= rate <= 20:
+                out["page_mortgage_rate"] = rate
+        except ValueError:
+            pass
+
+    if "tax_monthly" not in out:
+        m = _ANNUAL_TAX_RE.search(text)
+        if m:
+            try:
+                annual = int(m.group(1).replace(",", ""))
+                if 2000 <= annual <= 200_000:
+                    out["tax_monthly"] = round(annual / 12)
+                    out["payment_source"] = "description-annual"
+            except ValueError:
+                pass
+
+    if not out:
+        return {}
+
+    # Sanity: the implied effective tax rate has to look like a real one.
+    price = out.get("page_home_price")
+    tax = out.get("tax_monthly")
+    if price and tax:
+        effective = tax * 12 / price
+        if not 0.002 <= effective <= 0.05:
+            logger.warning(
+                "Discarding payment tax $%s/mo on a $%s page — implies %.2f%%",
+                tax, price, effective * 100,
+            )
+            out.pop("tax_monthly", None)
+    out.setdefault("payment_source", "page-widget")
+    return out
+
+
 def _images_from_markdown(markdown: str, limit: int = 40) -> list[str]:
     """Listing photos from the markdown, de-duplicated and capped."""
     return list(dict.fromkeys(_MD_IMAGE_RE.findall(markdown or "")))[:limit]
@@ -889,8 +986,14 @@ def _discover_and_scrape_public_listing(
                 continue
             desc = _description_from_markdown(page)
             imgs = _images_from_markdown(page)
+            payment = payment_from_markdown(page)
             if desc or imgs:
-                _trail(f"{site}: ok {len(desc or '')}ch {len(imgs)} imgs")
+                _LAST_PAYMENT.clear()
+                _LAST_PAYMENT.update(payment)
+                _trail(
+                    f"{site}: ok {len(desc or '')}ch {len(imgs)} imgs"
+                    + (f" +payment" if payment.get("tax_monthly") else "")
+                )
                 return desc, imgs
             _trail(f"{site}: page had no content")
     return None, []
